@@ -1,0 +1,81 @@
+#CONTENT #themen-top,
+#CONTENT #region-top,
+#CONTENT [id^="region-select"],
+#CONTENT [id^="meta-nav"],
+#CONTENT div[style*="background-color:rgb(248, 248, 248)"]:has(span[style*="font-weight:700"]) {
+    display: none !important;
+}
+
+@media (max-width: 900px) {
+    
+    #CONTENT [id*="taboola" i],
+    #CONTENT [id*="outbrain" i],
+    #CONTENT [class*="taboola" i],
+    #CONTENT [class*="outbrain" i],
+    #CONTENT [id*="adslot" i],
+    #CONTENT [id*="ad-slot" i],
+    #CONTENT [id*="google_ads" i],
+    #CONTENT [class*="ad-container" i],
+    #CONTENT [class*="adcontainer" i],
+    #CONTENT [class*="banner-ad" i],
+    #CONTENT [class*="ad-banner" i],
+    #CONTENT iframe[src*="doubleclick" i],
+    #CONTENT iframe[src*="googlesyndication" i] {
+        display: none !important;
+    }
+
+    #CONTENT article,
+    #CONTENT main *,
+    #CONTENT main article,
+    #CONTENT main article > * {
+        max-width: 100% !important;
+    }
+
+    #CONTENT main {
+        padding-left: 16px !important;
+        padding-right: 16px !important;
+        box-sizing: border-box !important;
+    }
+
+    #CONTENT *[style*="width:2"][style*="px"]:not([style*="width:20px"]):not([style*="width:24px"]):not([style*="width:25px"]):not([style*="width:26px"]):not([style*="width:28px"]),
+    #CONTENT *[style*="width:3"][style*="px"]:not([style*="width:30px"]):not([style*="width:32px"]):not([style*="width:35px"]),
+    #CONTENT *[style*="width:4"][style*="px"]:not([style*="width:40px"]):not([style*="width:42px"]),
+    #CONTENT *[style*="width:5"][style*="px"]:not([style*="width:50px"]):not([style*="width:55px"]),
+    #CONTENT *[style*="width:6"][style*="px"]:not([style*="width:60px"]):not([style*="width:62px"]),
+    #CONTENT *[style*="width:7"][style*="px"]:not([style*="width:70px"]),
+    #CONTENT *[style*="width:8"][style*="px"]:not([style*="width:80px"]),
+    #CONTENT *[style*="width:9"][style*="px"]:not([style*="width:90px"]),
+    #CONTENT *[style*="width:10"][style*="px"],
+    #CONTENT *[style*="width: 2"][style*="px"],
+    #CONTENT *[style*="width: 3"][style*="px"],
+    #CONTENT *[style*="width: 4"][style*="px"],
+    #CONTENT *[style*="width: 5"][style*="px"],
+    #CONTENT *[style*="width: 6"][style*="px"],
+    #CONTENT *[style*="width: 7"][style*="px"],
+    #CONTENT *[style*="width: 8"][style*="px"],
+    #CONTENT *[style*="width: 9"][style*="px"],
+    #CONTENT *[style*="width: 10"][style*="px"] {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    #CONTENT *[style*="padding:15px"],
+    #CONTENT *[style*="padding-left:15px"],
+    #CONTENT *[style*="padding-right:15px"],
+    #CONTENT *[style*="margin-left:-15px"],
+    #CONTENT *[style*="margin-right:-15px"] {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="display:grid"],
+    #CONTENT *[style*="display: grid"],
+    #CONTENT *[style*="grid-template-columns"],
+    #CONTENT *[style*="display:flex"],
+    #CONTENT *[style*="display: flex"] {
+        display: block !important;
+        grid-template-columns: 1fr !important;
+    }
+}

@@ -1,0 +1,8 @@
+/.cache/
+/.cookies/
+/.env
+/config.json
+/page-final.html
+/.claude/
+/node_modules/
+/package-lock.json

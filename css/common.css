@@ -1,0 +1,320 @@
+#HEADER,
+#DIVSHARE,
+#DIVSHARE2,
+#hashtags,
+[id^="SHARE_"] {
+    display: none !important;
+}
+
+#SOLID {
+    background: #fff !important;
+    padding: 0 !important;
+}
+
+body > center > div:not([id])[style*="background-color:#EEEEEE"] {
+    display: none !important;
+}
+
+html {
+    background: #fff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow-x: clip !important;
+}
+
+body {
+    background: #fff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+body > center {
+    display: block !important;
+    text-align: left !important;
+}
+
+#CONTENT {
+    width: auto !important;
+    max-width: 1000px !important;
+    min-width: 0 !important;
+    margin: 0 auto !important;
+    border: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+}
+
+#CONTENT > .html1,
+#CONTENT > .html1 > .html {
+    width: auto !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    background: transparent !important;
+}
+
+footer,
+[role="contentinfo"],
+#CONTENT footer,
+#CONTENT [role="contentinfo"] {
+    display: none !important;
+}
+
+#CONTENT header,
+#CONTENT nav,
+#CONTENT [role="banner"],
+#CONTENT [role="navigation"] {
+    display: none !important;
+}
+
+#CONTENT article header,
+#CONTENT article nav,
+#CONTENT article [role="banner"],
+#CONTENT article [role="navigation"] {
+    display: revert !important;
+}
+
+#CONTENT [class*="advert" i],
+#CONTENT [class*="-ads-" i],
+#CONTENT [class*="-ads " i],
+#CONTENT [class*=" ads-" i],
+#CONTENT [class^="ads-" i],
+#CONTENT [class$="-ads" i],
+#CONTENT [class*="-ad-" i],
+#CONTENT [class*=" ad-" i],
+#CONTENT [class^="ad-" i],
+#CONTENT [class$="-ad" i],
+#CONTENT [class*="adslot" i],
+#CONTENT [class*="ad-slot" i],
+#CONTENT [class*="ad_slot" i],
+#CONTENT [class*="ad-container" i],
+#CONTENT [class*="adcontainer" i],
+#CONTENT [class*="anzeige" i],
+#CONTENT [class*="werbung" i],
+#CONTENT [class*="sponsored" i],
+#CONTENT [class*="sponsor-" i],
+#CONTENT [class*="promo-tile" i],
+#CONTENT [class*="taboola" i],
+#CONTENT [class*="outbrain" i],
+#CONTENT [class*="paywall" i],
+#CONTENT [class*="reg-wall" i],
+#CONTENT [class*="regwall" i],
+#CONTENT [class*="subscription" i],
+#CONTENT [class*="newsletter" i],
+#CONTENT [class*="cmp-" i],
+#CONTENT [class*="consent" i],
+#CONTENT [class*="cookie-banner" i],
+#CONTENT [class*="cookie_banner" i],
+#CONTENT [id*="advert" i],
+#CONTENT [id*="-ad-" i],
+#CONTENT [id*="adslot" i],
+#CONTENT [id*="ad-slot" i],
+#CONTENT [id*="anzeige" i],
+#CONTENT [id*="werbung" i],
+#CONTENT [id*="sponsored" i],
+#CONTENT [id*="taboola" i],
+#CONTENT [id*="outbrain" i],
+#CONTENT [id*="paywall" i],
+#CONTENT [id*="reg-wall" i],
+#CONTENT [id*="newsletter" i],
+#CONTENT [id*="cmp" i],
+#CONTENT [id*="consent" i],
+#CONTENT [data-ad],
+#CONTENT [data-ad-slot],
+#CONTENT [data-advert],
+#CONTENT [data-sponsored],
+#CONTENT [data-track-name*="ad" i],
+#CONTENT iframe[src*="doubleclick" i],
+#CONTENT iframe[src*="googlesyndication" i],
+#CONTENT iframe[src*="googletagservices" i],
+#CONTENT iframe[src*="googletagmanager" i],
+#CONTENT iframe[src*="amazon-adsystem" i],
+#CONTENT iframe[src*="adnxs" i],
+#CONTENT iframe[src*="taboola" i],
+#CONTENT iframe[src*="outbrain" i],
+#CONTENT iframe[id*="google_ads" i],
+#CONTENT [class*="sponsored-post" i],
+#CONTENT [class*="sponsoredPost" i],
+#CONTENT [class*="brandstudio" i],
+#CONTENT [class*="brand-studio" i],
+#CONTENT [data-type="advertorial" i],
+#CONTENT [data-type="ad" i],
+#CONTENT [data-component*="ad" i],
+#CONTENT [data-component*="Ad" i],
+#CONTENT [aria-label*="Werbung" i],
+#CONTENT [aria-label*="Anzeige" i],
+#CONTENT [aria-label*="Sponsored" i],
+#CONTENT [aria-label*="Advertisement" i] {
+    display: none !important;
+}
+
+#CONTENT article:has(> :first-child[class*="anzeige" i]),
+#CONTENT section:has(> :first-child[class*="anzeige" i]),
+#CONTENT div:has(> span:first-child[class*="anzeige" i]) {
+    display: none !important;
+}
+
+img,
+picture {
+    max-width: 100% !important;
+    height: auto !important;
+}
+video,
+iframe,
+svg {
+    max-width: 100% !important;
+}
+
+body > a[href="/"] {
+    z-index: 2147483647 !important;
+}
+
+@media (max-width: 900px) {
+    #SOLID,
+    #CONTENT {
+        max-width: 100vw !important;
+        overflow-x: clip !important;
+    }
+
+    #CONTENT *,
+    #CONTENT *::before,
+    #CONTENT *::after {
+        box-sizing: border-box !important;
+    }
+
+    #CONTENT * {
+        max-width: 100% !important;
+    }
+
+    #CONTENT h1,
+    #CONTENT h2,
+    #CONTENT h3,
+    #CONTENT h4,
+    #CONTENT h5,
+    #CONTENT h6 {
+        white-space: normal !important;
+        overflow-wrap: break-word !important;
+        word-wrap: break-word !important;
+    }
+
+    #CONTENT p,
+    #CONTENT li,
+    #CONTENT span,
+    #CONTENT a {
+        overflow-wrap: break-word !important;
+        word-wrap: break-word !important;
+    }
+
+    html,
+    body {
+        font-size: 16px !important;
+    }
+
+    #SOLID *[style*="min-width:"],
+    #SOLID *[style*="min-width: "] {
+        min-width: 0 !important;
+    }
+
+    #CONTENT *[style*="width:920px"],
+    #CONTENT *[style*="width: 920px"],
+    #CONTENT *[style*="width:960px"],
+    #CONTENT *[style*="width: 960px"],
+    #CONTENT *[style*="width:1000px"],
+    #CONTENT *[style*="width: 1000px"] {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    #CONTENT *[style*="display:flex"]:not([style*="flex-direction:column"]):not([style*="flex-direction: column"]),
+    #CONTENT *[style*="display: flex"]:not([style*="flex-direction:column"]):not([style*="flex-direction: column"]) {
+        flex-wrap: wrap !important;
+    }
+
+    #CONTENT *[style*="grid-template-columns"] {
+        grid-template-columns: 1fr !important;
+    }
+
+    #CONTENT figure:not(:has(img)):not(:has(picture)):not(:has(video)),
+    #CONTENT picture:not(:has(img)),
+    #CONTENT figure:has(> script:only-child) {
+        display: none !important;
+    }
+
+    #CONTENT figure,
+    #CONTENT picture {
+        height: auto !important;
+        min-height: 0 !important;
+        max-height: none !important;
+    }
+
+    #CONTENT img {
+        aspect-ratio: auto !important;
+        height: auto !important;
+        min-height: 0 !important;
+        object-fit: contain !important;
+    }
+
+    #CONTENT article {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        flex: 1 1 100% !important;
+    }
+
+    #CONTENT *[style*="position:absolute"],
+    #CONTENT *[style*="position: absolute"] {
+        max-width: 100% !important;
+    }
+
+    #CONTENT [class*="banner-ad" i],
+    #CONTENT [class*="ad-banner" i],
+    #CONTENT [class*="topbanner" i],
+    #CONTENT [class*="skyscraper" i] {
+        display: none !important;
+    }
+
+    #CONTENT *[style*="overflow-x:auto"],
+    #CONTENT *[style*="overflow-x: auto"],
+    #CONTENT *[style*="overflow-x:scroll"],
+    #CONTENT *[style*="overflow-x: scroll"] {
+        overflow-x: hidden !important;
+        scroll-snap-type: none !important;
+        max-width: 100% !important;
+    }
+
+    #CONTENT *[style*="position:absolute"][style*="left:"]:not([style*="left:0"]):not([style*="left: 0"]):not([style*="left:-"]):not([style*="left: -"]) {
+        left: 0 !important;
+    }
+
+    #CONTENT svg {
+        max-width: 100% !important;
+    }
+
+    #CONTENT nav ul,
+    #CONTENT nav ol,
+    #CONTENT [role="navigation"] ul,
+    #CONTENT [role="navigation"] ol {
+        flex-wrap: wrap !important;
+        flex-direction: column !important;
+        display: block !important;
+    }
+    #CONTENT nav li,
+    #CONTENT [role="navigation"] li {
+        width: 100% !important;
+        max-width: 100% !important;
+        display: block !important;
+        float: none !important;
+    }
+
+    #CONTENT *[style*="scroll-snap-align"] {
+        scroll-snap-align: none !important;
+    }
+
+    #CONTENT footer,
+    #CONTENT footer[style],
+    #CONTENT [role="contentinfo"],
+    #CONTENT [role="contentinfo"][style] {
+        display: none !important;
+    }
+}

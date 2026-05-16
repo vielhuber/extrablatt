@@ -1,0 +1,135 @@
+#CONTENT {
+    zoom: 0.85;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+
+@media (max-width: 900px) {
+    #SOLID,
+    #CONTENT {
+        max-width: calc(100vw / 0.85) !important;
+        width: calc(100vw / 0.85) !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT button[title*="merken" i],
+    #CONTENT button[aria-label*="Merkliste" i],
+    #CONTENT button[aria-label*="merken" i],
+    #CONTENT button[aria-label*="Audio" i],
+    #CONTENT button[aria-label*="Kopfhörer" i],
+    #CONTENT button[title*="Merkliste" i],
+    #CONTENT button[title*="Audio" i],
+    #CONTENT button:has(> svg[aria-label*="Merkliste" i]),
+    #CONTENT button:has(> svg[aria-label*="Kopfhörer" i]),
+    #CONTENT button:has(> svg use[*|href="#svg-bookmark"]),
+    #CONTENT button:has(> svg use[*|href="#svg-headphone"]),
+    #CONTENT zon-headphone,
+    #CONTENT zon-bookmark,
+    #CONTENT zon-audio-button {
+        display: none !important;
+    }
+
+    #CONTENT svg[aria-label*="abopflichtig" i],
+    #CONTENT svg[aria-label*="Z+" i] {
+        width: 24px !important;
+        max-width: 24px !important;
+        height: auto !important;
+        flex: 0 0 auto !important;
+    }
+
+    #CONTENT zon-comment-count {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        max-width: 40px !important;
+    }
+
+    #CONTENT article[style*="grid-template-columns:430px"],
+    #CONTENT div[style*="grid-template-columns:430px"] {
+        grid-template-columns: 1fr !important;
+        grid-template-areas: none !important;
+        margin-left: 8px !important;
+        margin-right: 8px !important;
+        margin-inline-start: 8px !important;
+        margin-inline-end: 8px !important;
+        max-width: calc(100% - 16px) !important;
+        width: auto !important;
+    }
+
+    #CONTENT article,
+    #CONTENT section {
+        margin-left: 8px !important;
+        margin-right: 8px !important;
+        max-width: calc(100% - 16px) !important;
+    }
+
+    #CONTENT *[style*="grid-template-columns:430px"] > * {
+        grid-column: auto !important;
+        grid-row: auto !important;
+    }
+
+    #CONTENT figure {
+        height: auto !important;
+        min-height: 0 !important;
+    }
+
+    #CONTENT figure:not(:has(img)):not(:has(picture)):not(:has(video)),
+    #CONTENT figure:has(> script:only-child),
+    #CONTENT picture:not(:has(img)) {
+        display: none !important;
+    }
+
+    #CONTENT *[style*="display:flex"],
+    #CONTENT *[style*="display: flex"] {
+        display: block !important;
+    }
+
+    #CONTENT *[style*="display:flex"] > *,
+    #CONTENT *[style*="display: flex"] > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT zon-carousel,
+    #CONTENT zon-carousel *[style*="grid-template-columns"] {
+        display: block !important;
+        grid-template-columns: 1fr !important;
+    }
+
+    #CONTENT zon-carousel > *,
+    #CONTENT zon-carousel *[style*="grid-area"],
+    #CONTENT zon-carousel *[style*="grid-column"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        grid-area: auto !important;
+        grid-column: auto !important;
+    }
+
+    #CONTENT picture,
+    #CONTENT img {
+        height: auto !important;
+        max-width: 100% !important;
+        min-height: 0 !important;
+        min-width: 0 !important;
+        object-fit: contain !important;
+    }
+
+    #CONTENT figure[style*="height:287px"],
+    #CONTENT figure[style*="height:286"] {
+        height: auto !important;
+    }
+
+    #CONTENT storifyme-story-item {
+        max-width: calc(100vw - 32px) !important;
+    }
+
+    #CONTENT footer {
+        display: none !important;
+    }
+
+    #CONTENT *:has(> a[href*="impressum" i]) {
+        display: none !important;
+    }
+}

@@ -1,0 +1,40 @@
+{
+    "ai": {
+        "temperature": 0.0,
+        "timeout": 60,
+        "max_tries": 2
+    },
+    "archive_fulltext_check": {
+        "min_text_chars": 8000,
+        "min_text_chars_per_paper": {
+            "paper-three": 999999
+        },
+        "stub_markers_per_paper": {
+            "paper-one": ["Read more with Plus", "Subscribe to read"],
+            "paper-two": ["Paywall stub marker"]
+        }
+    },
+    "categories": {
+        "Category A": [],
+        "Category B": ["Sub B1", "Sub B2"],
+        "Other": []
+    },
+    "papers": {
+        "paper-one": {
+            "url": "https://example.com",
+            "label": "Paper One",
+            "rss": "https://example.com/feed.rss"
+        },
+        "paper-two": {
+            "url": "https://example.org",
+            "label": "Paper Two",
+            "rss": "https://example.org/feed.xml",
+            "default_image": "https://example.org/fallback.png"
+        },
+        "paper-three": {
+            "url": "https://example.net",
+            "label": "Paper Three",
+            "rss": "https://example.net/sitemap.xml"
+        }
+    }
+}

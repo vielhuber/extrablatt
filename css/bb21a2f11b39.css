@@ -1,0 +1,126 @@
+@media (max-width: 900px) {
+    #CONTENT {
+        max-width: 100vw !important;
+    }
+
+    #CONTENT main > section:first-of-type,
+    #CONTENT main > article:first-of-type,
+    #CONTENT main > div:first-of-type > section:first-of-type {
+        display: none !important;
+    }
+
+    #CONTENT #superbannerWrapper,
+    #CONTENT #skyWrapper,
+    #CONTENT #sky_btfWrapper,
+    #CONTENT [id$="Wrapper"][id*="banner" i],
+    #CONTENT [id$="Wrapper"][id*="sky" i] {
+        display: none !important;
+    }
+
+    #CONTENT input[placeholder*="BILD-KI"],
+    #CONTENT textarea[placeholder*="BILD-KI"],
+    #CONTENT form:has(> input[placeholder*="BILD-KI"]),
+    #CONTENT form:has(> textarea[placeholder*="BILD-KI"]),
+    #CONTENT div:has(> input[placeholder*="BILD-KI"]),
+    #CONTENT div:has(> textarea[placeholder*="BILD-KI"]) {
+        display: none !important;
+    }
+
+    #CONTENT *[style*="width:1024px"],
+    #CONTENT *[style*="width: 1024px"],
+    #CONTENT *[style*="width:1224px"],
+    #CONTENT *[style*="width: 1224px"],
+    #CONTENT *[style*="width:990px"],
+    #CONTENT *[style*="width: 990px"] {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    #CONTENT section,
+    #CONTENT section > div,
+    #CONTENT article,
+    #CONTENT article > div,
+    #CONTENT article > a,
+    #CONTENT figure {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    #CONTENT *[style*="display:grid"],
+    #CONTENT *[style*="display: grid"],
+    #CONTENT *[style*="grid-template-columns"] {
+        display: block !important;
+        grid-template-columns: 1fr !important;
+    }
+
+    #CONTENT *[style*="display:grid"] > *,
+    #CONTENT *[style*="display: grid"] > *,
+    #CONTENT *[style*="grid-template-columns"] > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        grid-area: auto !important;
+        grid-column: auto !important;
+    }
+
+    #CONTENT *[style*="display:flex"][style*="overflow-x:auto"],
+    #CONTENT *[style*="display:flex"][style*="overflow-x: auto"],
+    #CONTENT *[style*="display: flex"][style*="overflow-x:auto"],
+    #CONTENT *[style*="display: flex"][style*="overflow-x: auto"] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        height: auto !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        overflow: visible !important;
+    }
+
+    #CONTENT *[style*="display:flex"][style*="overflow-x:auto"] > *,
+    #CONTENT *[style*="display:flex"][style*="overflow-x: auto"] > *,
+    #CONTENT *[style*="display: flex"][style*="overflow-x:auto"] > *,
+    #CONTENT *[style*="display: flex"][style*="overflow-x: auto"] > * {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    #CONTENT *[style*="scroll-snap-align"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        margin-bottom: 20px !important;
+    }
+
+    #CONTENT article,
+    #CONTENT figure,
+    #CONTENT a,
+    #CONTENT img {
+        max-width: 100% !important;
+    }
+
+    #CONTENT img {
+        width: 100% !important;
+        height: auto !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        object-fit: contain !important;
+    }
+
+    #CONTENT [style*="background-color:rgb(233, 236, 239)"] {
+        background-color: transparent !important;
+    }
+
+    #CONTENT [style*="position:fixed"],
+    #CONTENT [style*="position: fixed"] {
+        display: none !important;
+    }
+
+    #CONTENT footer {
+        display: none !important;
+    }
+
+    #CONTENT *:has(> a[href*="impressum" i]) {
+        display: none !important;
+    }
+}

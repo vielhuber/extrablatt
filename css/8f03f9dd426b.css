@@ -1,0 +1,132 @@
+#CONTENT [x-data*="404"] {
+    display: none !important;
+}
+
+#CONTENT button[title*="Merkliste" i],
+#CONTENT button[aria-label*="Merkliste" i],
+#CONTENT button[title*="Audio" i],
+#CONTENT button[aria-label*="Audio" i],
+#CONTENT svg[id^="spon-audio"],
+#CONTENT svg[id^="spon-bookmark"],
+#CONTENT svg[id^="spon-podcast"],
+#CONTENT svg[id^="spon-listen"],
+#CONTENT button:has(> svg[id^="spon-audio"]),
+#CONTENT button:has(> svg[id^="spon-bookmark"]),
+#CONTENT button:has(> svg[id^="spon-podcast"]) {
+    display: none !important;
+}
+
+#CONTENT svg[width]:not([width^="1"]):not([width="100%"]):not([width="auto"]) {
+    width: attr(width px) !important;
+    max-width: 64px !important;
+    flex: 0 0 auto !important;
+}
+
+#CONTENT {
+    zoom: 0.85;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+
+@media (max-width: 900px) {
+    #SOLID,
+    #CONTENT {
+        max-width: calc(100vw / 0.85) !important;
+        width: calc(100vw / 0.85) !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+}
+
+@media (max-width: 900px) {
+    #CONTENT article,
+    #CONTENT section {
+        max-width: calc(100% - 16px) !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+
+    #CONTENT *[style*="display:grid"],
+    #CONTENT *[style*="display: grid"],
+    #CONTENT *[style*="grid-template-columns"] {
+        display: block !important;
+        grid-template-columns: 1fr !important;
+    }
+
+    #CONTENT *[style*="display:grid"] > *,
+    #CONTENT *[style*="display: grid"] > *,
+    #CONTENT *[style*="grid-template-columns"] > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        grid-column: auto !important;
+        grid-row: auto !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="display:flex"],
+    #CONTENT *[style*="display: flex"] {
+        display: block !important;
+    }
+
+    #CONTENT *[style*="display:flex"] > *,
+    #CONTENT *[style*="display: flex"] > *,
+    #CONTENT *[style*="flex-shrink:0"],
+    #CONTENT *[style*="flex-shrink: 0"],
+    #CONTENT *[style*="width:33.333"],
+    #CONTENT *[style*="width: 33.333"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="display:flex"][style*="overflow-x"],
+    #CONTENT *[style*="display: flex"][style*="overflow-x"] {
+        display: block !important;
+    }
+
+    #CONTENT *[style*="display:flex"][style*="overflow-x"] > *,
+    #CONTENT *[style*="display: flex"][style*="overflow-x"] > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-bottom: 16px !important;
+    }
+
+    #CONTENT article * {
+        max-width: 100% !important;
+        min-width: 0 !important;
+        grid-column: auto !important;
+        grid-row: auto !important;
+    }
+
+    #CONTENT article span {
+        overflow-wrap: anywhere !important;
+    }
+
+    #CONTENT figure,
+    #CONTENT picture,
+    #CONTENT img {
+        max-width: 100% !important;
+        height: auto !important;
+        object-fit: contain !important;
+    }
+
+    #CONTENT footer {
+        display: none !important;
+    }
+
+    #CONTENT *:has(> a[href*="impressum" i]) {
+        display: none !important;
+    }
+
+    #CONTENT [id^="hs-widget-topmatches"] {
+        display: none !important;
+    }
+
+    #CONTENT article > a[style*="display:flex"],
+    #CONTENT article > a[style*="display: flex"] {
+        flex-direction: column !important;
+        align-items: stretch !important;
+    }
+}

@@ -1,0 +1,142 @@
+#CONTENT {
+    zoom: 0.85;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+
+@media (max-width: 900px) {
+    #SOLID,
+    #CONTENT {
+        max-width: calc(100vw / 0.85) !important;
+        width: calc(100vw / 0.85) !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="left:50%"],
+    #CONTENT *[style*="left: 50%"] {
+        left: auto !important;
+        transform: none !important;
+    }
+
+    #CONTENT *[style*="margin-left:20px"][style*="margin-right:20px"],
+    #CONTENT *[style*="margin-left: 20px"][style*="margin-right: 20px"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="grid-template-columns"] {
+        grid-template-columns: 1fr !important;
+        justify-content: stretch !important;
+    }
+
+    #CONTENT *[style*="grid-column-start:span"],
+    #CONTENT *[style*="grid-column-start: span"] {
+        grid-column: auto !important;
+        max-width: calc(100% - 32px) !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+
+    #CONTENT [id^="teaser-xl"],
+    #CONTENT [id^="teaser-"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="padding-left:24px"],
+    #CONTENT *[style*="padding-right:24px"],
+    #CONTENT *[style*="padding-left: 24px"],
+    #CONTENT *[style*="padding-right: 24px"] {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+
+    #CONTENT *[style*="column-gap:30px"],
+    #CONTENT *[style*="column-gap: 30px"] {
+        column-gap: 0 !important;
+    }
+
+    #CONTENT *[style*="margin-left:-20px"],
+    #CONTENT *[style*="margin-right:-20px"] {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT *[style*="z-index:500"] {
+        left: auto !important;
+        width: auto !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT [id^="pdg-"] {
+        display: none !important;
+    }
+
+    #CONTENT figure,
+    #CONTENT picture,
+    #CONTENT img {
+        height: auto !important;
+        min-height: 0 !important;
+        max-height: none !important;
+        object-fit: contain !important;
+    }
+
+    #CONTENT [id^="showcse"] article,
+    #CONTENT ul[role="list"] li article {
+        overflow: visible !important;
+        height: auto !important;
+        max-height: none !important;
+    }
+
+    #CONTENT [id^="showcse"] li *[style*="position:absolute"]:has(> picture),
+    #CONTENT [id^="showcse"] li *[style*="position: absolute"]:has(> picture),
+    #CONTENT ul[role="list"] li *[style*="position:absolute"]:has(> picture),
+    #CONTENT ul[role="list"] li *[style*="position: absolute"]:has(> picture) {
+        position: static !important;
+    }
+
+    #CONTENT [id^="showcse"] li img,
+    #CONTENT [id^="showcse"] li picture,
+    #CONTENT ul[role="list"] li img,
+    #CONTENT ul[role="list"] li picture {
+        max-height: 220px !important;
+        width: 100% !important;
+        object-fit: cover !important;
+    }
+
+    #CONTENT span[style*="padding-top"]:empty,
+    #CONTENT span[style*="padding-top:"]:empty {
+        display: none !important;
+    }
+
+    #CONTENT *[style*="display:flex"],
+    #CONTENT *[style*="display: flex"] {
+        display: block !important;
+    }
+
+    #CONTENT *[style*="display:flex"] > *,
+    #CONTENT *[style*="display: flex"] > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    #CONTENT footer,
+    #CONTENT footer[style],
+    #CONTENT footer[style*="display:flex"],
+    #CONTENT footer[style*="display: flex"] {
+        display: none !important;
+    }
+
+    #CONTENT *:has(> a[href*="impressum" i]) {
+        display: none !important;
+    }
+}

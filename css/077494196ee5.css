@@ -1,0 +1,83 @@
+#CONTENT app-header,
+#CONTENT app-stock-ticker,
+#CONTENT app-hmg-app-header,
+#CONTENT app-main-nav,
+#CONTENT app-side-nav {
+    display: none !important;
+}
+
+@media (max-width: 900px) {
+    
+    #CONTENT app-big-teaser-group section,
+    #CONTENT app-medium-teaser-group section,
+    #CONTENT app-small-teaser-group section,
+    #CONTENT app-teaser-group section {
+        display: block !important;
+        grid-template-columns: 1fr !important;
+    }
+
+    #CONTENT app-big-teaser-group section > *,
+    #CONTENT app-medium-teaser-group section > *,
+    #CONTENT app-small-teaser-group section > *,
+    #CONTENT app-teaser-group section > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-bottom: 24px !important;
+    }
+
+    #CONTENT app-advertisement,
+    #CONTENT app-content-advertisement,
+    #CONTENT app-static-advertisements > div:first-child {
+        display: none !important;
+    }
+
+    #CONTENT app-teaser-image,
+    #CONTENT app-image,
+    #CONTENT app-teaser-image picture,
+    #CONTENT app-image picture,
+    #CONTENT app-teaser-image img,
+    #CONTENT app-image img {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        float: none !important;
+        position: static !important;
+        left: auto !important;
+        right: auto !important;
+        top: auto !important;
+        transform: none !important;
+    }
+
+    #CONTENT app-teaser-image picture,
+    #CONTENT app-image picture,
+    #CONTENT app-teaser-image img,
+    #CONTENT app-image img {
+        aspect-ratio: 16 / 9 !important;
+    }
+
+    #CONTENT app-teaser-image,
+    #CONTENT app-image,
+    #CONTENT app-teaser-image > div,
+    #CONTENT app-image > div {
+        overflow: visible !important;
+        height: auto !important;
+    }
+
+    #CONTENT app-home-page-v2 > div,
+    #CONTENT app-page-content > div {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+
+    #CONTENT app-default-teaser,
+    #CONTENT app-teaser-layout,
+    #CONTENT app-teaser-layout > * {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+}
