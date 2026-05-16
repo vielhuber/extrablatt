@@ -19,8 +19,10 @@ place json cookie exports per host in `.cookies/` (any browser cookie-editor ext
 
 ## usage
 
-- `/` — dashboard with paper / status / paywall / category / lesestatus / sort / modus filters
-- `/?scrape=1` — synchronous scrape with live progress
-- `/?url=<original-url>` — open through the archive proxy
+```bash
+php -S 127.0.0.1:8080 -t .
+```
 
-run the scrape on a cron once or twice a day to keep the database current.
+```bash
+0 6,18 * * * curl -s 'https://your-host/?scrape=1' >/dev/null
+```
