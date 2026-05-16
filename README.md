@@ -11,8 +11,8 @@ a simple news aggregator. pulls articles from configurable rss feeds (plus reddi
 ## setup
 
 ```
-cp config.example.json config.json   # papers, categories, ai params
-cp .env.example .env                  # AI_PROVIDER, AI_MODEL, AI_API_KEY
+cp config.example.json config.json
+cp .env.example .env
 ```
 
 place json cookie exports per host in `.cookies/` (any browser cookie-editor extension). point the webroot at the project. php needs write access to `.cache/`.
@@ -22,6 +22,8 @@ place json cookie exports per host in `.cookies/` (any browser cookie-editor ext
 ```bash
 php -S 127.0.0.1:8080 -t .
 ```
+
+## cron
 
 ```bash
 0 6,18 * * * curl -s 'https://your-host/?scrape=1' >/dev/null
