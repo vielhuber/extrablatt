@@ -13,11 +13,9 @@
     Require all denied
 </FilesMatch>
 
-# Disable gzip / chunked buffering for the streaming scrape route. Without
-# this, mod_deflate accumulates roughly 8 KiB before flushing to the client,
-# which makes the live scrape output appear in big bursts instead of line by
-# line. The rule only fires for `?scrape=...` requests so the dashboard still
-# benefits from compression.
-<IfModule mod_setenvif.c>
-    SetEnvIfNoCase Query_String "(^|&)scrape" no-gzip=1 dont-vary=1
+# Disable gzip / chunked buffering. Without this, mod_deflate accumulates
+# roughly 8 KiB before flushing to the client, which makes the live scrape
+# output appear in big bursts instead of line by line.
+<IfModule mod_deflate.c>
+    SetEnvIf Request_URI ".*" no-gzip=1
 </IfModule>

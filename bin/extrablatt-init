@@ -31,8 +31,8 @@ file_put_contents(filename: $projectRoot . '/.htaccess', data: <<<HT
 <FilesMatch "^(config\\.json|.*\\.sqlite)\$">
     Require all denied
 </FilesMatch>
-<IfModule mod_setenvif.c>
-    SetEnvIfNoCase Query_String "(^|&)scrape" no-gzip=1 dont-vary=1
+<IfModule mod_deflate.c>
+    SetEnvIf Request_URI ".*" no-gzip=1
 </IfModule>
 
 HT);
