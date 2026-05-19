@@ -101,7 +101,6 @@ final class Extrablatt
     // cookies and from a non-blocked IP. chrome123 stays under Reddit's radar
     // while still working against archive.ph and the publisher HTML probes.
     private string $curlImpersonateBin;
-    private string $cacheDir;
     private string $dataDir;
     private string $logDir;
     private string $databaseFile;
@@ -114,7 +113,6 @@ final class Extrablatt
         $this->cssDir = __DIR__ . '/../css';
         $this->pwaDir = __DIR__ . '/../pwa';
         $this->curlImpersonateBin = $rootDir . '/.bin/curl_chrome123';
-        $this->cacheDir = $rootDir . '/.data/cache';
         $this->dataDir = $rootDir . '/.data';
         $this->logDir = $rootDir . '/.logs';
         $this->databaseFile = $rootDir . '/.data/database.sqlite';
@@ -417,11 +415,7 @@ final class Extrablatt
         if (isset($_POST['reset']) && $_POST['reset'] === '1') {
             $db = $this->openDatabase();
             $db->exec(statement: 'DELETE FROM articles');
-            foreach ((array) glob(pattern: $this->cacheDir . '/*') as $file) {
-                if (is_file(filename: (string) $file)) {
-                    @unlink(filename: (string) $file);
-                }
-            }
+            $this->cacheClear();
             header(header: 'Location: /');
             return;
         }
@@ -543,18 +537,12 @@ final class Extrablatt
     {
         // Cache key is the original URL — independent of which mirror serves it.
         $cacheKey = md5(string: $originalUrl);
-        $cacheFile = $this->cacheDir . '/' . $cacheKey . '.html';
-        $metaFile = $this->cacheDir . '/' . $cacheKey . '.meta.json';
+        $snapKey = 'snapshot:' . $cacheKey;
+        $metaKey = 'snapshotmeta:' . $cacheKey;
 
-        if (
-            !$forceRefresh
-            && file_exists(filename: $cacheFile)
-            && $this->isCachedSnapshotValid(metaFile: $metaFile)
-        ) {
-            $cached = (string) file_get_contents(filename: $cacheFile);
-            if ($cached !== '') {
-                return FetchResult::fresh(content: $cached);
-            }
+        $cachedBody = $forceRefresh ? null : $this->cacheGet(key: $snapKey);
+        if ($cachedBody !== null && $cachedBody !== '' && $this->isCachedSnapshotValid(metaKey: $metaKey)) {
+            return FetchResult::fresh(content: $cachedBody);
         }
 
         $attemptLog = [];
@@ -573,21 +561,17 @@ final class Extrablatt
             $attemptLog[] = sprintf('archive.%s → %s (%d ms)', $tld, $outcome, $result->durationMilliseconds);
 
             if ($isUsable) {
-                if (!is_dir(filename: $this->cacheDir)) {
-                    mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-                }
-                file_put_contents(filename: $cacheFile, data: $result->body);
-                file_put_contents(
-                    filename: $metaFile,
-                    data: json_encode(
+                $this->cacheSet(key: $snapKey, value: $result->body);
+                $this->cacheSet(
+                    key: $metaKey,
+                    value: (string) json_encode(
                         value: [
                             'original_url' => $originalUrl,
                             'mirror_tld' => $tld,
                             'final_url' => $result->finalUrl,
                             'archived_at' => $this->extractArchivedAt(finalUrl: $result->finalUrl),
                             'fetched_at' => time()
-                        ],
-                        flags: JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+                        ]
                     )
                 );
                 return FetchResult::fresh(content: $result->body);
@@ -599,22 +583,21 @@ final class Extrablatt
         $debug['mirror_attempts'] = implode(separator: "\n", array: $attemptLog);
         $debug['original_url'] = $originalUrl;
 
-        if (file_exists(filename: $cacheFile) && $this->isCachedSnapshotValid(metaFile: $metaFile)) {
-            $cached = (string) file_get_contents(filename: $cacheFile);
-            if ($cached !== '') {
-                return FetchResult::stale(content: $cached, errorMessage: $errorMessage, debug: $debug);
-            }
+        $stale = $this->cacheGet(key: $snapKey);
+        if ($stale !== null && $stale !== '' && $this->isCachedSnapshotValid(metaKey: $metaKey)) {
+            return FetchResult::stale(content: $stale, errorMessage: $errorMessage, debug: $debug);
         }
 
         return FetchResult::failed(errorMessage: $errorMessage, debug: $debug);
     }
 
-    private function isCachedSnapshotValid(string $metaFile): bool
+    private function isCachedSnapshotValid(string $metaKey): bool
     {
-        if (!file_exists(filename: $metaFile)) {
+        $v = $this->cacheGet(key: $metaKey);
+        if ($v === null) {
             return false;
         }
-        $meta = json_decode(json: (string) file_get_contents(filename: $metaFile), associative: true);
+        $meta = json_decode(json: $v, associative: true);
         return is_array(value: $meta) && !empty($meta['archived_at']);
     }
 
@@ -1111,10 +1094,6 @@ final class Extrablatt
         }
         $feedUrl = $papers[$paper]['rss'];
 
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
-
         // Non-RSS feed sources (X, Reddit) — these need authenticated JSON
         // scraping rather than XML parsing. Each handler caches its own raw
         // response and returns a FeedItem[] directly.
@@ -1125,20 +1104,14 @@ final class Extrablatt
             return $this->fetchRedditHomeItems(paper: $paper);
         }
 
-        $cacheFile = $this->cacheDir . '/feed-' . $paper . '.xml';
-        $body = null;
-
-        if (file_exists(filename: $cacheFile)) {
-            $body = (string) file_get_contents(filename: $cacheFile);
-        }
-
+        $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
             $result = $this->fetchViaImpersonate(url: $feedUrl);
             if ($result->body === null) {
                 return [];
             }
             $body = $result->body;
-            file_put_contents(filename: $cacheFile, data: $body);
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
 
         return $this->parseFeedBody(body: $body, paper: $paper);
@@ -1153,11 +1126,7 @@ final class Extrablatt
      */
     private function fetchXTimelineItems(string $paper): array
     {
-        $cacheFile = $this->cacheDir . '/feed-' . $paper . '.json';
-        $body = null;
-        if (file_exists(filename: $cacheFile)) {
-            $body = (string) file_get_contents(filename: $cacheFile);
-        }
+        $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
             $cookieHeader = $this->buildCookieHeader(targetUrl: 'https://x.com/');
             $ct0 = $this->extractCookieValue(cookieHeader: $cookieHeader, name: 'ct0');
@@ -1180,7 +1149,7 @@ final class Extrablatt
                 return [];
             }
             $body = $result;
-            file_put_contents(filename: $cacheFile, data: $body);
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
         return $this->parseXTimeline(json: $body);
     }
@@ -1259,18 +1228,14 @@ final class Extrablatt
      */
     private function fetchRedditHomeItems(string $paper): array
     {
-        $cacheFile = $this->cacheDir . '/feed-' . $paper . '.json';
-        $body = null;
-        if (file_exists(filename: $cacheFile)) {
-            $body = (string) file_get_contents(filename: $cacheFile);
-        }
+        $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
             $result = $this->fetchViaImpersonate(url: 'https://www.reddit.com/.json?limit=' . self::SOCIAL_FEED_MAX_ITEMS);
             if ($result->body === null) {
                 return [];
             }
             $body = $result->body;
-            file_put_contents(filename: $cacheFile, data: $body);
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
         return $this->parseRedditHome(json: $body);
     }
@@ -1660,26 +1625,19 @@ final class Extrablatt
 
     private function readArchiveCheckCache(string $url): ?bool
     {
-        $file = $this->cacheDir . '/archcheck-' . md5(string: $url) . '.json';
-        if (!file_exists(filename: $file)) {
+        $v = $this->cacheGet(key: 'archcheck:' . md5(string: $url));
+        if ($v === null) {
             return null;
         }
-        $data = json_decode(json: (string) file_get_contents(filename: $file), associative: true);
-        if (!is_array(value: $data) || !isset($data['available'])) {
-            return null;
-        }
-        return (bool) $data['available'];
+        $data = json_decode(json: $v, associative: true);
+        return is_array(value: $data) && isset($data['available']) ? (bool) $data['available'] : null;
     }
 
     private function writeArchiveCheckCache(string $url, bool $available): void
     {
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
-        $file = $this->cacheDir . '/archcheck-' . md5(string: $url) . '.json';
-        file_put_contents(
-            filename: $file,
-            data: json_encode(value: ['available' => $available], flags: JSON_UNESCAPED_SLASHES)
+        $this->cacheSet(
+            key: 'archcheck:' . md5(string: $url),
+            value: (string) json_encode(value: ['available' => $available])
         );
     }
 
@@ -1714,9 +1672,51 @@ final class Extrablatt
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at DESC);');
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_paper ON articles(paper);');
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status);');
+        $db->exec(
+            statement:
+            'CREATE TABLE IF NOT EXISTS cache (
+                key TEXT PRIMARY KEY NOT NULL,
+                value BLOB,
+                updated_at INTEGER NOT NULL
+            );'
+        );
         $this->runMigrations(db: $db);
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_category ON articles(category);');
         return $db;
+    }
+
+    private function cacheGet(string $key): ?string
+    {
+        $stmt = $this->openDatabase()->prepare(query: 'SELECT value FROM cache WHERE key = :k');
+        $stmt->execute(params: [':k' => $key]);
+        $v = $stmt->fetchColumn();
+        return $v === false ? null : (string) $v;
+    }
+
+    private function cacheHas(string $key): bool
+    {
+        $stmt = $this->openDatabase()->prepare(query: 'SELECT 1 FROM cache WHERE key = :k');
+        $stmt->execute(params: [':k' => $key]);
+        return $stmt->fetchColumn() !== false;
+    }
+
+    private function cacheSet(string $key, string $value): void
+    {
+        $stmt = $this->openDatabase()->prepare(
+            query: 'INSERT INTO cache (key, value, updated_at) VALUES (:k, :v, :t)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+        );
+        $stmt->execute(params: [':k' => $key, ':v' => $value, ':t' => time()]);
+    }
+
+    private function cacheClear(string $prefix = ''): void
+    {
+        if ($prefix === '') {
+            $this->openDatabase()->exec(statement: 'DELETE FROM cache');
+            return;
+        }
+        $stmt = $this->openDatabase()->prepare(query: 'DELETE FROM cache WHERE key LIKE :p');
+        $stmt->execute(params: [':p' => $prefix . '%']);
     }
 
     private function runMigrations(PDO $db): void
@@ -1910,13 +1910,9 @@ final class Extrablatt
 
         $db = $this->openDatabase();
 
-        // A manual scrape always re-fetches every feed. Drop cached XML/JSON.
+        // A manual scrape always re-fetches every feed. Drop cached feed bodies.
         // Article-level caches stay intact (tied to article URLs, not feed state).
-        foreach ((array) glob(pattern: $this->cacheDir . '/feed-*') as $f) {
-            if (is_file(filename: (string) $f)) {
-                @unlink(filename: (string) $f);
-            }
-        }
+        $this->cacheClear(prefix: 'feed:');
 
         // Phase 1: feeds.
         $emit('Phase 1/9: RSS-Feeds einlesen');
@@ -2449,11 +2445,11 @@ final class Extrablatt
     {
         $result = [];
         foreach ($urls as $url) {
-            $file = $this->cacheDir . '/archfull-' . md5(string: $url) . '.json';
-            if (!file_exists(filename: $file)) {
+            $v = $this->cacheGet(key: 'archfull:' . md5(string: $url));
+            if ($v === null) {
                 continue;
             }
-            $data = json_decode(json: (string) file_get_contents(filename: $file), associative: true);
+            $data = json_decode(json: $v, associative: true);
             if (is_array(value: $data) && isset($data['full'])) {
                 $result[$url] = (bool) $data['full'];
             }
@@ -2466,30 +2462,23 @@ final class Extrablatt
         if ($body === '') {
             return;
         }
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
         $cacheKey = md5(string: $originalUrl);
-        $cacheFile = $this->cacheDir . '/' . $cacheKey . '.html';
-        $metaFile = $this->cacheDir . '/' . $cacheKey . '.meta.json';
-
-        file_put_contents(filename: $cacheFile, data: $body);
+        $this->cacheSet(key: 'snapshot:' . $cacheKey, value: $body);
 
         $tld = null;
         if (preg_match(pattern: '#archive\.([a-z]+)/\d{14}/#', subject: $finalUrl, matches: $m) === 1) {
             $tld = $m[1];
         }
-        file_put_contents(
-            filename: $metaFile,
-            data: json_encode(
+        $this->cacheSet(
+            key: 'snapshotmeta:' . $cacheKey,
+            value: (string) json_encode(
                 value: [
                     'original_url' => $originalUrl,
                     'mirror_tld' => $tld,
                     'final_url' => $finalUrl,
                     'archived_at' => $this->extractArchivedAt(finalUrl: $finalUrl),
                     'fetched_at' => time()
-                ],
-                flags: JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+                ]
             )
         );
     }
@@ -2653,35 +2642,31 @@ final class Extrablatt
 
     private function readOgImageCache(string $url): ?string
     {
-        $file = $this->cacheDir . '/og-' . md5(string: $url) . '.json';
-        if (!file_exists(filename: $file)) {
+        $v = $this->cacheGet(key: 'og:' . md5(string: $url));
+        if ($v === null) {
             return null;
         }
-        $data = json_decode(json: (string) file_get_contents(filename: $file), associative: true);
+        $data = json_decode(json: $v, associative: true);
         if (!is_array(value: $data) || !isset($data['url'])) {
             return null;
         }
-        $url = (string) $data['url'];
-        return $url === '' ? null : $url;
+        $u = (string) $data['url'];
+        return $u === '' ? null : $u;
     }
 
     private function ogImageCacheExists(string $url): bool
     {
-        return file_exists(filename: $this->cacheDir . '/og-' . md5(string: $url) . '.json');
+        return $this->cacheHas(key: 'og:' . md5(string: $url));
     }
 
     private function writeOgImageCache(string $url, string $imageUrl): void
     {
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
         if ($imageUrl !== '') {
             $imageUrl = html_entity_decode(string: $imageUrl, flags: ENT_QUOTES);
         }
-        $file = $this->cacheDir . '/og-' . md5(string: $url) . '.json';
-        file_put_contents(
-            filename: $file,
-            data: json_encode(value: ['url' => $imageUrl], flags: JSON_UNESCAPED_SLASHES)
+        $this->cacheSet(
+            key: 'og:' . md5(string: $url),
+            value: (string) json_encode(value: ['url' => $imageUrl])
         );
     }
 
@@ -2694,46 +2679,39 @@ final class Extrablatt
      */
     private function bodyImgCacheExists(string $url): bool
     {
-        return file_exists(filename: $this->cacheDir . '/bodyimg-' . md5(string: $url) . '.json');
+        return $this->cacheHas(key: 'bodyimg:' . md5(string: $url));
     }
 
     private function readBodyImgCache(string $url): ?string
     {
-        $file = $this->cacheDir . '/bodyimg-' . md5(string: $url) . '.json';
-        if (!file_exists(filename: $file)) {
+        $v = $this->cacheGet(key: 'bodyimg:' . md5(string: $url));
+        if ($v === null) {
             return null;
         }
-        $data = json_decode(json: (string) file_get_contents(filename: $file), associative: true);
+        $data = json_decode(json: $v, associative: true);
         if (!is_array(value: $data) || !isset($data['url'])) {
             return null;
         }
-        $url = (string) $data['url'];
-        return $url === '' ? null : $url;
+        $u = (string) $data['url'];
+        return $u === '' ? null : $u;
     }
 
     private function writeBodyImgCache(string $url, string $imageUrl): void
     {
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
         if ($imageUrl !== '') {
             $imageUrl = html_entity_decode(string: $imageUrl, flags: ENT_QUOTES);
         }
-        file_put_contents(
-            filename: $this->cacheDir . '/bodyimg-' . md5(string: $url) . '.json',
-            data: json_encode(value: ['url' => $imageUrl], flags: JSON_UNESCAPED_SLASHES)
+        $this->cacheSet(
+            key: 'bodyimg:' . md5(string: $url),
+            value: (string) json_encode(value: ['url' => $imageUrl])
         );
     }
 
     private function writeArchiveFulltextCache(string $url, bool $full): void
     {
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
-        $file = $this->cacheDir . '/archfull-' . md5(string: $url) . '.json';
-        file_put_contents(
-            filename: $file,
-            data: json_encode(value: ['full' => $full], flags: JSON_UNESCAPED_SLASHES)
+        $this->cacheSet(
+            key: 'archfull:' . md5(string: $url),
+            value: (string) json_encode(value: ['full' => $full])
         );
     }
 
@@ -3078,7 +3056,7 @@ final class Extrablatt
         }
 
         $aiClass = 'vielhuber\\aihelper\\aihelper';
-        $logPath = $this->cacheDir . '/aihelper.log';
+        $logPath = $this->logDir . '/aihelper.log';
         $ai = $aiClass::create(
             provider: (string) ($aiConfig['provider'] ?? 'anthropic'),
             model: (string) ($aiConfig['model'] ?? 'claude-haiku-4-5-20251001'),
@@ -3158,11 +3136,11 @@ final class Extrablatt
 
     private function readCategoryCache(string $title): ?string
     {
-        $file = $this->cacheDir . '/category-' . md5(string: $this->normalizeTitle(title: $title)) . '.json';
-        if (!file_exists(filename: $file)) {
+        $v = $this->cacheGet(key: 'category:' . md5(string: $this->normalizeTitle(title: $title)));
+        if ($v === null) {
             return null;
         }
-        $data = json_decode(json: (string) file_get_contents(filename: $file), associative: true);
+        $data = json_decode(json: $v, associative: true);
         if (!is_array(value: $data) || !array_key_exists(key: 'category', array: $data)) {
             return null;
         }
@@ -3172,18 +3150,14 @@ final class Extrablatt
 
     private function categoryCacheExists(string $title): bool
     {
-        return file_exists(filename: $this->cacheDir . '/category-' . md5(string: $this->normalizeTitle(title: $title)) . '.json');
+        return $this->cacheHas(key: 'category:' . md5(string: $this->normalizeTitle(title: $title)));
     }
 
     private function writeCategoryCache(string $title, ?string $category): void
     {
-        if (!is_dir(filename: $this->cacheDir)) {
-            mkdir(directory: $this->cacheDir, permissions: 0755, recursive: true);
-        }
-        $file = $this->cacheDir . '/category-' . md5(string: $this->normalizeTitle(title: $title)) . '.json';
-        file_put_contents(
-            filename: $file,
-            data: json_encode(value: ['category' => $category], flags: JSON_UNESCAPED_SLASHES)
+        $this->cacheSet(
+            key: 'category:' . md5(string: $this->normalizeTitle(title: $title)),
+            value: (string) json_encode(value: ['category' => $category])
         );
     }
 
@@ -3545,7 +3519,7 @@ final class Extrablatt
             model: (string) ($aiConfig['model'] ?? ''),
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
-            log: $this->cacheDir . '/aihelper.log',
+            log: $this->logDir . '/aihelper.log',
             max_tries: (int) ($aiConfig['max_tries'] ?? 2),
             timeout: (int) ($aiConfig['timeout'] ?? 60)
         );
@@ -3712,7 +3686,7 @@ final class Extrablatt
                 model: (string) ($aiConfig['model'] ?? ''),
                 temperature: (float) ($aiConfig['temperature'] ?? 0.0),
                 api_key: $apiKey,
-                log: $this->cacheDir . '/aihelper.log',
+                log: $this->logDir . '/aihelper.log',
                 max_tries: (int) ($aiConfig['max_tries'] ?? 2),
                 timeout: (int) ($aiConfig['timeout'] ?? 60)
             );
