@@ -3548,19 +3548,31 @@ final class Extrablatt
         }
 
         // Bucket by 24h publish window — most cross-source duplicates land
-        // within the same day, so per-day prompts keep input small and
-        // cluster recall high.
-        $byDay = [];
+        // within the same day. Then split each day into chunks of <=500 so
+        // single prompts stay around ~25k tokens (avoids Gemini 503s on big
+        // days + keeps response time inside the curl timeout).
+        $byDayRaw = [];
         foreach ($rows as $i => $row) {
             $day = (int) ((int) $row['published_at'] / 86400);
-            $byDay[$day][] = [
+            $byDayRaw[$day][] = [
                 'globalIdx' => $i + 1,
                 'paper' => (string) $row['paper'],
                 'title' => (string) $row['title'],
                 'url' => (string) $row['url']
             ];
         }
-        krsort(array: $byDay);
+        krsort(array: $byDayRaw);
+        $batchSizeMax = 500;
+        $byDay = [];
+        foreach ($byDayRaw as $day => $entries) {
+            if (count(value: $entries) <= $batchSizeMax) {
+                $byDay[] = $entries;
+                continue;
+            }
+            foreach (array_chunk(array: $entries, length: $batchSizeMax) as $chunk) {
+                $byDay[] = $chunk;
+            }
+        }
 
         $aiClass = 'vielhuber\\aihelper\\aihelper';
         // ?debug=1 → enable aihelper file log only for this phase so the raw
@@ -3573,7 +3585,7 @@ final class Extrablatt
 
         $allClusters = [];
         $batchNum = 0;
-        foreach ($byDay as $day => $entries) {
+        foreach ($byDay as $entries) {
             if (count(value: $entries) < 2) {
                 continue;
             }
