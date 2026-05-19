@@ -11,15 +11,38 @@ a simple news aggregator. pulls articles from configurable rss feeds (plus reddi
 
 ## installation
 
-```bash
-mkdir extrablatt
-cd extrablatt
-composer create-project vielhuber/extrablatt .
+```
+composer require vielhuber/extrablatt
 ```
 
-this clones the project, runs `composer install`, downloads `curl-impersonate` into `.bin/`, creates `config.json` + `.env` from the templates and sets up the runtime directories. one-stop, idempotent — re-run any time with `composer install-extrablatt`.
+create a minimal `index.php` in your project root:
 
-then edit `config.json` (papers / categories / ai params) and `.env` (AI_API_KEY + AUTH_PASSWORD), drop cookie exports per host into `.cookies/`, and you're ready.
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+(new \vielhuber\extrablatt\Extrablatt(rootDir: __DIR__))->run();
+```
+
+copy the asset bundle from the package to your project root:
+
+```
+cp -r vendor/vielhuber/extrablatt/{css,pwa,.htaccess,config.example.json,.env.example} .
+cp config.example.json config.json     # populate papers / categories / ai params
+cp .env.example .env                    # populate credentials + AUTH_PASSWORD
+mkdir -p .cookies                       # populate per-host cookie exports
+```
+
+install `curl-impersonate` (chrome tls fingerprint — required for archive.ph, reddit and x) into `.bin/`:
+
+```
+mkdir -p .bin && cd .bin
+curl -sL -o ci.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v1.5.6/curl-impersonate-v1.5.6.x86_64-linux-gnu.tar.gz
+tar xzf ci.tar.gz curl_chrome123 curl-impersonate
+chmod +x curl_chrome123 curl-impersonate
+./curl_chrome123 -V          # smoke test
+rm ci.tar.gz
+cd ..
+```
 
 ## usage
 
