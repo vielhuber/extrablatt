@@ -3563,7 +3563,13 @@ final class Extrablatt
                 continue;
             }
             if (!is_array(value: $data) || !isset($data['clusters']) || !is_array(value: $data['clusters'])) {
-                $emit(sprintf('  ⚠️  Batch %d: ungültige JSON-Antwort', $batchNum));
+                // Dump a hint of what came back so we can see *why* it didn't
+                // parse — Gemini occasionally wraps the JSON in another field.
+                $hint = json_encode(value: $response['response'] ?? null);
+                if (is_string(value: $hint) && strlen($hint) > 200) {
+                    $hint = substr(string: $hint, offset: 0, length: 200) . '…';
+                }
+                $emit(sprintf('  ⚠️  Batch %d: ungültige JSON-Antwort (got: %s)', $batchNum, (string) $hint));
                 continue;
             }
             $batchClusterCount = 0;
