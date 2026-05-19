@@ -3576,7 +3576,7 @@ final class Extrablatt
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
             log: $logPath,
-            max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+            max_tries: 2,
             timeout: (int) ($aiConfig['timeout'] ?? 60)
         );
 
@@ -3587,6 +3587,11 @@ final class Extrablatt
                 continue;
             }
             $batchNum++;
+            // Throttle between batches — Gemini Flash Lite returns 503 "high demand"
+            // when bursting prompts back-to-back, so keep a generous gap.
+            if ($batchNum > 1) {
+                sleep(seconds: 10);
+            }
             $lines = [];
             foreach ($entries as $e) {
                 $lines[] = $e['globalIdx'] . '. [' . $e['paper'] . '] ' .
@@ -3606,21 +3611,36 @@ final class Extrablatt
                 "- Einzelartikel ohne Duplikat NICHT auflisten\n\n" .
                 "Artikel:\n" . implode(separator: "\n", array: $lines);
 
-            try {
-                $response = $ai->ask(prompt: $prompt);
-                $raw = $response['response'] ?? null;
-                if (is_object(value: $raw) || is_array(value: $raw)) {
-                    // Some providers (e.g. Gemini in JSON-mode) hand back an
-                    // already-decoded structure. Normalise to associative array.
-                    $data = json_decode(json: (string) json_encode(value: $raw), associative: true);
-                } else {
-                    $rawStr = trim(string: (string) $raw);
-                    $rawStr = (string) preg_replace(pattern: '~^```(?:json)?\s*|\s*```$~', replacement: '', subject: $rawStr);
-                    $data = json_decode(json: $rawStr, associative: true);
+            // Manual outer retry on top of aihelper's built-in retries — when the
+            // provider hands back a literal "No response from provider." string
+            // (transient 503), wait longer and try the whole batch again.
+            $data = null;
+            $response = null;
+            $manualAttempts = 2;
+            for ($attempt = 1; $attempt <= $manualAttempts; $attempt++) {
+                try {
+                    $response = $ai->ask(prompt: $prompt);
+                    $raw = $response['response'] ?? null;
+                    if (is_object(value: $raw) || is_array(value: $raw)) {
+                        // Some providers (e.g. Gemini in JSON-mode) hand back an
+                        // already-decoded structure. Normalise to associative array.
+                        $data = json_decode(json: (string) json_encode(value: $raw), associative: true);
+                    } else {
+                        $rawStr = trim(string: (string) $raw);
+                        $rawStr = (string) preg_replace(pattern: '~^```(?:json)?\s*|\s*```$~', replacement: '', subject: $rawStr);
+                        $data = json_decode(json: $rawStr, associative: true);
+                    }
+                } catch (\Throwable $e) {
+                    $emit(sprintf('  ⚠️  Batch %d Versuch %d Fehler: %s', $batchNum, $attempt, $e->getMessage()));
+                    $data = null;
                 }
-            } catch (\Throwable $e) {
-                $emit(sprintf('  ⚠️  Batch %d Fehler: %s', $batchNum, $e->getMessage()));
-                continue;
+                if (is_array(value: $data) && isset($data['clusters']) && is_array(value: $data['clusters'])) {
+                    break;
+                }
+                if ($attempt < $manualAttempts) {
+                    $emit(sprintf('  … Batch %d Versuch %d fehlgeschlagen, warte 60s und versuche erneut', $batchNum, $attempt));
+                    sleep(seconds: 60);
+                }
             }
             if (!is_array(value: $data) || !isset($data['clusters']) || !is_array(value: $data['clusters'])) {
                 // Dump a hint of what came back so we can see *why* it didn't
