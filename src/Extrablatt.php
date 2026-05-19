@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 namespace vielhuber\extrablatt;
 
+use PDO;
+use SimpleXMLElement;
+
 final readonly class FetchResult
 {
     /**
