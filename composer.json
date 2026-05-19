@@ -1,0 +1,25 @@
+{
+    "name": "vielhuber/extrablatt",
+    "description": "A simple news aggregator in php.",
+    "license": "MIT",
+    "type": "project",
+    "require": {
+        "php": ">=8.3",
+        "ext-pdo_sqlite": "*",
+        "ext-gd": "*",
+        "vielhuber/aihelper": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "vielhuber\\extrablatt\\": "src/"
+        }
+    },
+    "scripts": {
+        "post-create-project-cmd": [
+            "@php scripts/install.php"
+        ],
+        "install-extrablatt": [
+            "@php scripts/install.php"
+        ]
+    }
+}
