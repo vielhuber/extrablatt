@@ -1,0 +1,97 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+// Scaffolder for vielhuber/extrablatt. Idempotent — re-run any time. Writes
+// index.php and .htaccess unconditionally (those files are owned by the
+// package), preserves config.json + .env + cookies on subsequent runs.
+
+$projectRoot = getcwd();
+if ($projectRoot === false) {
+    fwrite(stream: STDERR, data: "cannot determine current directory\n");
+    exit(1);
+}
+$packageRoot = dirname(path: realpath(path: __FILE__), levels: 2);
+
+echo "\n📰 extrablatt setup in $projectRoot\n\n";
+
+// 1. index.php (overwrite — minimal bootstrap, package-owned).
+file_put_contents(
+    filename: $projectRoot . '/index.php',
+    data: "<?php\nrequire __DIR__ . '/vendor/autoload.php';\n(new \\vielhuber\\extrablatt\\Extrablatt(rootDir: __DIR__))->run();\n"
+);
+echo "✓ index.php written\n";
+
+// 2. .htaccess (overwrite — server config, package-owned).
+file_put_contents(filename: $projectRoot . '/.htaccess', data: <<<HT
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule "(^|/)\\.(?!well-known)" - [F,L]
+</IfModule>
+<FilesMatch "^(config\\.json|.*\\.sqlite)\$">
+    Require all denied
+</FilesMatch>
+<IfModule mod_setenvif.c>
+    SetEnvIfNoCase Query_String "(^|&)scrape" no-gzip=1 dont-vary=1
+</IfModule>
+
+HT);
+echo "✓ .htaccess written\n";
+
+// 3. config + env templates (preserve if exists — user-owned).
+foreach (['config.example.json' => 'config.json', '.env.example' => '.env'] as $src => $dst) {
+    if (file_exists(filename: $projectRoot . '/' . $dst)) {
+        echo "✓ $dst already exists, kept\n";
+    } elseif (file_exists(filename: $packageRoot . '/' . $src)) {
+        copy(from: $packageRoot . '/' . $src, to: $projectRoot . '/' . $dst);
+        echo "✓ $dst created from $src\n";
+    }
+}
+
+// 4. runtime directories
+foreach (['.cookies', '.cache', '.data', '.logs'] as $dir) {
+    if (!is_dir(filename: $projectRoot . '/' . $dir)) {
+        mkdir(directory: $projectRoot . '/' . $dir, permissions: 0755, recursive: true);
+        echo "✓ $dir/ created\n";
+    }
+}
+
+// 5. curl-impersonate into .bin/
+$binDir = $projectRoot . '/.bin';
+$binFile = $binDir . '/curl_chrome123';
+if (file_exists(filename: $binFile)) {
+    echo "✓ .bin/curl_chrome123 already present, kept\n";
+} elseif (PHP_OS_FAMILY !== 'Linux') {
+    echo "⚠️  curl-impersonate auto-install only available on Linux x86_64.\n";
+    echo "   manual install instructions: see README.md\n";
+} else {
+    if (!is_dir(filename: $binDir)) {
+        mkdir(directory: $binDir, permissions: 0755, recursive: true);
+    }
+    echo "→ downloading curl-impersonate v1.5.6 (lexiforest fork) ...\n";
+    $tarUrl = 'https://github.com/lexiforest/curl-impersonate/releases/download/v1.5.6/curl-impersonate-v1.5.6.x86_64-linux-gnu.tar.gz';
+    $tarFile = $binDir . '/ci.tar.gz';
+    $stream = @fopen(filename: $tarUrl, mode: 'rb');
+    if ($stream === false) {
+        fwrite(stream: STDERR, data: "  ✗ download failed (network?). install manually per README.\n");
+    } else {
+        $ok = file_put_contents(filename: $tarFile, data: $stream);
+        fclose(stream: $stream);
+        if ($ok === false || filesize(filename: $tarFile) < 100000) {
+            fwrite(stream: STDERR, data: "  ✗ download incomplete. install manually per README.\n");
+            @unlink(filename: $tarFile);
+        } else {
+            passthru(command: 'tar xzf ' . escapeshellarg(arg: $tarFile) . ' -C ' . escapeshellarg(arg: $binDir) . ' curl_chrome123 curl-impersonate');
+            chmod(filename: $binDir . '/curl_chrome123', permissions: 0755);
+            chmod(filename: $binDir . '/curl-impersonate', permissions: 0755);
+            @unlink(filename: $tarFile);
+            echo "✓ curl-impersonate installed in .bin/\n";
+        }
+    }
+}
+
+echo "\nNext steps:\n";
+echo "  1. edit config.json   — papers, categories, ai params\n";
+echo "  2. edit .env          — AI_API_KEY and AUTH_PASSWORD\n";
+echo "  3. drop cookie exports into .cookies/ (one .json per host)\n";
+echo "  4. php -S 127.0.0.1:8080 -t .\n\n";

@@ -91,7 +91,11 @@ final class Extrablatt
     // .bin/, .logs/, config.json, .env) live in the consumer's webroot
     // rather than next to the library code in vendor/.
     private string $cookieDir;
+    // css/ and pwa/ live next to the library code so they ship as part of the
+    // composer package — the consumer doesn't need to copy them into their
+    // webroot. Served on-demand via the ?asset=... route below.
     private string $cssDir;
+    private string $pwaDir;
     // Pinned to chrome123 — newer Chrome variants (124+) trip Reddit's bot
     // detection (TLS/header fingerprint check), returning 403 even with valid
     // cookies and from a non-blocked IP. chrome123 stays under Reddit's radar
@@ -107,7 +111,8 @@ final class Extrablatt
     public function __construct(private readonly string $rootDir)
     {
         $this->cookieDir = $rootDir . '/.cookies';
-        $this->cssDir = $rootDir . '/css';
+        $this->cssDir = __DIR__ . '/../css';
+        $this->pwaDir = __DIR__ . '/../pwa';
         $this->curlImpersonateBin = $rootDir . '/.bin/curl_chrome123';
         $this->cacheDir = $rootDir . '/.cache';
         $this->dataDir = $rootDir . '/.data';
@@ -115,6 +120,38 @@ final class Extrablatt
         $this->databaseFile = $rootDir . '/.data/database.sqlite';
         $this->configFile = $rootDir . '/config.json';
         $this->envFile = $rootDir . '/.env';
+    }
+
+    /**
+     * Stream a bundled static asset (css or pwa) through PHP. The library
+     * ships its own css/* and pwa/* — the consumer needs no asset copy step.
+     */
+    private function serveAsset(string $relPath): void
+    {
+        if (
+            preg_match(pattern: '~^(css|pwa)/[A-Za-z0-9._-]+$~', subject: $relPath) !== 1
+            || str_contains(haystack: $relPath, needle: '..')
+        ) {
+            http_response_code(response_code: 404);
+            return;
+        }
+        [$subdir, $file] = explode(separator: '/', string: $relPath, limit: 2);
+        $absolute = ($subdir === 'css' ? $this->cssDir : $this->pwaDir) . '/' . $file;
+        if (!is_file(filename: $absolute)) {
+            http_response_code(response_code: 404);
+            return;
+        }
+        $mime = match (true) {
+            str_ends_with(haystack: $file, needle: '.css') => 'text/css',
+            str_ends_with(haystack: $file, needle: '.json') => 'application/json',
+            str_ends_with(haystack: $file, needle: '.svg') => 'image/svg+xml',
+            str_ends_with(haystack: $file, needle: '.png') => 'image/png',
+            default => 'application/octet-stream'
+        };
+        header(header: 'Content-Type: ' . $mime);
+        header(header: 'Cache-Control: public, max-age=86400');
+        header(header: 'Content-Length: ' . filesize(filename: $absolute));
+        readfile(filename: $absolute);
     }
 
     // Caches never expire automatically — only the manual Reset button (which
@@ -326,6 +363,13 @@ final class Extrablatt
 
     public function run(): void
     {
+        // Static-asset passthrough — serves the library's bundled css/* and
+        // pwa/*. No auth needed; assets are public by design.
+        if (isset($_GET['asset'])) {
+            $this->serveAsset(relPath: (string) $_GET['asset']);
+            return;
+        }
+
         // Auth gate. Three trusted entry points bypass the login page:
         //   (1) POST with auth_password (the login form itself)
         //   (2) ?scrape=1&key=<AUTH_SCRAPE_KEY>   (cron from the outside)
@@ -830,7 +874,8 @@ final class Extrablatt
         $links = '';
         foreach ($this->cssAssetsForPaper(paper: $paper) as $relativePath => $absolutePath) {
             $version = file_exists(filename: $absolutePath) ? (int) filemtime(filename: $absolutePath) : 0;
-            $links .= '<link rel="stylesheet" href="' . $origin . '/' . $relativePath . '?v=' . $version . '">';
+            $qsep = str_starts_with(haystack: $relativePath, needle: '?') ? '&' : '?';
+            $links .= '<link rel="stylesheet" href="' . $origin . '/' . $relativePath . $qsep . 'v=' . $version . '">';
         }
 
         $viewport = '<meta name="viewport" content="width=device-width, initial-scale=1,viewport-fit=cover">';
@@ -867,13 +912,15 @@ final class Extrablatt
      */
     private function cssAssetsForPaper(string $paper): array
     {
-        $assets = ['css/common.css' => $this->cssDir . '/common.css'];
+        // Keys are the URL paths (served via ?asset=css/<file>), values are
+        // the on-disk absolute paths for filemtime() cache-busting.
+        $assets = ['?asset=css/common.css' => $this->cssDir . '/common.css'];
         if ($paper !== '') {
             // Obfuscate the per-paper stylesheet filename so no paper name
             // leaks via the network log. The hash is deterministic so the
             // browser cache stays warm across requests.
             $hash = substr(string: md5(string: $paper), offset: 0, length: 12);
-            $assets['css/' . $hash . '.css'] = $this->cssDir . '/' . $hash . '.css';
+            $assets['?asset=css/' . $hash . '.css'] = $this->cssDir . '/' . $hash . '.css';
         }
         return $assets;
     }
@@ -910,11 +957,11 @@ final class Extrablatt
 
     private function pwaHeadTags(): string
     {
-        return '<link rel="manifest" href="/pwa/manifest.json">' .
+        return '<link rel="manifest" href="/?asset=pwa/manifest.json">' .
             '<meta name="theme-color" content="#111111">' .
-            '<link rel="icon" type="image/svg+xml" href="/pwa/icon.svg">' .
-            '<link rel="icon" type="image/png" sizes="192x192" href="/pwa/icon-192.png">' .
-            '<link rel="apple-touch-icon" href="/pwa/apple-touch-icon.png">' .
+            '<link rel="icon" type="image/svg+xml" href="/?asset=pwa/icon.svg">' .
+            '<link rel="icon" type="image/png" sizes="192x192" href="/?asset=pwa/icon-192.png">' .
+            '<link rel="apple-touch-icon" href="/?asset=pwa/apple-touch-icon.png">' .
             '<meta name="apple-mobile-web-app-capable" content="yes">' .
             '<meta name="mobile-web-app-capable" content="yes">' .
             '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' .

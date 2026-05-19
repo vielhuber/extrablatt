@@ -12,5 +12,8 @@
         "psr-4": {
             "vielhuber\\extrablatt\\": "src/"
         }
-    }
+    },
+    "bin": [
+        "bin/extrablatt-init"
+    ]
 }

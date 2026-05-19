@@ -12,37 +12,18 @@ a simple news aggregator. pulls articles from configurable rss feeds (plus reddi
 ## installation
 
 ```
+mkdir extrablatt
+cd extrablatt
 composer require vielhuber/extrablatt
+./vendor/bin/extrablatt-init
 ```
 
-create a minimal `index.php` in your project root:
+after install, edit:
 
-```php
-<?php
-require __DIR__ . '/vendor/autoload.php';
-(new \vielhuber\extrablatt\Extrablatt(rootDir: __DIR__))->run();
-```
-
-copy the asset bundle from the package to your project root:
-
-```
-cp -r vendor/vielhuber/extrablatt/{css,pwa,.htaccess,config.example.json,.env.example} .
-cp config.example.json config.json     # populate papers / categories / ai params
-cp .env.example .env                    # populate credentials + AUTH_PASSWORD
-mkdir -p .cookies                       # populate per-host cookie exports
-```
-
-install `curl-impersonate` (chrome tls fingerprint — required for archive.ph, reddit and x) into `.bin/`:
-
-```
-mkdir -p .bin && cd .bin
-curl -sL -o ci.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v1.5.6/curl-impersonate-v1.5.6.x86_64-linux-gnu.tar.gz
-tar xzf ci.tar.gz curl_chrome123 curl-impersonate
-chmod +x curl_chrome123 curl-impersonate
-./curl_chrome123 -V          # smoke test
-rm ci.tar.gz
-cd ..
-```
+- `config.json`: papers, categories, ai params
+- `.env`: `AI_API_KEY`/`AUTH_PASSWORD`
+- `.cookies/`: drop cookie exports per host into
+- `.data/database.sqlite`: restore database (optional)
 
 ## usage
 
@@ -50,12 +31,8 @@ cd ..
 php -S 127.0.0.1:8080 -t .
 ```
 
-login with the value of `AUTH_PASSWORD`. leave the env var empty to disable the auth gate (only for local dev).
-
 ## cron
 
 ```cron
 0 6,18 * * * curl -s 'https://your-host/?scrape=1&key=<AUTH_PASSWORD>' >/dev/null
 ```
-
-the cron-scrape endpoint reuses `AUTH_PASSWORD` as its key. authenticated browser sessions skip the key check.
