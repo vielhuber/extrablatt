@@ -10,20 +10,20 @@ a simple news aggregator. pulls articles from configurable rss feeds (plus reddi
 
 ## install curl-impersonate (linux x86_64)
 
-`curl-impersonate` ships the chrome tls fingerprint that lets us talk to archive.ph, reddit and x without getting blocked. drop the binary into `.bin/` inside the project — no root access needed:
+`curl-impersonate` (lexiforest fork) ships the chrome tls fingerprint that lets us talk to archive.ph, reddit and x without getting blocked. drop the binary into `.bin/` inside the project — no root access needed:
 
 ```bash
 mkdir -p .bin && cd .bin
-curl -sL -o ci.tar.gz https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz
+curl -sL -o ci.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v1.5.6/curl-impersonate-v1.5.6.x86_64-linux-gnu.tar.gz
 tar xzf ci.tar.gz curl_chrome123
 chmod +x curl_chrome123
 ./curl_chrome123 -V    # smoke test — should print a version string
 cd ..
 ```
 
-works on most shared hosts (the binary is statically linked enough). if the smoke test fails with `error while loading shared libraries`, try the older v0.5.4 release, which links against older glibc.
+works on most shared hosts (the binary is statically linked enough). if the smoke test fails with `error while loading shared libraries`, try an older release with looser glibc requirements.
 
-reddit pins the binary to `curl_chrome123` because the newer chrome124+ fingerprints trip reddit's bot detection.
+reddit pins the binary to `curl_chrome123` because the newer chrome124+ fingerprints trip reddit's bot detection. the lexiforest fork is the actively-maintained successor of the original `lwthiker/curl-impersonate` (which stalled at chrome116).
 
 ## setup
 
