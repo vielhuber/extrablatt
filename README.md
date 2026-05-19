@@ -4,18 +4,35 @@ a simple news aggregator. pulls articles from configurable rss feeds (plus reddi
 
 ## requirements
 
-- php 8.3+
-- [curl-impersonate](https://github.com/lwthiker/curl-impersonate) (chrome tls fingerprint) in `/opt/curl-impersonate/`
+- php 8.3+ with `pdo_sqlite`, `gd`, and `exec()` enabled
+- linux x86_64 with glibc 2.27+ (works on most shared hosts and any modern desktop)
 - one cookie export per `archive.<tld>` mirror (for the cloudflare `cf_clearance` token); optionally for `reddit.com` and `x.com`
+
+## install curl-impersonate (linux x86_64)
+
+`curl-impersonate` ships the chrome tls fingerprint that lets us talk to archive.ph, reddit and x without getting blocked. drop the binary into `.bin/` inside the project — no root access needed:
+
+```bash
+mkdir -p .bin && cd .bin
+curl -sL -o ci.tar.gz https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz
+tar xzf ci.tar.gz curl_chrome123
+chmod +x curl_chrome123
+./curl_chrome123 -V    # smoke test — should print a version string
+cd ..
+```
+
+works on most shared hosts (the binary is statically linked enough). if the smoke test fails with `error while loading shared libraries`, try the older v0.5.4 release, which links against older glibc.
+
+reddit pins the binary to `curl_chrome123` because the newer chrome124+ fingerprints trip reddit's bot detection.
 
 ## setup
 
-```
-cp config.example.json config.json
-cp .env.example .env
+```bash
+cp config.example.json config.json     # papers, categories, ai params
+cp .env.example .env                    # AI_PROVIDER, AI_MODEL, AI_API_KEY
 ```
 
-place json cookie exports per host in `.cookies/` (any browser cookie-editor extension). point the webroot at the project. php needs write access to `.cache/`.
+place json cookie exports per host in `.cookies/` (any browser cookie-editor extension). point the webroot at the project. php needs write access to `.cache/` and `.logs/`.
 
 ## usage
 
@@ -25,6 +42,13 @@ php -S 127.0.0.1:8080 -t .
 
 ## cron
 
-```bash
+```cron
 0 6,18 * * * curl -s 'https://your-host/?scrape=1' >/dev/null
+```
+
+## cli helpers
+
+```bash
+php index.php backfill-reddit       # one-shot: pull thumbnails for every reddit article in the db
+php index.php backfill-hackernews   # one-shot: deep-probe hn articles for body images
 ```

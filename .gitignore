@@ -1,5 +1,7 @@
+/.bin/
 /.cache/
 /.cookies/
+/.logs/
 /.env
 /config.json
 /page-final.html

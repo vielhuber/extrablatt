@@ -86,8 +86,9 @@ final class Extrablatt
     // detection (TLS/header fingerprint check), returning 403 even with valid
     // cookies and from a non-blocked IP. chrome123 stays under Reddit's radar
     // while still working against archive.ph and the publisher HTML probes.
-    private const CURL_IMPERSONATE_BIN = '/opt/curl-impersonate/curl_chrome123';
+    private const CURL_IMPERSONATE_BIN = __DIR__ . '/.bin/curl_chrome123';
     private const CACHE_DIR = __DIR__ . '/.cache';
+    private const LOG_DIR = __DIR__ . '/.logs';
     private const DATABASE_FILE = __DIR__ . '/.cache/articles.sqlite';
     private const CONFIG_FILE = __DIR__ . '/config.json';
     private const ENV_FILE = __DIR__ . '/.env';
@@ -96,7 +97,9 @@ final class Extrablatt
     // runs DELETE FROM articles plus a sweep of .cache/) drops them. Subsequent
     // scrapes upsert on top, so existing cached entries are preserved unless the
     // user explicitly resets.
-    private const FEED_MAX_ITEMS = 40;
+    // Only enforced for the two social sources (reddit, x) — classical RSS
+    // feeds and sitemaps are ingested without any cap.
+    private const SOCIAL_FEED_MAX_ITEMS = 100;
     private const DASHBOARD_MAX_ITEMS = 10000;
     private const ARCHIVE_CHECK_CONCURRENCY = 8;
     private const THUMBNAIL_SIZE = 160;
@@ -104,6 +107,222 @@ final class Extrablatt
     private const THUMBNAIL_MAX_SOURCE_BYTES = 8_000_000;
     private const FETCH_CONNECT_TIMEOUT_SECONDS = 8;
     private const FETCH_MAX_TIME_SECONDS = 20;
+
+    /**
+     * Fetch a page and extract the best representative image URL using
+     * a layered fallback: og:image → twitter:image → first <img src> in
+     * the body. Relative URLs are resolved against the page URL.
+     */
+    private function extractImageFromPage(string $pageUrl): ?string
+    {
+        $result = $this->fetchViaImpersonate(url: $pageUrl);
+        if ($result->body === null || $result->body === '') {
+            return null;
+        }
+        $body = substr(string: $result->body, offset: 0, length: 300000);
+
+        $patterns = [
+            '~(?:property|name)=["\']og:image(?::secure_url)?["\'][^>]{0,200}content=["\']([^"\']+)~i',
+            '~(?:property|name)=["\']twitter:image(?::src)?["\'][^>]{0,200}content=["\']([^"\']+)~i',
+            '~<img[^>]+src=["\']([^"\']+\.(?:jpe?g|png|webp|gif)(?:\?[^"\']*)?)["\']~i',
+        ];
+        foreach ($patterns as $pattern) {
+            if (preg_match(pattern: $pattern, subject: $body, matches: $m) === 1) {
+                $candidate = html_entity_decode(string: $m[1], flags: ENT_QUOTES);
+                if ($candidate === '') {
+                    continue;
+                }
+                return $this->resolveRelativeUrl(base: $pageUrl, ref: $candidate);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Resolve `$ref` against `$base` per RFC 3986 §5.3 (relevant subset).
+     */
+    private function resolveRelativeUrl(string $base, string $ref): string
+    {
+        $ref = trim(string: $ref);
+        if ($ref === '') {
+            return $base;
+        }
+        if (preg_match(pattern: '~^[a-z]+://~i', subject: $ref) === 1) {
+            return $ref;
+        }
+        $parts = parse_url(url: $base);
+        $scheme = $parts['scheme'] ?? 'https';
+        $host = $parts['host'] ?? '';
+        $origin = $scheme . '://' . $host . (isset($parts['port']) ? ':' . $parts['port'] : '');
+        if (str_starts_with(haystack: $ref, needle: '//')) {
+            return $scheme . ':' . $ref;
+        }
+        if (str_starts_with(haystack: $ref, needle: '/')) {
+            return $origin . $ref;
+        }
+        $basePath = $parts['path'] ?? '/';
+        $baseDir = substr(string: $basePath, offset: 0, length: (int) strrpos(haystack: $basePath, needle: '/') + 1);
+        if ($baseDir === '') {
+            $baseDir = '/';
+        }
+        return $origin . $baseDir . preg_replace(pattern: '~^\./~', replacement: '', subject: $ref);
+    }
+
+    /**
+     * One-shot bulk backfill for Hacker News articles whose thumbnail is
+     * still missing. Probes the page for og:image, twitter:image and the
+     * first usable <img src=> in the body (with relative-URL resolution),
+     * then downloads + writes the thumbnail directly to the DB.
+     *   php index.php backfill-hackernews
+     */
+    public function backfillHackernewsThumbnails(): void
+    {
+        $db = $this->openDatabase();
+        $emit = static fn(string $line): bool => fwrite(stream: STDOUT, data: $line . "\n") !== false;
+        $emit('=== Hackernews thumbnail backfill — ' . date(format: 'Y-m-d H:i:s') . ' ===');
+
+        $rows = (array) $db->query(query: "
+            SELECT url, title FROM articles
+            WHERE paper='hackernews' AND thumbnail IS NULL
+            ORDER BY published_at DESC
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+        if (empty($rows)) {
+            $emit('Keine HN-Artikel ohne Thumbnail.');
+            return;
+        }
+        $emit(sprintf('%d HN-Artikel ohne Thumbnail', count(value: $rows)));
+
+        $images = [];
+        $candidates = [];
+        foreach ($rows as $i => $row) {
+            $url = (string) $row['url'];
+            $emit(sprintf('  [%3d/%d] %s', $i + 1, count(value: $rows), mb_substr(string: $url, start: 0, length: 80)));
+            if ($this->bodyImgCacheExists(url: $url)) {
+                $img = $this->readBodyImgCache(url: $url);
+            } else {
+                $img = $this->extractImageFromPage(pageUrl: $url);
+                $this->writeBodyImgCache(url: $url, imageUrl: $img ?? '');
+            }
+            if ($img === null || $img === '') {
+                continue;
+            }
+            $images[$url] = $img;
+            $candidates[] = [
+                'paper' => 'hackernews',
+                'item' => new FeedItem(
+                    title: (string) $row['title'],
+                    link: $url,
+                    publishedAt: null,
+                    imageUrl: null
+                )
+            ];
+        }
+        if (empty($candidates)) {
+            $emit('Keine Bilder gefunden.');
+            return;
+        }
+        $emit(sprintf('Downloader: %d Thumbnails', count(value: $candidates)));
+        $thumbs = $this->downloadThumbnailsStreaming(items: $candidates, imageUrls: $images, emit: $emit);
+        $update = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+        $written = 0;
+        foreach ($thumbs as $url => $thumb) {
+            if ($thumb !== null) {
+                $update->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
+                $written++;
+            }
+        }
+        $emit(sprintf('Fertig: %d Thumbnails in DB geschrieben', $written));
+    }
+
+    /**
+     * One-shot bulk backfill for every reddit article in the DB that still
+     * has no thumbnail. Reuses the regular resolver + downloader but skips
+     * the per-scrape LIMIT 50 cap. Triggered via CLI:
+     *   php index.php backfill-reddit
+     */
+    public function backfillRedditThumbnails(): void
+    {
+        $db = $this->openDatabase();
+        $emit = static fn(string $line): bool => fwrite(stream: STDOUT, data: $line . "\n") !== false;
+
+        $emit('=== Reddit thumbnail backfill — ' . date(format: 'Y-m-d H:i:s') . ' ===');
+
+        $rows = (array) $db->query(query: "
+            SELECT url, title, published_at FROM articles
+            WHERE paper='reddit' AND thumbnail IS NULL
+            ORDER BY published_at DESC
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+
+        if (empty($rows)) {
+            $emit('Keine Reddit-Artikel ohne Thumbnail.');
+            return;
+        }
+        $emit(sprintf('%d Reddit-Artikel ohne Thumbnail', count(value: $rows)));
+
+        $toResolve = [];
+        foreach ($rows as $row) {
+            $url = (string) $row['url'];
+            if ($this->readOgImageCache(url: $url) !== null) {
+                continue;
+            }
+            $toResolve[] = [
+                'paper' => 'reddit',
+                'item' => new FeedItem(
+                    title: (string) $row['title'],
+                    link: $url,
+                    publishedAt: $row['published_at'] !== null ? (int) $row['published_at'] : null,
+                    imageUrl: null
+                )
+            ];
+        }
+        if (!empty($toResolve)) {
+            $emit(sprintf('Resolver: %d Posts', count(value: $toResolve)));
+            $this->resolveRedditImagesStreaming(items: $toResolve, emit: $emit);
+        } else {
+            $emit('Resolver: nichts zu tun (alle og-Caches schon befüllt)');
+        }
+
+        $papersConfig = $this->papers();
+        $fallback = (string) ($papersConfig['reddit']['default_image'] ?? '');
+        $bfImages = [];
+        $bfCandidates = [];
+        foreach ($rows as $row) {
+            $url = (string) $row['url'];
+            $img = $this->readOgImageCache(url: $url);
+            if ($img === null || $img === '') {
+                $img = $fallback;
+            }
+            if ($img === '') {
+                continue;
+            }
+            $bfImages[$url] = $img;
+            $bfCandidates[] = [
+                'paper' => 'reddit',
+                'item' => new FeedItem(
+                    title: (string) $row['title'],
+                    link: $url,
+                    publishedAt: null,
+                    imageUrl: null
+                )
+            ];
+        }
+        if (empty($bfCandidates)) {
+            $emit('Keine Thumbnails herunterzuladen.');
+            return;
+        }
+        $emit(sprintf('Downloader: %d Thumbnails', count(value: $bfCandidates)));
+        $thumbs = $this->downloadThumbnailsStreaming(items: $bfCandidates, imageUrls: $bfImages, emit: $emit);
+
+        $update = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+        $written = 0;
+        foreach ($thumbs as $url => $thumb) {
+            if ($thumb !== null) {
+                $update->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
+                $written++;
+            }
+        }
+        $emit(sprintf('Fertig: %d Thumbnails in DB geschrieben', $written));
+    }
 
     public function run(): void
     {
@@ -129,6 +348,15 @@ final class Extrablatt
                     @unlink(filename: (string) $file);
                 }
             }
+            header(header: 'Location: /');
+            return;
+        }
+
+        // Bulk mark-all-read: stamps read_at on every currently unread row.
+        if (isset($_POST['mark_all_read']) && $_POST['mark_all_read'] === '1') {
+            $db = $this->openDatabase();
+            $stmt = $db->prepare(query: 'UPDATE articles SET read_at = :ts WHERE read_at IS NULL');
+            $stmt->execute(params: [':ts' => time()]);
             header(header: 'Location: /');
             return;
         }
@@ -178,7 +406,7 @@ final class Extrablatt
             if (!in_array(needle: $sortFilter, haystack: array_keys(array: $this->sortOptions()), strict: true)) {
                 $sortFilter = '';
             }
-            if (!in_array(needle: $magicFilter, haystack: ['', 'magic'], strict: true)) {
+            if (!in_array(needle: $magicFilter, haystack: ['', 'all'], strict: true)) {
                 $magicFilter = '';
             }
             header(header: 'Content-Type: text/html; charset=utf-8');
@@ -861,7 +1089,7 @@ final class Extrablatt
             }
             $bearer = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
             $result = $this->fetchWithHeaders(
-                url: 'https://x.com/i/api/2/timeline/home.json?count=40',
+                url: 'https://x.com/i/api/2/timeline/home.json?count=' . self::SOCIAL_FEED_MAX_ITEMS,
                 headers: [
                     'Cookie: ' . $cookieHeader,
                     'Authorization: Bearer ' . $bearer,
@@ -940,7 +1168,7 @@ final class Extrablatt
                 imageUrl: $imageUrl,
                 rating: $rating > 0 ? $rating : null
             );
-            if (count(value: $items) >= self::FEED_MAX_ITEMS) {
+            if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
                 break;
             }
         }
@@ -960,7 +1188,7 @@ final class Extrablatt
             $body = (string) file_get_contents(filename: $cacheFile);
         }
         if ($body === null || $body === '') {
-            $result = $this->fetchViaImpersonate(url: 'https://www.reddit.com/.json?limit=' . self::FEED_MAX_ITEMS);
+            $result = $this->fetchViaImpersonate(url: 'https://www.reddit.com/.json?limit=' . self::SOCIAL_FEED_MAX_ITEMS);
             if ($result->body === null) {
                 return [];
             }
@@ -1003,7 +1231,7 @@ final class Extrablatt
                 imageUrl: null,
                 rating: isset($post['score']) ? (int) $post['score'] : null
             );
-            if (count(value: $items) >= self::FEED_MAX_ITEMS) {
+            if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
                 break;
             }
         }
@@ -1083,9 +1311,6 @@ final class Extrablatt
                     publishedAt: $this->parseDate(input: (string) $entry->lastmod),
                     imageUrl: $imageUrl
                 );
-                if (count(value: $items) >= self::FEED_MAX_ITEMS) {
-                    break;
-                }
             }
             return $items;
         }
@@ -1110,9 +1335,6 @@ final class Extrablatt
                     imageUrl: $this->extractImageFromRssItem(entry: $entry),
                     rating: $rating
                 );
-                if (count(value: $items) >= self::FEED_MAX_ITEMS) {
-                    break;
-                }
             }
             return $items;
         }
@@ -1138,9 +1360,6 @@ final class Extrablatt
                     publishedAt: $this->parseDate(input: (string) ($entry->updated ?? $entry->published)),
                     imageUrl: $this->extractImageFromRssItem(entry: $entry)
                 );
-                if (count(value: $items) >= self::FEED_MAX_ITEMS) {
-                    break;
-                }
             }
         }
 
@@ -1224,8 +1443,8 @@ final class Extrablatt
     }
 
     /**
-     * Whitelist of sort options. Maps the user-facing dropdown value to a label
-     * and an ORDER BY clause. Default (empty key) is newest first.
+     * Whitelist of sort options. Maps the user-facing dropdown value to a
+     * label and an ORDER BY clause. The default (empty key) is newest first.
      *
      * @return array<string, array{label: string, orderBy: string}>
      */
@@ -1450,6 +1669,12 @@ final class Extrablatt
         if (!in_array(needle: 'vote', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN vote INTEGER NOT NULL DEFAULT 0');
         }
+        if (!in_array(needle: 'magic_rank', haystack: $columns, strict: true)) {
+            $db->exec(statement: 'ALTER TABLE articles ADD COLUMN magic_rank INTEGER DEFAULT NULL');
+        }
+        if (!in_array(needle: 'duplicate_of', haystack: $columns, strict: true)) {
+            $db->exec(statement: 'ALTER TABLE articles ADD COLUMN duplicate_of TEXT DEFAULT NULL');
+        }
     }
 
     /**
@@ -1586,11 +1811,20 @@ final class Extrablatt
 
         // Pad every line with 8 KiB of trailing whitespace so browsers / proxy
         // buffers render each progress line immediately instead of batching.
+        // The same line (without the padding) is written to the persistent
+        // scrape log; the file is truncated at the start of every scrape so
+        // the log always reflects exactly the latest run.
         $padding = str_repeat(string: ' ', times: 8192);
-        $emit = function (string $line) use ($padding): void {
+        if (!is_dir(filename: self::LOG_DIR)) {
+            mkdir(directory: self::LOG_DIR, permissions: 0755, recursive: true);
+        }
+        $logFile = self::LOG_DIR . '/scrape.log';
+        @file_put_contents(filename: $logFile, data: '');
+        $emit = function (string $line) use ($padding, $logFile): void {
             echo $line . $padding . "\n";
             @ob_flush();
             @flush();
+            @file_put_contents(filename: $logFile, data: $line . "\n", flags: FILE_APPEND);
         };
 
         $startedAt = microtime(as_float: true);
@@ -1608,7 +1842,7 @@ final class Extrablatt
         }
 
         // Phase 1: feeds.
-        $emit('Phase 1/7: RSS-Feeds einlesen');
+        $emit('Phase 1/9: RSS-Feeds einlesen');
         $allItems = [];
         foreach (array_keys(array: $this->papers()) as $paper) {
             $paperKey = (string) $paper;
@@ -1632,7 +1866,7 @@ final class Extrablatt
         $urls = array_map(callback: fn(array $entry): string => $entry['item']->link, array: $allItems);
 
         // Phase 2: paywall.
-        $emit('Phase 2/7: Paywall-Status prüfen (HTML-Probe der Originalseiten)');
+        $emit('Phase 2/9: Paywall-Status prüfen (HTML-Probe der Originalseiten)');
         $knownPaywall = $this->readKnownPaywallStatus(db: $db, urls: $urls);
         $toProbe = array_values(array: array_filter(
             array: $allItems,
@@ -1651,7 +1885,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 3: archive availability — only for PLUS articles.
-        $emit('Phase 3/7: Archive-Verfügbarkeit prüfen (nur PLUS, parallel)');
+        $emit('Phase 3/9: Archive-Verfügbarkeit prüfen (nur PLUS, parallel)');
         $plusUrls = array_values(array: array_filter(
             array: $urls,
             callback: fn(string $u): bool => ($paywallStatus[$u] ?? null) === true
@@ -1665,7 +1899,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 4: archive-fulltext check.
-        $emit('Phase 4/7: Volltext-Check der archivierten PLUS-Artikel');
+        $emit('Phase 4/9: Volltext-Check der archivierten PLUS-Artikel');
         $fulltextCfg = $this->loadConfig()['archive_fulltext_check'] ?? [];
         $knownFulltext = $this->readKnownArchiveFulltext(urls: $urls);
         $fulltextCandidates = array_values(array: array_filter(
@@ -1694,15 +1928,19 @@ final class Extrablatt
         $emit('');
 
         // Phase 5: thumbnails.
-        $emit('Phase 5/7: Thumbnails herunterladen + skalieren');
+        $emit('Phase 5/9: Thumbnails herunterladen + skalieren');
 
         $redditItems = array_values(array_filter(
             array: $allItems,
             callback: fn(array $entry): bool => $entry['paper'] === 'reddit'
         ));
+        // Resolve any reddit post whose og-cache is either missing OR empty —
+        // an empty value (left behind by an earlier code path) used to block
+        // the dedicated resolver and force the generic subreddit-icon
+        // fallback for everything.
         $redditPending = array_values(array_filter(
             array: $redditItems,
-            callback: fn(array $entry): bool => !$this->ogImageCacheExists(url: $entry['item']->link)
+            callback: fn(array $entry): bool => $this->readOgImageCache(url: $entry['item']->link) === null
         ));
         if (!empty($redditPending)) {
             $emit(sprintf('  Reddit-Auflösung: %d Posts (JSON + og:image bzw. Community-Icon)', count(value: $redditPending)));
@@ -1710,6 +1948,48 @@ final class Extrablatt
             $this->resolveRedditImagesStreaming(items: $redditPending, emit: $emit);
             $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
             $emit(sprintf('  → Reddit-Auflösung fertig (%d ms)', $ms));
+        }
+
+        // Reddit backfill: pick up to 50 older reddit DB entries that still
+        // have no thumbnail and run them through the resolver + downloader
+        // pipeline. Drains the historical backlog over a couple of scrapes
+        // without dominating the wall time of any single run.
+        $bfRows = (array) $db->query(query: "
+            SELECT a.url AS url, a.title AS title, a.published_at AS published_at
+            FROM articles a
+            WHERE a.paper = 'reddit' AND a.thumbnail IS NULL
+            ORDER BY a.published_at DESC
+            LIMIT 50
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+        $pendingFresh = array_flip(array_map(
+            callback: fn(array $e): string => $e['item']->link,
+            array: $redditPending
+        ));
+        $backfillItems = [];
+        foreach ($bfRows as $row) {
+            $url = (string) $row['url'];
+            if (isset($pendingFresh[$url])) {
+                continue;
+            }
+            if ($this->readOgImageCache(url: $url) !== null) {
+                continue;
+            }
+            $backfillItems[] = [
+                'paper' => 'reddit',
+                'item' => new FeedItem(
+                    title: (string) $row['title'],
+                    link: $url,
+                    publishedAt: $row['published_at'] !== null ? (int) $row['published_at'] : null,
+                    imageUrl: null
+                )
+            ];
+        }
+        if (!empty($backfillItems)) {
+            $emit(sprintf('  Reddit-Backfill: %d ältere Posts ohne Thumbnail', count(value: $backfillItems)));
+            $phaseStart = microtime(as_float: true);
+            $this->resolveRedditImagesStreaming(items: $backfillItems, emit: $emit);
+            $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
+            $emit(sprintf('  → Reddit-Backfill-Resolver fertig (%d ms)', $ms));
         }
 
         $knownThumbs = $this->readArticlesWithThumbnail(db: $db, urls: $urls);
@@ -1745,10 +2025,97 @@ final class Extrablatt
         $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
         $okThumbs = count(value: array_filter(array: $thumbnails));
         $emit(sprintf('  → %d Thumbnails generiert (%d ms)', $okThumbs, $ms));
+
+        // Backfill thumbnail download — for items not in the current feed.
+        // These bypass Phase 7's upsert path because their URL isn't in
+        // $allItems, so we UPDATE the thumbnail column directly.
+        if (!empty($backfillItems)) {
+            $bfImages = [];
+            $bfCandidates = [];
+            $bfFallback = (string) ($papersConfig['reddit']['default_image'] ?? '');
+            foreach ($backfillItems as $entry) {
+                $img = $this->readOgImageCache(url: $entry['item']->link);
+                if ($img === null || $img === '') {
+                    $img = $bfFallback;
+                }
+                if ($img === '') {
+                    continue;
+                }
+                $bfImages[$entry['item']->link] = $img;
+                $bfCandidates[] = $entry;
+            }
+            if (!empty($bfCandidates)) {
+                $bfStart = microtime(as_float: true);
+                $bfThumbs = $this->downloadThumbnailsStreaming(items: $bfCandidates, imageUrls: $bfImages, emit: $emit);
+                $bfUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+                $bfWritten = 0;
+                foreach ($bfThumbs as $url => $thumb) {
+                    if ($thumb !== null) {
+                        $bfUpdate->execute(params: [':thumb' => $thumb, ':url' => $url]);
+                        $bfWritten++;
+                    }
+                }
+                $bfMs = (int) round(num: (microtime(as_float: true) - $bfStart) * 1000);
+                $emit(sprintf('  → Backfill: %d Thumbnails in DB geschrieben (%d ms)', $bfWritten, $bfMs));
+            }
+        }
+
+        // HN backfill: deeper body-image probe (first inline <img>) for HN
+        // articles whose Phase-2 og:image grep came up empty. Capped at 30
+        // per scrape so the wall time stays bounded; the body-img cache
+        // remembers exhausted probes so they aren't retried forever.
+        $hnRows = (array) $db->query(query: "
+            SELECT url, title FROM articles
+            WHERE paper='hackernews' AND thumbnail IS NULL
+            ORDER BY published_at DESC LIMIT 30
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+        $hnImages = [];
+        $hnCandidates = [];
+        $hnProbed = 0;
+        foreach ($hnRows as $row) {
+            $url = (string) $row['url'];
+            if ($this->bodyImgCacheExists(url: $url)) {
+                $img = $this->readBodyImgCache(url: $url);
+            } else {
+                $img = $this->extractImageFromPage(pageUrl: $url);
+                $this->writeBodyImgCache(url: $url, imageUrl: $img ?? '');
+                $hnProbed++;
+            }
+            if ($img === null || $img === '') {
+                continue;
+            }
+            $hnImages[$url] = $img;
+            $hnCandidates[] = [
+                'paper' => 'hackernews',
+                'item' => new FeedItem(
+                    title: (string) $row['title'],
+                    link: $url,
+                    publishedAt: null,
+                    imageUrl: null
+                )
+            ];
+        }
+        if (!empty($hnCandidates) || $hnProbed > 0) {
+            $emit(sprintf('  HN-Backfill: %d Kandidaten (%d frisch geprüft)', count(value: $hnCandidates), $hnProbed));
+            if (!empty($hnCandidates)) {
+                $hnStart = microtime(as_float: true);
+                $hnThumbs = $this->downloadThumbnailsStreaming(items: $hnCandidates, imageUrls: $hnImages, emit: $emit);
+                $hnUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+                $hnWritten = 0;
+                foreach ($hnThumbs as $url => $thumb) {
+                    if ($thumb !== null) {
+                        $hnUpdate->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
+                        $hnWritten++;
+                    }
+                }
+                $hnMs = (int) round(num: (microtime(as_float: true) - $hnStart) * 1000);
+                $emit(sprintf('  → HN-Backfill: %d Thumbnails in DB geschrieben (%d ms)', $hnWritten, $hnMs));
+            }
+        }
         $emit('');
 
         // Phase 6: AI categorisation.
-        $emit('Phase 6/7: AI-Kategorisierung');
+        $emit('Phase 6/9: AI-Kategorisierung');
         $config = $this->loadConfig();
         $env = $this->loadEnv();
         $aiProvider = $env['AI_PROVIDER'] ?? '';
@@ -1794,7 +2161,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 7: upsert.
-        $emit('Phase 7/7: In Datenbank schreiben');
+        $emit('Phase 7/9: In Datenbank schreiben');
         $stmt = $db->prepare(
             query:
             'INSERT INTO articles
@@ -1873,6 +2240,99 @@ final class Extrablatt
             $skippedPaywalled,
             $this->totalArticleCount(db: $db)
         ));
+        $emit('');
+
+        // Phase 8: AI duplicate clustering. Same story across multiple
+        // sources gets collapsed to one canonical entry — must run BEFORE
+        // magic bucket so the bucket doesn't pick duplicates.
+        $emit('Phase 8/9: Duplikat-Clustering per AI');
+        $phaseStart = microtime(as_float: true);
+        $envDup = $this->loadEnv();
+        $aiProviderDup = (string) ($envDup['AI_PROVIDER'] ?? '');
+        $aiModelDup = (string) ($envDup['AI_MODEL'] ?? '');
+        $apiKeyDup = (string) ($envDup['AI_API_KEY'] ?? '');
+        $aiConfigDup = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProviderDup, 'model' => $aiModelDup];
+        if ($aiProviderDup === '' || $aiModelDup === '') {
+            $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
+        } else {
+            $this->clusterDuplicates(db: $db, aiConfig: $aiConfigDup, apiKey: $apiKeyDup, emit: $emit);
+        }
+        $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
+        $emit(sprintf('  → Phase 8 fertig (%d ms)', $ms));
+        $emit('');
+
+        // Phase 9: magic bucket. Two-stage pipeline:
+        //   (a) score every unread article via the rule-based magicScore()
+        //       — affinity from user votes/reads transferred to paper +
+        //       category, z-normalised external rating, recency decay
+        //   (b) hand the top 30 to the configured LLM for a final rerank
+        //       into the top 10, with the user's liked / disliked papers
+        //       and categories as context
+        // The bucket is frozen — readers drain it, no slide-in. Only the
+        // next scrape repopulates.
+        $emit('Phase 9/9: Magic-Bucket berechnen (Affinität + AI-Rerank)');
+        $phaseStart = microtime(as_float: true);
+        $db->exec(statement: 'UPDATE articles SET magic_rank = NULL');
+
+        $aff = $this->magicComputeAffinity(db: $db);
+        $unread = (array) $db->query(query: '
+            SELECT url, paper, title, published_at, rating, vote, category
+            FROM articles WHERE read_at IS NULL AND duplicate_of IS NULL
+        ')->fetchAll(mode: PDO::FETCH_ASSOC);
+
+        if (empty($unread)) {
+            $emit('  → keine ungelesenen Artikel im Topf');
+        } else {
+            foreach ($unread as &$row) {
+                $row['_score'] = $this->magicScore(row: $row, aff: $aff);
+            }
+            unset($row);
+            usort(array: $unread, callback: fn(array $a, array $b): int => $b['_score'] <=> $a['_score']);
+            // Diversity cap on the candidate pool — max 6 from one paper in
+            // the top 30 going to the LLM. Prevents the user's preferred
+            // source (typically reddit) from drowning out smaller papers.
+            $top30 = $this->magicDiversitySelect(sorted: $unread, count: 30, maxPerPaper: 6);
+            $emit(sprintf('  → %d ungelesene gescort, Top 30 (≤6/Quelle) als AI-Kandidaten', count(value: $unread)));
+
+            $env = $this->loadEnv();
+            $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
+            $aiModel = (string) ($env['AI_MODEL'] ?? '');
+            $apiKey = (string) ($env['AI_API_KEY'] ?? '');
+            $aiConfig = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProvider, 'model' => $aiModel];
+
+            $final = null;
+            if ($aiProvider !== '' && $aiModel !== '') {
+                $final = $this->magicAiRerank(
+                    candidates: $top30,
+                    aff: $aff,
+                    aiConfig: $aiConfig,
+                    apiKey: $apiKey,
+                    emit: $emit
+                );
+                if ($final !== null) {
+                    $emit(sprintf('  → AI rerank ergab %d Artikel', count(value: $final)));
+                }
+            }
+            if ($final === null) {
+                $final = array_slice(array: $top30, offset: 0, length: 10);
+                $emit('  → Fallback: Top 10 nach Regel-Score');
+            }
+            // Hard cap on the final bucket: max 3 per paper. Catches both
+            // the AI-rerank case (AI may still over-pick the favourite
+            // source) and the rule-score fallback. Order is preserved.
+            $before = $final;
+            $final = $this->magicDiversitySelect(sorted: $final, count: 10, maxPerPaper: 3);
+            if ($final !== $before) {
+                $emit('  → Quellen-Quote angewendet (≤3/Quelle)');
+            }
+
+            $rankStmt = $db->prepare(query: 'UPDATE articles SET magic_rank = :rank WHERE url = :url');
+            foreach ($final as $i => $row) {
+                $rankStmt->execute(params: [':rank' => $i + 1, ':url' => (string) $row['url']]);
+            }
+            $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
+            $emit(sprintf('  → %d Artikel im Bucket (%d ms)', count(value: $final), $ms));
+        }
         $emit('');
 
         $totalMs = (int) round(num: (microtime(as_float: true) - $startedAt) * 1000);
@@ -2001,21 +2461,55 @@ final class Extrablatt
             return null;
         }
 
-        // (A) Crossposts to external sites → grab og:image from the linked page.
+        // Reddit (2026) redirects every i.redd.it / preview.redd.it /
+        // external-preview.redd.it request to the /media HTML viewer when
+        // hot-linked — hot-linking the actual image bytes is impossible
+        // regardless of headers or cookies. So we explicitly REFUSE all
+        // reddit-CDN URLs and only return things that another host can
+        // serve directly: external image URLs, og:image of an external
+        // article, or the subreddit branding image (on redditmedia.com,
+        // which is a different CDN and still works).
+        $isRedditCdn = static fn(string $u): bool => preg_match(
+            pattern: '~^https?://(?:i|v|preview|external-preview)\.redd\.it/~i',
+            subject: $u
+        ) === 1;
+
         $destUrl = (string) ($post['url_overridden_by_dest'] ?? '');
+
+        // (A) External direct-image link (e.g. https://i.imgur.com/x.jpg).
+        if (
+            $destUrl !== ''
+            && !$isRedditCdn($destUrl)
+            && preg_match(pattern: '~^https?://~i', subject: $destUrl) === 1
+            && preg_match(pattern: '~\.(?:jpe?g|png|webp|gif)(?:\?|$)~i', subject: $destUrl) === 1
+        ) {
+            return $destUrl;
+        }
+
+        // (B) External link target → og:image of the destination page.
         $isInternal = $destUrl === ''
-            || preg_match(
-                pattern: '~^https?://(?:i|v|preview|external-preview)\.redd\.it/|^https?://(?:www|old|new)\.reddit\.com/~i',
-                subject: $destUrl
-            ) === 1;
+            || $isRedditCdn($destUrl)
+            || preg_match(pattern: '~^https?://(?:www|old|new)\.reddit\.com/~i', subject: $destUrl) === 1;
         if (!$isInternal) {
             $og = $this->extractOgImageFromUrl(url: $destUrl);
-            if ($og !== null) {
+            if ($og !== null && !$isRedditCdn($og)) {
                 return $og;
             }
         }
 
-        // (B) Native i.redd.it / image-post → fall back to the subreddit icon.
+        // (C) Plain `thumbnail` field — only when it's NOT a reddit CDN URL.
+        $thumb = (string) ($post['thumbnail'] ?? '');
+        if (
+            $thumb !== ''
+            && preg_match(pattern: '~^https?://~i', subject: $thumb) === 1
+            && !$isRedditCdn($thumb)
+        ) {
+            return $thumb;
+        }
+
+        // (D) Subreddit branding (redditmedia.com — separate CDN, still
+        //     serves bytes directly). One image per subreddit, generic but
+        //     visually distinctive.
         $subreddit = trim(string: (string) ($post['subreddit'] ?? ''));
         if ($subreddit !== '') {
             $icon = $this->resolveSubredditIcon(subreddit: $subreddit);
@@ -2062,13 +2556,20 @@ final class Extrablatt
             return null;
         }
         $body = substr(string: $result->body, offset: 0, length: 300000);
-        if (preg_match(
-            pattern: '~property=["\']og:image["\'][^>]{0,200}content=["\']([^"\']+)~i',
-            subject: $body,
-            matches: $m
-        ) === 1) {
-            $candidate = html_entity_decode(string: $m[1], flags: ENT_QUOTES);
-            return $candidate !== '' ? $candidate : null;
+        // Try og:image first, then twitter:image as a fallback. Both
+        // patterns accept `property=` and `name=` and the common variants
+        // (`og:image:secure_url`, `twitter:image:src`).
+        $patterns = [
+            '~(?:property|name)=["\']og:image(?::secure_url)?["\'][^>]{0,200}content=["\']([^"\']+)~i',
+            '~(?:property|name)=["\']twitter:image(?::src)?["\'][^>]{0,200}content=["\']([^"\']+)~i',
+        ];
+        foreach ($patterns as $pattern) {
+            if (preg_match(pattern: $pattern, subject: $body, matches: $m) === 1) {
+                $candidate = html_entity_decode(string: $m[1], flags: ENT_QUOTES);
+                if ($candidate !== '') {
+                    return $candidate;
+                }
+            }
         }
         return null;
     }
@@ -2103,6 +2604,46 @@ final class Extrablatt
         $file = self::CACHE_DIR . '/og-' . md5(string: $url) . '.json';
         file_put_contents(
             filename: $file,
+            data: json_encode(value: ['url' => $imageUrl], flags: JSON_UNESCAPED_SLASHES)
+        );
+    }
+
+    /**
+     * Body-image probe cache: separate from og-image cache so the deeper
+     * "first <img> in the body" probe can record its result independently
+     * of Phase 2's quick og:image/twitter:image grep. Once an article has
+     * been probed (success OR exhaustion), it stays in this cache forever
+     * so we don't keep re-fetching the same hopeless pages.
+     */
+    private function bodyImgCacheExists(string $url): bool
+    {
+        return file_exists(filename: self::CACHE_DIR . '/bodyimg-' . md5(string: $url) . '.json');
+    }
+
+    private function readBodyImgCache(string $url): ?string
+    {
+        $file = self::CACHE_DIR . '/bodyimg-' . md5(string: $url) . '.json';
+        if (!file_exists(filename: $file)) {
+            return null;
+        }
+        $data = json_decode(json: (string) file_get_contents(filename: $file), associative: true);
+        if (!is_array(value: $data) || !isset($data['url'])) {
+            return null;
+        }
+        $url = (string) $data['url'];
+        return $url === '' ? null : $url;
+    }
+
+    private function writeBodyImgCache(string $url, string $imageUrl): void
+    {
+        if (!is_dir(filename: self::CACHE_DIR)) {
+            mkdir(directory: self::CACHE_DIR, permissions: 0755, recursive: true);
+        }
+        if ($imageUrl !== '') {
+            $imageUrl = html_entity_decode(string: $imageUrl, flags: ENT_QUOTES);
+        }
+        file_put_contents(
+            filename: self::CACHE_DIR . '/bodyimg-' . md5(string: $url) . '.json',
             data: json_encode(value: ['url' => $imageUrl], flags: JSON_UNESCAPED_SLASHES)
         );
     }
@@ -2640,12 +3181,18 @@ final class Extrablatt
         file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $urls));
 
         $paywallPattern = '"isAccessibleForFree"[[:space:]:,]+"?[fF]alse|article:content_tier"[[:space:]]+content="locked';
-        $ogPattern = 'property=["\']og:image["\'][^>]{0,200}content=["\']\K[^"\']+';
+        // og:image first, twitter:image as fallback (Mozilla blogs and some
+        // Substack templates only emit twitter:image). The patterns also
+        // tolerate `name=` vs `property=` since some sites use the wrong
+        // attribute for these meta tags.
+        $ogPattern = '(?:property|name)=["\']og:image(?::secure_url)?["\'][^>]{0,200}content=["\']\K[^"\']+';
+        $twPattern = '(?:property|name)=["\']twitter:image(?::src)?["\'][^>]{0,200}content=["\']\K[^"\']+';
         $innerCmd =
             'body=$(' . escapeshellarg(arg: self::CURL_IMPERSONATE_BIN) .
             ' -sL --max-redirs 5 --max-time 12 "$1" 2>/dev/null | head -c 300000); ' .
             'pw=$(printf "%s" "$body" | grep -ciE ' . escapeshellarg(arg: $paywallPattern) . ' || true); ' .
             'og=$(printf "%s" "$body" | grep -oP ' . escapeshellarg(arg: $ogPattern) . ' 2>/dev/null | head -1); ' .
+            'if [ -z "$og" ]; then og=$(printf "%s" "$body" | grep -oP ' . escapeshellarg(arg: $twPattern) . ' 2>/dev/null | head -1); fi; ' .
             'echo "PAYWALL:${pw:-0}|OGIMG:${og}|URL:$1"';
 
         $cmd = sprintf(
@@ -2677,7 +3224,15 @@ final class Extrablatt
             $ogImage = trim(string: $m[2]);
             $url = $m[3];
             $result[$url] = $isPaywall;
-            $this->writeOgImageCache(url: $url, imageUrl: $ogImage);
+            // Skip the og:image side-effect for reddit posts — the dedicated
+            // Phase-5 resolver parses the post JSON and pulls a much better
+            // thumbnail (signed preview URL, gallery slide, direct image).
+            // Writing here would otherwise stamp an empty cache for every
+            // reddit URL whose og:image grep misses, which then blocks the
+            // proper resolver from running at all.
+            if (strpos(haystack: $url, needle: 'reddit.com/') === false) {
+                $this->writeOgImageCache(url: $url, imageUrl: $ogImage);
+            }
             $checked++;
             $entry = $byUrl[$url] ?? null;
             $paper = $entry['paper'] ?? '?';
@@ -2704,53 +3259,425 @@ final class Extrablatt
     }
 
     /**
-     * Aggregate user-behaviour signals into per-paper and per-category
-     * weights. The vote sum captures the explicit curator signal (-3..+3
-     * each); the read count captures the implicit "I cared enough to click"
-     * signal. Together they describe what the user actually engages with.
+     * Aggregate user signals plus external-rating statistics per paper and
+     * per category. Used as input to the magic-bucket scoring pass.
      *
-     * @return array{paper: array<string, float>, category: array<string, float>}
+     * Affinity = Bayesian-smoothed average curator vote + 0.5 × read-rate.
+     * The smoothing prior (3 phantom zero-votes) keeps a single +3 on an
+     * otherwise unrated paper from dominating the ranking.
+     *
+     * Per-paper rating stats (mean + sd) let downstream scoring z-normalise
+     * the article's external rating so HN points, Reddit scores and X
+     * engagement counts become comparable across sources.
+     *
+     * @return array{
+     *   paper: array<string, array{affinity: float, avg_rating: float, rating_sd: float, n_votes: int}>,
+     *   category: array<string, array{affinity: float, n_votes: int}>
+     * }
      */
-    private function magicWeights(PDO $db): array
+    private function magicComputeAffinity(PDO $db): array
     {
-        $paper = [];
+        $paperAff = [];
         foreach ((array) $db->query(query: '
             SELECT paper,
-                   COALESCE(SUM(vote), 0) AS votes,
-                   SUM(CASE WHEN read_at IS NOT NULL THEN 1 ELSE 0 END) AS reads
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN vote != 0 THEN 1 ELSE 0 END) AS n_votes,
+                   COALESCE(SUM(vote), 0) AS sum_vote,
+                   SUM(CASE WHEN read_at IS NOT NULL THEN 1 ELSE 0 END) AS reads,
+                   AVG(rating) AS avg_rating,
+                   COUNT(rating) AS n_rated,
+                   COALESCE(SUM(rating * rating), 0) AS sum_sq_rating
             FROM articles
             GROUP BY paper
         ')->fetchAll(mode: PDO::FETCH_ASSOC) as $row) {
-            $paper[(string) $row['paper']] = (float) $row['votes'] + 0.5 * (float) $row['reads'];
+            $nVotes = (int) $row['n_votes'];
+            $sumVote = (float) $row['sum_vote'];
+            // Bayesian shrinkage toward 0 — a paper needs sustained signal
+            // to climb away from neutral.
+            $smoothedVote = $sumVote / max(1, $nVotes + 3);
+            $total = (int) $row['total'];
+            $readRate = $total > 0 ? ((int) $row['reads']) / (float) $total : 0.0;
+            $affinity = $smoothedVote + 0.5 * $readRate;
+
+            $nRated = (int) $row['n_rated'];
+            $avgRating = $nRated > 0 ? (float) $row['avg_rating'] : 0.0;
+            $sumSq = (float) $row['sum_sq_rating'];
+            $variance = $nRated > 1 ? max(0.0, ($sumSq / $nRated) - ($avgRating * $avgRating)) : 0.0;
+
+            $paperAff[(string) $row['paper']] = [
+                'affinity' => $affinity,
+                'avg_rating' => $avgRating,
+                'rating_sd' => sqrt(num: $variance),
+                'n_votes' => $nVotes
+            ];
         }
-        $category = [];
+
+        $categoryAff = [];
         foreach ((array) $db->query(query: '
             SELECT category,
-                   COALESCE(SUM(vote), 0) AS votes,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN vote != 0 THEN 1 ELSE 0 END) AS n_votes,
+                   COALESCE(SUM(vote), 0) AS sum_vote,
                    SUM(CASE WHEN read_at IS NOT NULL THEN 1 ELSE 0 END) AS reads
             FROM articles
             WHERE category IS NOT NULL
             GROUP BY category
         ')->fetchAll(mode: PDO::FETCH_ASSOC) as $row) {
-            $category[(string) $row['category']] = (float) $row['votes'] + 0.5 * (float) $row['reads'];
+            $nVotes = (int) $row['n_votes'];
+            $sumVote = (float) $row['sum_vote'];
+            $smoothedVote = $sumVote / max(1, $nVotes + 3);
+            $total = (int) $row['total'];
+            $readRate = $total > 0 ? ((int) $row['reads']) / (float) $total : 0.0;
+            $categoryAff[(string) $row['category']] = [
+                'affinity' => $smoothedVote + 0.5 * $readRate,
+                'n_votes' => $nVotes
+            ];
         }
-        return ['paper' => $paper, 'category' => $category];
+
+        return ['paper' => $paperAff, 'category' => $categoryAff];
     }
 
     /**
-     * @param array<string, float> $map
+     * Composite relevance score for one article row. Higher = better fit.
+     *
+     * @param array<string, mixed> $row
+     * @param array{paper: array<string, array{affinity: float, avg_rating: float, rating_sd: float, n_votes: int}>, category: array<string, array{affinity: float, n_votes: int}>} $aff
      */
-    private function magicCaseExpression(PDO $db, string $column, array $map): string
+    private function magicScore(array $row, array $aff): float
     {
-        if (empty($map)) {
-            return '0';
+        $paper = (string) ($row['paper'] ?? '');
+        $cat = (string) ($row['category'] ?? '');
+
+        // 1. Personal taste signals transferred via paper + category.
+        $score = 1.2 * (float) ($aff['paper'][$paper]['affinity'] ?? 0.0);
+        $score += 1.8 * (float) ($aff['category'][$cat]['affinity'] ?? 0.0);
+
+        // 2. Own vote on this article — strongest signal when present.
+        $score += 3.0 * (float) ($row['vote'] ?? 0);
+
+        // 3. External rating normalised within its paper (z-score) and
+        //    compressed via tanh so a single viral post can't blow up the
+        //    ranking. Papers without rating data contribute 0.
+        if ($row['rating'] !== null) {
+            $rating = (float) $row['rating'];
+            $mean = (float) ($aff['paper'][$paper]['avg_rating'] ?? 0.0);
+            $sd = (float) ($aff['paper'][$paper]['rating_sd'] ?? 0.0);
+            if ($sd > 0.0) {
+                $score += 0.6 * tanh(num: ($rating - $mean) / $sd);
+            }
         }
-        $sql = 'CASE ' . $column;
-        foreach ($map as $key => $value) {
-            $sql .= ' WHEN ' . $db->quote(string: $key) . ' THEN ' . sprintf('%.4f', $value);
+
+        // 4. Recency penalty — ~0.08 per day, decays older posts gently.
+        $published = $row['published_at'] !== null ? (int) $row['published_at'] : time();
+        $ageDays = max(0.0, (time() - $published) / 86400.0);
+        $score -= 0.08 * $ageDays;
+
+        return $score;
+    }
+
+    /**
+     * Greedy diversity selection from a pre-sorted list. Walks through the
+     * input in score order and picks each item only while its paper hasn't
+     * hit the cap. If fewer than $count items survive, remaining slots get
+     * filled from the leftovers (still highest-scoring first) regardless of
+     * the cap — so the result is always exactly $count when the input pool
+     * is large enough.
+     *
+     * @param array<int, array<string, mixed>> $sorted
+     * @return array<int, array<string, mixed>>
+     */
+    private function magicDiversitySelect(array $sorted, int $count, int $maxPerPaper): array
+    {
+        $picked = [];
+        $perPaper = [];
+        $leftovers = [];
+        foreach ($sorted as $row) {
+            $paper = (string) ($row['paper'] ?? '');
+            $perPaper[$paper] = $perPaper[$paper] ?? 0;
+            if ($perPaper[$paper] < $maxPerPaper) {
+                $picked[] = $row;
+                $perPaper[$paper]++;
+                if (count(value: $picked) >= $count) {
+                    return $picked;
+                }
+            } else {
+                $leftovers[] = $row;
+            }
         }
-        $sql .= ' ELSE 0 END';
-        return $sql;
+        foreach ($leftovers as $row) {
+            if (count(value: $picked) >= $count) {
+                break;
+            }
+            $picked[] = $row;
+        }
+        return $picked;
+    }
+
+    /**
+     * AI-driven duplicate clustering across the latest 7 days of articles.
+     * Sends batched lists of titles (grouped by 24h publish window — typical
+     * news-velocity for cross-source duplicates) to the LLM and asks for a
+     * pure-JSON cluster mapping. A canonical article per cluster is picked
+     * (non-social papers preferred, then newest); the rest get their
+     * `duplicate_of` column pointed at the canonical URL.
+     *
+     * Wall-time budget: ~1-3s per batch, ~5-7 batches/scrape = ~10-20s total
+     * with the configured cheap-model (e.g. Gemini Flash Lite). One LLM call
+     * per 24h window keeps prompts small and parallelisable across days.
+     *
+     * @param array<string, mixed> $aiConfig
+     */
+    private function clusterDuplicates(PDO $db, array $aiConfig, string $apiKey, callable $emit): void
+    {
+        if (!file_exists(filename: self::AIHELPER_AUTOLOAD)) {
+            $emit('  ⚠️  aihelper nicht gefunden, Phase übersprungen');
+            return;
+        }
+        $cutoff = time() - 7 * 86400;
+        $rows = (array) $db->query(query: "
+            SELECT url, paper, title, published_at
+            FROM articles
+            WHERE published_at IS NOT NULL AND published_at > {$cutoff}
+            ORDER BY published_at DESC
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+        if (count(value: $rows) < 2) {
+            $emit('  → zu wenige Kandidaten');
+            return;
+        }
+        $emit(sprintf('  %d Kandidaten (letzte 7 Tage)', count(value: $rows)));
+
+        // Index rows so the LLM-returned 1-based indices map back to URLs.
+        $byUrl = [];
+        foreach ($rows as $r) {
+            $byUrl[(string) $r['url']] = $r;
+        }
+
+        // Bucket by 24h publish window — most cross-source duplicates land
+        // within the same day, so per-day prompts keep input small and
+        // cluster recall high.
+        $byDay = [];
+        foreach ($rows as $i => $row) {
+            $day = (int) ((int) $row['published_at'] / 86400);
+            $byDay[$day][] = [
+                'globalIdx' => $i + 1,
+                'paper' => (string) $row['paper'],
+                'title' => (string) $row['title'],
+                'url' => (string) $row['url']
+            ];
+        }
+        krsort(array: $byDay);
+
+        require_once self::AIHELPER_AUTOLOAD;
+        $aiClass = 'vielhuber\\aihelper\\aihelper';
+        $ai = $aiClass::create(
+            provider: (string) ($aiConfig['provider'] ?? ''),
+            model: (string) ($aiConfig['model'] ?? ''),
+            temperature: (float) ($aiConfig['temperature'] ?? 0.0),
+            api_key: $apiKey,
+            log: self::CACHE_DIR . '/aihelper.log',
+            max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+            timeout: (int) ($aiConfig['timeout'] ?? 60)
+        );
+
+        $allClusters = [];
+        $batchNum = 0;
+        foreach ($byDay as $day => $entries) {
+            if (count(value: $entries) < 2) {
+                continue;
+            }
+            $batchNum++;
+            $lines = [];
+            foreach ($entries as $e) {
+                $lines[] = $e['globalIdx'] . '. [' . $e['paper'] . '] ' .
+                    mb_substr(string: $e['title'], start: 0, length: 180);
+            }
+            $prompt =
+                "Erkenne Duplikate in dieser Liste von Nachrichten-Überschriften — Artikel, " .
+                "die dieselbe Story beschreiben, auch wenn anders formuliert oder aus anderer Quelle. " .
+                "Bedingungen für ein Duplikat:\n" .
+                "- gleiche Person/Organisation/Ort UND gleiches Ereignis\n" .
+                "- gleicher Zahlenwert/Datum/Fakt wenn nennenswert\n" .
+                "- nicht nur thematisch ähnlich (zwei Artikel über AI generell sind KEIN Duplikat)\n\n" .
+                "Antworte mit REINEM JSON, keine Erklärung, kein Markdown-Codeblock:\n" .
+                '{"clusters": [[idx, idx, ...], [idx, idx, ...]]}' . "\n\n" .
+                "- idx = die 1-basierten Indizes aus der Liste unten\n" .
+                "- jede innere Liste = eine Gruppe Duplikate (min. 2 Einträge)\n" .
+                "- Einzelartikel ohne Duplikat NICHT auflisten\n\n" .
+                "Artikel:\n" . implode(separator: "\n", array: $lines);
+
+            try {
+                $response = $ai->ask(prompt: $prompt);
+                $raw = $response['response'] ?? null;
+                if (is_object(value: $raw) || is_array(value: $raw)) {
+                    // Some providers (e.g. Gemini in JSON-mode) hand back an
+                    // already-decoded structure. Normalise to associative array.
+                    $data = json_decode(json: (string) json_encode(value: $raw), associative: true);
+                } else {
+                    $rawStr = trim(string: (string) $raw);
+                    $rawStr = (string) preg_replace(pattern: '~^```(?:json)?\s*|\s*```$~', replacement: '', subject: $rawStr);
+                    $data = json_decode(json: $rawStr, associative: true);
+                }
+            } catch (\Throwable $e) {
+                $emit(sprintf('  ⚠️  Batch %d Fehler: %s', $batchNum, $e->getMessage()));
+                continue;
+            }
+            if (!is_array(value: $data) || !isset($data['clusters']) || !is_array(value: $data['clusters'])) {
+                $emit(sprintf('  ⚠️  Batch %d: ungültige JSON-Antwort', $batchNum));
+                continue;
+            }
+            $batchClusterCount = 0;
+            foreach ($data['clusters'] as $clusterIndices) {
+                if (!is_array(value: $clusterIndices) || count(value: $clusterIndices) < 2) {
+                    continue;
+                }
+                $urls = [];
+                foreach ($clusterIndices as $idx) {
+                    $idxInt = (int) $idx;
+                    if ($idxInt >= 1 && $idxInt <= count(value: $rows)) {
+                        $urls[] = (string) $rows[$idxInt - 1]['url'];
+                    }
+                }
+                if (count(value: $urls) >= 2) {
+                    $allClusters[] = array_values(array: array_unique(array: $urls));
+                    $batchClusterCount++;
+                }
+            }
+            $emit(sprintf('  Batch %d: %d Titel → %d Cluster', $batchNum, count(value: $entries), $batchClusterCount));
+        }
+
+        // Reset duplicate_of within the window so re-clustering doesn't
+        // leave stale references when the LLM groups items differently.
+        $db->exec(statement: "UPDATE articles SET duplicate_of = NULL WHERE published_at > {$cutoff}");
+
+        $socialPapers = ['hackernews' => 1, 'reddit' => 1, 'x' => 1];
+        $update = $db->prepare(query: 'UPDATE articles SET duplicate_of = :dup WHERE url = :url');
+        $dupsWritten = 0;
+        $appliedClusters = 0;
+        $assigned = [];
+        foreach ($allClusters as $urls) {
+            $clusterRows = [];
+            foreach ($urls as $u) {
+                if (isset($assigned[$u])) {
+                    continue; // url already in an earlier cluster — skip
+                }
+                if (isset($byUrl[$u])) {
+                    $clusterRows[] = $byUrl[$u];
+                }
+            }
+            if (count(value: $clusterRows) < 2) {
+                continue;
+            }
+            usort(array: $clusterRows, callback: function (array $a, array $b) use ($socialPapers): int {
+                $aSocial = isset($socialPapers[$a['paper']]) ? 1 : 0;
+                $bSocial = isset($socialPapers[$b['paper']]) ? 1 : 0;
+                if ($aSocial !== $bSocial) {
+                    return $aSocial - $bSocial;
+                }
+                return ((int) $b['published_at']) - ((int) $a['published_at']);
+            });
+            $canonical = (string) $clusterRows[0]['url'];
+            $assigned[$canonical] = true;
+            for ($i = 1; $i < count(value: $clusterRows); $i++) {
+                $url = (string) $clusterRows[$i]['url'];
+                $update->execute(params: [':dup' => $canonical, ':url' => $url]);
+                $assigned[$url] = true;
+                $dupsWritten++;
+            }
+            $appliedClusters++;
+        }
+        $emit(sprintf('  → %d Duplikate in %d Clustern markiert', $dupsWritten, $appliedClusters));
+    }
+
+    /**
+     * Ask the configured LLM to re-rank N candidates into a top-10 list
+     * based on the user's preference signals. Returns the reordered subset
+     * or null if the call fails / no AI is configured / response is junk.
+     *
+     * @param array<int, array<string, mixed>> $candidates
+     * @param array{paper: array<string, array<string, float|int>>, category: array<string, array<string, float|int>>} $aff
+     * @param array<string, mixed> $aiConfig
+     * @return array<int, array<string, mixed>>|null
+     */
+    private function magicAiRerank(array $candidates, array $aff, array $aiConfig, string $apiKey, callable $emit): ?array
+    {
+        if (!file_exists(filename: self::AIHELPER_AUTOLOAD)) {
+            return null;
+        }
+        require_once self::AIHELPER_AUTOLOAD;
+        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
+            return null;
+        }
+
+        // Top / bottom 5 papers & categories by affinity for the prompt.
+        $sorted = $aff['paper'];
+        uasort(array: $sorted, callback: fn(array $a, array $b): int => $b['affinity'] <=> $a['affinity']);
+        $likedPapers = array_slice(array: array_keys(array: $sorted), offset: 0, length: 5);
+        $dislikedPapers = array_slice(array: array_reverse(array: array_keys(array: $sorted)), offset: 0, length: 3);
+
+        $sorted = $aff['category'];
+        uasort(array: $sorted, callback: fn(array $a, array $b): int => $b['affinity'] <=> $a['affinity']);
+        $likedCats = array_slice(array: array_keys(array: $sorted), offset: 0, length: 5);
+        $dislikedCats = array_slice(array: array_reverse(array: array_keys(array: $sorted)), offset: 0, length: 3);
+
+        $lines = [];
+        foreach ($candidates as $i => $c) {
+            $lines[] = ($i + 1) . '. [' . ($c['paper'] ?? '?') . ' | ' . ($c['category'] ?? '-') . '] '
+                . mb_substr(string: (string) ($c['title'] ?? ''), start: 0, length: 140);
+        }
+
+        $prompt =
+            "Du sortierst Nachrichten-Artikel nach Relevanz für einen Nutzer und dessen erkannte Präferenzen.\n\n" .
+            "Lieblings-Quellen: " . implode(separator: ', ', array: $likedPapers) . "\n" .
+            "Lieblings-Kategorien: " . implode(separator: ', ', array: $likedCats) . "\n" .
+            "Ungeliebte Quellen: " . implode(separator: ', ', array: $dislikedPapers) . "\n" .
+            "Ungeliebte Kategorien: " . implode(separator: ', ', array: $dislikedCats) . "\n\n" .
+            "Kandidaten:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
+            "Wähle GENAU die 10 spannendsten und relevantesten Artikel für diesen Nutzer aus. " .
+            "Achte auf eine gewisse Quellen-Breite: höchstens 3 Artikel aus derselben Quelle, " .
+            "auch wenn der Nutzer diese Quelle bevorzugt. " .
+            "Antworte AUSSCHLIESSLICH mit einer komma-separierten Liste von 10 Nummern aus der Liste oben, " .
+            "in Reihenfolge der Relevanz (beste zuerst). Beispiel: 7,3,12,1,18,4,22,9,15,2";
+
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $ai = $aiClass::create(
+                provider: (string) ($aiConfig['provider'] ?? ''),
+                model: (string) ($aiConfig['model'] ?? ''),
+                temperature: (float) ($aiConfig['temperature'] ?? 0.0),
+                api_key: $apiKey,
+                log: self::CACHE_DIR . '/aihelper.log',
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 60)
+            );
+            $response = $ai->ask(prompt: $prompt);
+            $raw = trim(string: (string) ($response['response'] ?? ''));
+        } catch (\Throwable $e) {
+            $emit('  ⚠️  AI-Rerank fehlgeschlagen: ' . $e->getMessage());
+            return null;
+        }
+
+        $indices = [];
+        foreach (preg_split(pattern: '/[^0-9]+/', subject: $raw) as $tok) {
+            if ($tok === '' || !ctype_digit(text: $tok)) {
+                continue;
+            }
+            $idx = (int) $tok - 1;
+            if ($idx >= 0 && $idx < count(value: $candidates) && !in_array(needle: $idx, haystack: $indices, strict: true)) {
+                $indices[] = $idx;
+            }
+            if (count(value: $indices) >= 10) {
+                break;
+            }
+        }
+        if (count(value: $indices) < 5) {
+            $emit('  ⚠️  AI-Antwort unbrauchbar (' . count(value: $indices) . ' valide Indizes)');
+            return null;
+        }
+        $reordered = [];
+        foreach ($indices as $i) {
+            $reordered[] = $candidates[$i];
+        }
+        return $reordered;
     }
 
     /**
@@ -2780,17 +3707,17 @@ final class Extrablatt
             $where[] = 'paywall = :paywall';
             $params[':paywall'] = $paywallFilter === 'plus' ? 1 : 0;
         }
-        // Magic mode always operates on unread articles. Suppress the read
-        // filter here so a stale `read=read` URL param does not produce an
-        // impossible WHERE clause (read_at IS NOT NULL AND read_at IS NULL).
-        if ($magicFilter !== 'magic') {
-            if ($readFilter === 'read') {
-                $where[] = 'read_at IS NOT NULL';
-            }
-            if ($readFilter === 'unread') {
-                $where[] = 'read_at IS NULL';
-            }
+        // Read articles are hidden by default — they only surface when the
+        // user explicitly picks the "gelesen" filter.
+        if ($readFilter === 'read') {
+            $where[] = 'read_at IS NOT NULL';
+        } else {
+            $where[] = 'read_at IS NULL';
         }
+        // Duplicate-articles (same story across multiple sources) are
+        // collapsed to the canonical entry — non-canonical rows stay in the
+        // DB but are hidden by the dashboard.
+        $where[] = 'duplicate_of IS NULL';
         if ($categoryFilter !== '') {
             $values = $this->expandCategoryFilter(selected: $categoryFilter);
             $placeholders = [];
@@ -2801,25 +3728,14 @@ final class Extrablatt
             }
             $where[] = 'category IN (' . implode(separator: ',', array: $placeholders) . ')';
         }
-        if ($magicFilter === 'magic') {
-            // Magic mode: top 10 UNREAD articles ranked by a composite score
-            // that blends explicit votes, implicit clicks per paper/category,
-            // article rating (popularity) and a small recency boost. Other
-            // filters the user picked still narrow the candidate set first.
-            $where[] = 'read_at IS NULL';
-            $weights = $this->magicWeights(db: $db);
-            $paperExpr = $this->magicCaseExpression(db: $db, column: 'paper', map: $weights['paper']);
-            $categoryExpr = $this->magicCaseExpression(db: $db, column: 'category', map: $weights['category']);
-            // log10(rating + 1) compresses Reddit-style 10k scores to ~4 so a
-            // viral post can't outweigh a positive curator vote. Recency
-            // decays roughly one point per ten days.
-            $recencyExpr = '(' . time() . ' - COALESCE(published_at, 0)) / 864000.0';
-            $score =
-                '(' . $paperExpr . ') + (' . $categoryExpr . ') + vote' .
-                ' + COALESCE(log10(NULLIF(rating, 0) + 1), 0)' .
-                ' - ' . $recencyExpr;
-            $orderBy = '(' . $score . ') DESC, published_at DESC';
-            $limit = 10;
+        if ($magicFilter !== 'all') {
+            // "Magisch" (default): show only articles that are currently
+            // sitting in the magic bucket — a frozen top-10 snapshot taken
+            // at the end of the last scrape. As the user reads them, the
+            // bucket drains; it is repopulated only by the next scrape.
+            $where[] = 'magic_rank IS NOT NULL';
+            $orderBy = 'magic_rank ASC';
+            $limit = self::DASHBOARD_MAX_ITEMS;
         } else {
             $sortDef = $this->sortOptions()[$sortFilter] ?? $this->sortOptions()[''];
             $orderBy = $sortDef['orderBy'];
@@ -2903,7 +3819,7 @@ final class Extrablatt
         }
 
         $magicOptions = '';
-        foreach (['' => 'Modus', 'magic' => 'Magisch'] as $value => $label) {
+        foreach (['' => 'Magisch', 'all' => 'Alle'] as $value => $label) {
             $sel = $magicFilter === $value ? ' selected' : '';
             $magicOptions .= '<option value="' . $value . '"' . $sel . '>' . $label . '</option>';
         }
@@ -2994,7 +3910,8 @@ final class Extrablatt
             $itemClass = $isRead ? 'item item--read' : 'item';
 
             $rows .=
-                '<li class="' . $itemClass . '">' .
+                '<li class="' . $itemClass . '" data-mark-read="' . $escapedUrl . '">' .
+                '<div class="item__swipe">' .
                 $thumbnail .
                 '<div class="item__body">' .
                 $ratingBadge .
@@ -3017,13 +3934,23 @@ final class Extrablatt
                 $dateHtml .
                 '</div>' .
                 '</div>' .
+                '</div>' .
                 '</li>';
         }
 
         if ($rows === '') {
+            // "Alles erledigt" — Kaffee-Tasse mit aufsteigendem Dampf.
             $rows =
                 '<li class="item item--empty">' .
-                'Noch keine Artikel in der Datenbank — bitte <a href="/?scrape">Scrape starten</a>.' .
+                '<div class="done">' .
+                '<div class="done__steam">' .
+                '<span class="done__puff"></span>' .
+                '<span class="done__puff"></span>' .
+                '<span class="done__puff"></span>' .
+                '</div>' .
+                '<div class="done__cup">☕</div>' .
+                '<div class="done__label">Et voilà.</div>' .
+                '</div>' .
                 '</li>';
         }
 
@@ -3054,12 +3981,22 @@ final class Extrablatt
                 header.top .scrape-link:hover { background: #3f3f46; }
                 header.top .reset-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #991b1b; padding: 8px 12px; border-radius: 6px; border: 1px solid #fecaca; cursor: pointer; }
                 header.top .reset-btn:hover { background: #fef2f2; border-color: #f87171; }
+                header.top .markall-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #1e40af; padding: 8px 12px; border-radius: 6px; border: 1px solid #bfdbfe; cursor: pointer; }
+                header.top .markall-btn:hover { background: #eff6ff; border-color: #60a5fa; }
                 form.filters { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; margin: 0 0 1rem; }
                 form.filters select { min-width: 0; width: 100%; font: 600 12px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 8px 22px 8px 8px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 7px center; background-size: 8px 5px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
                 form.filters select:focus { outline: none; border-color: #18181b; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
-                .item { position: relative; background: #fff; border: 1px solid #e4e4e7; border-radius: 8px; padding: 12px 14px; margin: 0 0 10px; display: flex; gap: 12px; align-items: flex-start; }
+                .item { position: relative; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; margin: 0 0 10px; transition: opacity 0.18s ease, max-height 0.18s ease, margin 0.18s ease, border-width 0.18s ease; contain: layout paint style; content-visibility: auto; contain-intrinsic-size: 0 92px; }
+                .item__swipe { position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: #fff; touch-action: pan-y; transition: transform 0.18s ease; will-change: transform; }
+                .item.swiping .item__swipe { transition: none; }
+                .item.swipe-out { opacity: 0; max-height: 0; margin-top: 0; margin-bottom: 0; border-width: 0; }
+                .item::before, .item::after { content: ""; position: absolute; top: 0; bottom: 0; width: 80px; display: flex; align-items: center; justify-content: center; color: #fff; font: 700 26px/1 system-ui, sans-serif; pointer-events: none; opacity: 0; transition: opacity 0.12s ease; }
+                .item::before { left: 0; background: #16a34a; }
+                .item::after { right: 0; background: #dc2626; }
+                .item.swipe-left::after { opacity: 1; content: "▼"; }
+                .item.swipe-right::before { opacity: 1; content: "▲"; }
                 .item__thumb-link { flex-shrink: 0; display: block; line-height: 0; }
                 .item__thumb { display: block; width: 64px; height: 64px; border-radius: 6px; object-fit: cover; background: #e4e4e7; }
                 .item__thumb--empty { background: linear-gradient(135deg,#e4e4e7,#d4d4d8); }
@@ -3088,9 +4025,17 @@ final class Extrablatt
                 .vote__val--up { color: #16a34a; }
                 .vote__val--down { color: #dc2626; }
                 .meta__date { color: #71717a; }
-                .item--read { opacity: 0.45; }
-                .item--read:hover { opacity: 0.6; }
-                .item--empty { text-align: center; color: #71717a; padding: 24px 14px; display: block; }
+                .item--empty { text-align: center; color: #71717a; padding: 24px 14px; display: block; background: #fff; }
+                .done { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 28px 0 18px; }
+                .done__steam { position: relative; width: 60px; height: 36px; }
+                .done__puff { position: absolute; bottom: 0; width: 10px; height: 10px; border-radius: 50%; background: rgba(120,120,120,0.55); opacity: 0; filter: blur(1px); animation: done-steam 2.8s ease-out infinite; }
+                .done__puff:nth-child(1) { left: 12px; animation-delay: 0s; }
+                .done__puff:nth-child(2) { left: 25px; animation-delay: 0.9s; }
+                .done__puff:nth-child(3) { left: 38px; animation-delay: 1.7s; }
+                @keyframes done-steam { 0% { opacity: 0; transform: translateY(0) scale(0.5); } 25% { opacity: 0.7; } 100% { opacity: 0; transform: translateY(-32px) scale(1.6); } }
+                .done__cup { font-size: 72px; line-height: 1; animation: done-tilt 4s ease-in-out infinite; transform-origin: bottom center; }
+                @keyframes done-tilt { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+                .done__label { font: 600 14px/1 system-ui, sans-serif; color: #71717a; margin-top: 10px; letter-spacing: 0.02em; }
                 .item--empty a { color: #111; }
                 .top-btn { position: fixed; bottom: 20px; right: max(12px, calc((100vw - 760px) / 2 - 70px)); background: rgba(0,0,0,.78); color: #fff; text-decoration: none; font: 700 12px/1 system-ui, sans-serif; padding: 11px 14px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 2147483647; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
                 .top-btn.visible { opacity: 1; pointer-events: auto; }
@@ -3101,8 +4046,12 @@ final class Extrablatt
             <main>
                 <header class="top">
                     <h1><a href="/">extrablatt!</a></h1>
-                    <span class="count">{$countLabel}</span>
+                    <span class="count" id="count" data-suffix=" Artikel">{$countLabel}</span>
                     <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
+                    <form method="post" action="/" onsubmit="return confirm('Alle ungelesenen Artikel als gelesen markieren?');" style="margin:0">
+                        <input type="hidden" name="mark_all_read" value="1">
+                        <button type="submit" class="markall-btn">All read</button>
+                    </form>
                     <form method="post" action="/" onsubmit="return confirm('Alles zurücksetzen: {$count} DB-Einträge plus alle Cache-Dateien löschen?');" style="margin:0">
                         <input type="hidden" name="reset" value="1">
                         <button type="submit" class="reset-btn">Reset</button>
@@ -3121,6 +4070,32 @@ final class Extrablatt
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
+                // Recount visible articles, update the header label, and
+                // surface the "Et voilà" empty-state when the last item is
+                // swiped away (the server-rendered placeholder only fires on
+                // initial empty load, so JS has to inject it after drains).
+                window.__refreshCount = function () {
+                    var \$count = document.getElementById('count');
+                    var \$list = document.querySelector('ul.items');
+                    if (\$count) {
+                        var n = document.querySelectorAll('ul.items > li.item:not(.item--empty):not(.swipe-out)').length;
+                        \$count.textContent = n + (\$count.getAttribute('data-suffix') || '');
+                        if (\$list && n === 0 && !\$list.querySelector('.item--empty')) {
+                            \$list.insertAdjacentHTML('beforeend',
+                                '<li class="item item--empty">' +
+                                '<div class="done">' +
+                                '<div class="done__steam">' +
+                                '<span class="done__puff"></span>' +
+                                '<span class="done__puff"></span>' +
+                                '<span class="done__puff"></span>' +
+                                '</div>' +
+                                '<div class="done__cup">☕</div>' +
+                                '<div class="done__label">Et voilà.</div>' +
+                                '</div>' +
+                                '</li>');
+                        }
+                    }
+                };
                 (function () {
                     var btn = document.querySelector('.top-btn');
                     if (!btn) return;
@@ -3164,9 +4139,124 @@ final class Extrablatt
                         } catch (err) { /* swallow */ }
                     }, true);
                 })();
+                // Swipe gestures on each item:
+                //   • right → mark read + downvote (vote -1)
+                //   • left  → mark read + upvote   (vote +1)
+                // The item slides off and is removed from the DOM. Vertical
+                // pan still scrolls the list (touch-action: pan-y).
+                (function () {
+                    var THRESHOLD = 80;
+                    var DIRECTION_HINT = 20;
+                    var startX = 0, startY = 0;
+                    var \$item = null, \$swipe = null;
+                    var active = false;
+                    var moved = false;
+                    var sendBeacon = function (params) {
+                        try {
+                            if (navigator.sendBeacon) {
+                                navigator.sendBeacon('/', params);
+                            } else {
+                                fetch('/', { method: 'POST', body: params, keepalive: true });
+                            }
+                        } catch (err) { /* swallow */ }
+                    };
+                    document.addEventListener('pointerdown', function (e) {
+                        // Ignore secondary buttons and clicks on the vote
+                        // widget — those have their own handler.
+                        if (e.button !== undefined && e.button !== 0) return;
+                        if (e.target.closest && e.target.closest('.vote')) return;
+                        var target = e.target.closest && e.target.closest('.item__swipe');
+                        if (!target) return;
+                        \$swipe = target;
+                        \$item = \$swipe.closest('.item');
+                        startX = e.clientX;
+                        startY = e.clientY;
+                        active = false;
+                        moved = false;
+                    }, true);
+                    document.addEventListener('pointermove', function (e) {
+                        if (!\$swipe) return;
+                        var dx = e.clientX - startX;
+                        var dy = e.clientY - startY;
+                        if (!active) {
+                            if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) {
+                                active = true;
+                                \$item.classList.add('swiping');
+                            } else if (Math.abs(dy) > 8) {
+                                \$swipe = null;
+                                return;
+                            }
+                        }
+                        if (active) {
+                            moved = true;
+                            if (e.cancelable) e.preventDefault();
+                            \$swipe.style.transform = 'translateX(' + dx + 'px)';
+                            \$item.classList.toggle('swipe-left', dx < -DIRECTION_HINT);
+                            \$item.classList.toggle('swipe-right', dx > DIRECTION_HINT);
+                        }
+                    }, { passive: false, capture: true });
+                    var finish = function (e) {
+                        if (!\$swipe) return;
+                        var swipe = \$swipe, item = \$item, wasActive = active, wasMoved = moved;
+                        \$swipe = null;
+                        \$item = null;
+                        if (!wasActive) return;
+                        var dx = e.clientX - startX;
+                        if (Math.abs(dx) >= THRESHOLD) {
+                            // Commit: right (dx>0) → upvote, left (dx<0) → downvote.
+                            var delta = dx > 0 ? 1 : -1;
+                            var url = item.getAttribute('data-mark-read');
+                            if (url) {
+                                var read = new URLSearchParams();
+                                read.append('mark_read', url);
+                                sendBeacon(read);
+                                var vote = new URLSearchParams();
+                                vote.append('vote', url);
+                                vote.append('delta', String(delta));
+                                sendBeacon(vote);
+                            }
+                            item.classList.remove('swiping', 'swipe-left', 'swipe-right');
+                            swipe.style.transform = 'translateX(' + (dx > 0 ? 1 : -1) * (window.innerWidth || 400) + 'px)';
+                            // After the slide-off finishes, collapse the row.
+                            requestAnimationFrame(function () {
+                                item.style.maxHeight = item.offsetHeight + 'px';
+                                requestAnimationFrame(function () {
+                                    item.classList.add('swipe-out');
+                                    window.__refreshCount && window.__refreshCount();
+                                });
+                            });
+                            setTimeout(function () { item.remove(); }, 220);
+                        } else {
+                            item.classList.remove('swiping', 'swipe-left', 'swipe-right');
+                            swipe.style.transform = '';
+                        }
+                        // Suppress the synthesised click after an actual drag.
+                        if (wasMoved) {
+                            var swallow = function (evt) {
+                                evt.preventDefault();
+                                evt.stopPropagation();
+                                document.removeEventListener('click', swallow, true);
+                            };
+                            document.addEventListener('click', swallow, true);
+                            setTimeout(function () {
+                                document.removeEventListener('click', swallow, true);
+                            }, 400);
+                        }
+                    };
+                    document.addEventListener('pointerup', finish, true);
+                    document.addEventListener('pointercancel', function () {
+                        if (!\$swipe) return;
+                        \$item.classList.remove('swiping', 'swipe-left', 'swipe-right');
+                        \$swipe.style.transform = '';
+                        \$swipe = null;
+                        \$item = null;
+                    }, true);
+                })();
                 // Persist read state on click. Uses sendBeacon so the
-                // request survives navigation away from the dashboard. Also
-                // dims the item instantly without waiting for a reload.
+                // request survives navigation away from the dashboard. The
+                // item stays in the current list — that lets you still swipe
+                // it to vote afterwards. A reload (or any filter change)
+                // hides it because the default view excludes read articles.
                 (function () {
                     document.addEventListener('click', function (e) {
                         var \$link = e.target.closest && e.target.closest('a[data-mark-read]');
@@ -3182,8 +4272,6 @@ final class Extrablatt
                                 fetch('/', { method: 'POST', body: data, keepalive: true });
                             }
                         } catch (err) { /* swallow */ }
-                        var \$item = \$link.closest('.item');
-                        if (\$item) \$item.classList.add('item--read');
                     }, true);
                 })();
             </script>
@@ -3193,4 +4281,17 @@ final class Extrablatt
     }
 }
 
-(new Extrablatt())->run();
+$app = new Extrablatt();
+if (PHP_SAPI === 'cli' && isset($argv[1])) {
+    if ($argv[1] === 'backfill-reddit') {
+        $app->backfillRedditThumbnails();
+        exit;
+    }
+    if ($argv[1] === 'backfill-hackernews') {
+        $app->backfillHackernewsThumbnails();
+        exit;
+    }
+    fwrite(STDERR, 'unknown CLI command: ' . $argv[1] . "\n");
+    exit(1);
+}
+$app->run();
