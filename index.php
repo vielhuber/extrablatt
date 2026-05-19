@@ -107,6 +107,11 @@ final class Extrablatt
     private const THUMBNAIL_MAX_SOURCE_BYTES = 8_000_000;
     private const FETCH_CONNECT_TIMEOUT_SECONDS = 8;
     private const FETCH_MAX_TIME_SECONDS = 20;
+    // Fixed HMAC key for signing the auth cookie. Anyone with read access to
+    // this source file can forge cookies — which is identical to having the
+    // password — so the security floor is the same as the password gate
+    // itself. Changing the constant invalidates all existing sessions.
+    private const AUTH_COOKIE_KEY = 'extrablatt-cookie-key-v1';
 
     /**
      * Fetch a page and extract the best representative image URL using
@@ -324,8 +329,170 @@ final class Extrablatt
         $emit(sprintf('Fertig: %d Thumbnails in DB geschrieben', $written));
     }
 
+    /**
+     * Check whether the request carries a valid auth cookie. The cookie
+     * format is `<expiry>.<hmac>`, where hmac = HMAC-SHA256(expiry, secret).
+     * This is stateless (no server-side session storage); the secret in
+     * .env is the only thing tying valid cookies to this instance.
+     */
+    private function isAuthenticated(): bool
+    {
+        $env = $this->loadEnv();
+        $password = (string) ($env['AUTH_PASSWORD'] ?? '');
+        if ($password === '') {
+            return true; // auth disabled
+        }
+        $cookie = (string) ($_COOKIE['extrablatt_auth'] ?? '');
+        if ($cookie === '') {
+            return false;
+        }
+        $parts = explode(separator: '.', string: $cookie, limit: 2);
+        if (count(value: $parts) !== 2) {
+            return false;
+        }
+        [$expiry, $sig] = $parts;
+        if (!ctype_digit(text: $expiry) || (int) $expiry < time()) {
+            return false;
+        }
+        $expected = hash_hmac(algo: 'sha256', data: $expiry, key: self::AUTH_COOKIE_KEY);
+        return hash_equals(known_string: $expected, user_string: $sig);
+    }
+
+    private function isHttps(): bool
+    {
+        return !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    }
+
+    private function setAuthCookie(int $expiry, string $signature): void
+    {
+        // Positional-only because PHP's named parameter for the options
+        // array is `$expires_or_options`, not `$options`.
+        setcookie('extrablatt_auth', $expiry . '.' . $signature, [
+            'expires' => $expiry,
+            'path' => '/',
+            'httponly' => true,
+            'samesite' => 'Lax',
+            'secure' => $this->isHttps()
+        ]);
+    }
+
+    private function clearAuthCookie(): void
+    {
+        setcookie('extrablatt_auth', '', [
+            'expires' => time() - 3600,
+            'path' => '/',
+            'httponly' => true,
+            'samesite' => 'Lax',
+            'secure' => $this->isHttps()
+        ]);
+    }
+
+    private function handleLogin(): void
+    {
+        $env = $this->loadEnv();
+        $expected = (string) ($env['AUTH_PASSWORD'] ?? '');
+        $submitted = (string) ($_POST['auth_password'] ?? '');
+        if ($expected === '') {
+            $this->renderLoginPage(error: 'AUTH_PASSWORD in .env nicht gesetzt.');
+            return;
+        }
+        if (!hash_equals(known_string: $expected, user_string: $submitted)) {
+            // Sleep a tiny bit to slow brute force without DoS'ing ourselves.
+            usleep(microseconds: 200_000);
+            $this->renderLoginPage(error: 'Falsches Passwort.');
+            return;
+        }
+        // 1-year session so the PWA stays logged in.
+        $expiry = time() + 365 * 86400;
+        $sig = hash_hmac(algo: 'sha256', data: (string) $expiry, key: self::AUTH_COOKIE_KEY);
+        $this->setAuthCookie(expiry: $expiry, signature: $sig);
+        header(header: 'Location: /');
+    }
+
+    private function handleLogout(): void
+    {
+        $this->clearAuthCookie();
+        header(header: 'Location: /');
+    }
+
+    private function renderLoginPage(?string $error = null): void
+    {
+        header(header: 'Content-Type: text/html; charset=utf-8');
+        $pwa = $this->pwaHeadTags();
+        $errorHtml = $error !== null
+            ? '<p class="err">' . htmlspecialchars(string: $error, flags: ENT_QUOTES) . '</p>'
+            : '';
+        echo <<<HTML
+        <!doctype html>
+        <html lang="de">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1,viewport-fit=cover">
+            <title>extrablatt — Login</title>
+            {$pwa}
+            <style>
+                :root { color-scheme: light; }
+                * { box-sizing: border-box; }
+                html, body { margin: 0; height: 100%; }
+                body { font-family: system-ui, -apple-system, sans-serif; background: #f4f4f5; color: #111; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+                form { background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 32px 28px; box-shadow: 0 4px 24px rgba(0,0,0,.06); width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 14px; }
+                h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.02em; }
+                input { font: 600 16px/1 system-ui, sans-serif; padding: 12px 14px; border: 1px solid #d4d4d8; border-radius: 8px; width: 100%; }
+                input:focus { outline: none; border-color: #18181b; }
+                button { font: 700 14px/1 system-ui, sans-serif; padding: 12px 14px; background: #18181b; color: #fff; border: 0; border-radius: 8px; cursor: pointer; }
+                button:hover { background: #3f3f46; }
+                .err { color: #b91c1c; font: 500 13px/1.4 system-ui, sans-serif; margin: 0; }
+            </style>
+        </head>
+        <body>
+            <form method="post" action="/">
+                <h1>📰 extrablatt</h1>
+                {$errorHtml}
+                <input type="password" name="auth_password" autofocus required placeholder="Passwort">
+                <button type="submit">Login</button>
+            </form>
+        </body>
+        </html>
+        HTML;
+    }
+
     public function run(): void
     {
+        // Auth gate. Three trusted entry points bypass the login page:
+        //   (1) POST with auth_password (the login form itself)
+        //   (2) ?scrape=1&key=<AUTH_SCRAPE_KEY>   (cron from the outside)
+        //   (3) authenticated cookie session
+        // Anything else with auth enabled gets the login page.
+        if (isset($_POST['auth_password'])) {
+            $this->handleLogin();
+            return;
+        }
+        if (isset($_GET['scrape'])) {
+            // The cron-scrape endpoint reuses AUTH_PASSWORD as its key —
+            // one secret to manage. Authenticated browser sessions skip
+            // the key check entirely.
+            $env = $this->loadEnv();
+            $expectedKey = (string) ($env['AUTH_PASSWORD'] ?? '');
+            $providedKey = (string) ($_GET['key'] ?? '');
+            $keyOk = $expectedKey !== '' && hash_equals(known_string: $expectedKey, user_string: $providedKey);
+            if ($keyOk || $this->isAuthenticated()) {
+                $this->runScrape();
+                return;
+            }
+            http_response_code(response_code: 403);
+            header(header: 'Content-Type: text/plain; charset=utf-8');
+            echo "forbidden\n";
+            return;
+        }
+        if (!$this->isAuthenticated()) {
+            $this->renderLoginPage();
+            return;
+        }
+        if (isset($_GET['logout'])) {
+            $this->handleLogout();
+            return;
+        }
+
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
         $statusFilter = (string) ($_GET['status'] ?? '');
@@ -334,11 +501,6 @@ final class Extrablatt
         $readFilter = (string) ($_GET['read'] ?? '');
         $sortFilter = (string) ($_GET['sort'] ?? '');
         $magicFilter = (string) ($_GET['magic'] ?? '');
-
-        if (isset($_GET['scrape'])) {
-            $this->runScrape();
-            return;
-        }
 
         if (isset($_POST['reset']) && $_POST['reset'] === '1') {
             $db = $this->openDatabase();

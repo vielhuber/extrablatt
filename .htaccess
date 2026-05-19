@@ -1,3 +1,23 @@
+# Block direct access to dotfiles and dot directories (.env, .cookies/,
+# .cache/, .bin/, .logs/, .git/ etc.). Apache itself refuses to serve a
+# file whose name starts with a dot when AllowOverride None is set, but
+# many shared hosts are looser — this rule makes the block explicit.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule "(^|/)\.(?!well-known)" - [F,L]
+</IfModule>
+
+# Belt-and-braces: deny direct access to config.json which is technically
+# not a dotfile but still secret-laden.
+<FilesMatch "^(config\.json|.*\.sqlite)$">
+    Require all denied
+</FilesMatch>
+
+# Disable gzip / chunked buffering for the streaming scrape route. Without
+# this, mod_deflate accumulates roughly 8 KiB before flushing to the client,
+# which makes the live scrape output appear in big bursts instead of line by
+# line. The rule only fires for `?scrape=...` requests so the dashboard still
+# benefits from compression.
 <IfModule mod_setenvif.c>
     SetEnvIfNoCase Query_String "(^|&)scrape" no-gzip=1 dont-vary=1
 </IfModule>
