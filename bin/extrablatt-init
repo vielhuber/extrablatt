@@ -56,7 +56,16 @@ foreach (['config.example.json' => '.data/config.json', '.env.example' => '.data
     }
 }
 
-// 5. curl-impersonate into .bin/
+// 5. empty sqlite database — schema gets populated by the app on first run.
+$dbFile = $projectRoot . '/.data/database.sqlite';
+if (file_exists(filename: $dbFile)) {
+    echo "✓ .data/database.sqlite already exists, kept\n";
+} else {
+    new PDO(dsn: 'sqlite:' . $dbFile);
+    echo "✓ .data/database.sqlite created (empty)\n";
+}
+
+// 6. curl-impersonate into .bin/
 $binDir = $projectRoot . '/.bin';
 $binFile = $binDir . '/curl_chrome123';
 if (file_exists(filename: $binFile)) {
