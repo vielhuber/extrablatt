@@ -3570,15 +3570,6 @@ final class Extrablatt
             @file_put_contents(filename: $logPath, data: '');
             $emit('  (debug) aihelper raw response → ' . $logPath);
         }
-        $ai = $aiClass::create(
-            provider: (string) ($aiConfig['provider'] ?? ''),
-            model: (string) ($aiConfig['model'] ?? ''),
-            temperature: (float) ($aiConfig['temperature'] ?? 0.0),
-            api_key: $apiKey,
-            log: $logPath,
-            max_tries: 2,
-            timeout: (int) ($aiConfig['timeout'] ?? 60)
-        );
 
         $allClusters = [];
         $batchNum = 0;
@@ -3592,6 +3583,18 @@ final class Extrablatt
             if ($batchNum > 1) {
                 sleep(seconds: 10);
             }
+            // Fresh instance per batch — aihelper accumulates prompts in its
+            // internal session, so reusing a single instance across batches
+            // grows the request payload until curl times out (status 0).
+            $ai = $aiClass::create(
+                provider: (string) ($aiConfig['provider'] ?? ''),
+                model: (string) ($aiConfig['model'] ?? ''),
+                temperature: (float) ($aiConfig['temperature'] ?? 0.0),
+                api_key: $apiKey,
+                log: $logPath,
+                max_tries: 2,
+                timeout: (int) ($aiConfig['timeout'] ?? 120)
+            );
             $lines = [];
             foreach ($entries as $e) {
                 $lines[] = $e['globalIdx'] . '. [' . $e['paper'] . '] ' .
@@ -3619,6 +3622,20 @@ final class Extrablatt
             $manualAttempts = 2;
             for ($attempt = 1; $attempt <= $manualAttempts; $attempt++) {
                 try {
+                    // Fresh instance per attempt too — appendPromptToSession
+                    // would otherwise stack the same prompt into the session
+                    // on every retry.
+                    if ($attempt > 1) {
+                        $ai = $aiClass::create(
+                            provider: (string) ($aiConfig['provider'] ?? ''),
+                            model: (string) ($aiConfig['model'] ?? ''),
+                            temperature: (float) ($aiConfig['temperature'] ?? 0.0),
+                            api_key: $apiKey,
+                            log: $logPath,
+                            max_tries: 2,
+                            timeout: (int) ($aiConfig['timeout'] ?? 120)
+                        );
+                    }
                     $response = $ai->ask(prompt: $prompt);
                     $raw = $response['response'] ?? null;
                     if (is_object(value: $raw) || is_array(value: $raw)) {
