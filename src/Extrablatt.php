@@ -90,6 +90,7 @@ final class Extrablatt
     // `composer require` and the runtime files (.data/{cache,cookies,
     // config.json,.env,database.sqlite}, .bin/, .logs/) live in the
     // consumer's webroot rather than next to the library code in vendor/.
+    private bool $debug = false;
     private string $cookieDir;
     // css/ and pwa/ live next to the library code so they ship as part of the
     // composer package — the consumer doesn't need to copy them into their
@@ -386,7 +387,19 @@ final class Extrablatt
             $providedKey = (string) ($_GET['key'] ?? '');
             $keyOk = $expectedKey !== '' && hash_equals(known_string: $expectedKey, user_string: $providedKey);
             if ($keyOk || $this->isAuthenticated()) {
-                $this->runScrape();
+                // ?debug=1 re-enables the aihelper file log for Phase 8 only,
+                // so we can capture the raw provider response when clustering
+                // fails. Off by default to keep .logs/ small.
+                $this->debug = ((string) ($_GET['debug'] ?? '')) === '1';
+                // ?phase=<n> jumps straight to a single phase that can run
+                // standalone (currently only Phase 8 — clustering reads from
+                // the DB and doesn't depend on upstream scrape state).
+                $phase = (int) ($_GET['phase'] ?? 0);
+                if ($phase > 0) {
+                    $this->runSinglePhase(phase: $phase);
+                } else {
+                    $this->runScrape();
+                }
                 return;
             }
             http_response_code(response_code: 403);
@@ -1880,29 +1893,68 @@ final class Extrablatt
         return $env;
     }
 
-    private function runScrape(): void
+    /**
+     * Builds the streaming `emit` closure used by every long-running phase.
+     * Truncates the persistent scrape.log at start, sets up output buffering
+     * defaults and returns a closure that echoes + flushes + tees to disk.
+     */
+    private function makeEmit(): callable
     {
-        // Synchronous, streaming. Phases: feeds → paywall → archive → fulltext
-        // → thumbnails → AI categories → upsert.
         $this->setupStreamingOutput();
-
-        // Pad every line with 8 KiB of trailing whitespace so browsers / proxy
-        // buffers render each progress line immediately instead of batching.
-        // The same line (without the padding) is written to the persistent
-        // scrape log; the file is truncated at the start of every scrape so
-        // the log always reflects exactly the latest run.
         $padding = str_repeat(string: ' ', times: 8192);
         if (!is_dir(filename: $this->logDir)) {
             mkdir(directory: $this->logDir, permissions: 0755, recursive: true);
         }
         $logFile = $this->logDir . '/scrape.log';
         @file_put_contents(filename: $logFile, data: '');
-        $emit = function (string $line) use ($padding, $logFile): void {
+        return function (string $line) use ($padding, $logFile): void {
             echo $line . $padding . "\n";
             @ob_flush();
             @flush();
             @file_put_contents(filename: $logFile, data: $line . "\n", flags: FILE_APPEND);
         };
+    }
+
+    /**
+     * Run Phase 8 (duplicate clustering) standalone — useful for debugging
+     * with ?phase=8 since it operates entirely on DB state and needs none
+     * of the upstream scrape phases to have run in this request.
+     */
+    private function runSinglePhase(int $phase): void
+    {
+        $emit = $this->makeEmit();
+        $startedAt = microtime(as_float: true);
+        $emit('=== extrablatt single-phase run — Phase ' . $phase . ' — ' . date(format: 'Y-m-d H:i:s') . ' ===');
+        $emit('');
+        $db = $this->openDatabase();
+
+        $env = $this->loadEnv();
+        $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
+        $aiModel = (string) ($env['AI_MODEL'] ?? '');
+        $apiKey = (string) ($env['AI_API_KEY'] ?? '');
+        $aiConfig = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProvider, 'model' => $aiModel];
+
+        if ($phase === 8) {
+            $emit('Phase 8/9: Duplikat-Clustering per AI');
+            if ($aiProvider === '' || $aiModel === '') {
+                $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
+            } else {
+                $this->clusterDuplicates(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, emit: $emit);
+            }
+        } else {
+            $emit('⚠️  Phase ' . $phase . ' kann nicht standalone laufen (braucht Upstream-State).');
+        }
+
+        $totalMs = (int) round(num: (microtime(as_float: true) - $startedAt) * 1000);
+        $emit('');
+        $emit(sprintf('=== Phase fertig in %d.%03ds ===', intdiv($totalMs, 1000), $totalMs % 1000));
+    }
+
+    private function runScrape(): void
+    {
+        // Synchronous, streaming. Phases: feeds → paywall → archive → fulltext
+        // → thumbnails → AI categories → upsert.
+        $emit = $this->makeEmit();
 
         $startedAt = microtime(as_float: true);
         $emit('=== extrablatt scrape — ' . date(format: 'Y-m-d H:i:s') . ' ===');
@@ -3511,11 +3563,19 @@ final class Extrablatt
         krsort(array: $byDay);
 
         $aiClass = 'vielhuber\\aihelper\\aihelper';
+        // ?debug=1 → enable aihelper file log only for this phase so the raw
+        // provider response is captured when clustering returns nothing.
+        $logPath = $this->debug ? $this->logDir . '/aihelper.log' : null;
+        if ($logPath !== null) {
+            @file_put_contents(filename: $logPath, data: '');
+            $emit('  (debug) aihelper raw response → ' . $logPath);
+        }
         $ai = $aiClass::create(
             provider: (string) ($aiConfig['provider'] ?? ''),
             model: (string) ($aiConfig['model'] ?? ''),
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
+            log: $logPath,
             max_tries: (int) ($aiConfig['max_tries'] ?? 2),
             timeout: (int) ($aiConfig['timeout'] ?? 60)
         );
