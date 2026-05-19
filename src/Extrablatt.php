@@ -110,7 +110,7 @@ final class Extrablatt
 
     public function __construct(private readonly string $rootDir)
     {
-        $this->cookieDir = $rootDir . '/.cookies';
+        $this->cookieDir = $rootDir . '/.data/cookies';
         $this->cssDir = __DIR__ . '/../css';
         $this->pwaDir = __DIR__ . '/../pwa';
         $this->curlImpersonateBin = $rootDir . '/.bin/curl_chrome123';
@@ -118,8 +118,8 @@ final class Extrablatt
         $this->dataDir = $rootDir . '/.data';
         $this->logDir = $rootDir . '/.logs';
         $this->databaseFile = $rootDir . '/.data/database.sqlite';
-        $this->configFile = $rootDir . '/config.json';
-        $this->envFile = $rootDir . '/.env';
+        $this->configFile = $rootDir . '/.data/config.json';
+        $this->envFile = $rootDir . '/.data/.env';
     }
 
     /**
