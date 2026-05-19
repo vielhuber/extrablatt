@@ -114,7 +114,7 @@ final class Extrablatt
         $this->cssDir = __DIR__ . '/../css';
         $this->pwaDir = __DIR__ . '/../pwa';
         $this->curlImpersonateBin = $rootDir . '/.bin/curl_chrome123';
-        $this->cacheDir = $rootDir . '/.cache';
+        $this->cacheDir = $rootDir . '/.data/cache';
         $this->dataDir = $rootDir . '/.data';
         $this->logDir = $rootDir . '/.logs';
         $this->databaseFile = $rootDir . '/.data/database.sqlite';

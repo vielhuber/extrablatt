@@ -39,7 +39,7 @@ HT);
 echo "✓ .htaccess written\n";
 
 // 3. runtime directories (must exist before we copy templates into .data/)
-foreach (['.cache', '.data', '.data/cookies', '.logs'] as $dir) {
+foreach (['.data', '.data/cache', '.data/cookies', '.logs'] as $dir) {
     if (!is_dir(filename: $projectRoot . '/' . $dir)) {
         mkdir(directory: $projectRoot . '/' . $dir, permissions: 0755, recursive: true);
         echo "✓ $dir/ created\n";
