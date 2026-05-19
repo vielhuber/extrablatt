@@ -15,11 +15,14 @@ a simple news aggregator. pulls articles from configurable rss feeds (plus reddi
 ```bash
 mkdir -p .bin && cd .bin
 curl -sL -o ci.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v1.5.6/curl-impersonate-v1.5.6.x86_64-linux-gnu.tar.gz
-tar xzf ci.tar.gz curl_chrome123
-chmod +x curl_chrome123
+tar xzf ci.tar.gz curl_chrome123 curl-impersonate
+chmod +x curl_chrome123 curl-impersonate
 ./curl_chrome123 -V    # smoke test — should print a version string
+rm ci.tar.gz
 cd ..
 ```
+
+`curl_chrome123` is a bash wrapper that calls the real `curl-impersonate` binary next to it with chrome-specific tls + header flags — both files need to live in `.bin/`.
 
 works on most shared hosts (the binary is statically linked enough). if the smoke test fails with `error while loading shared libraries`, try an older release with looser glibc requirements.
 
