@@ -3056,17 +3056,14 @@ final class Extrablatt
         }
 
         $aiClass = 'vielhuber\\aihelper\\aihelper';
-        $logPath = $this->logDir . '/aihelper.log';
         $ai = $aiClass::create(
             provider: (string) ($aiConfig['provider'] ?? 'anthropic'),
             model: (string) ($aiConfig['model'] ?? 'claude-haiku-4-5-20251001'),
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
-            log: $logPath,
             max_tries: (int) ($aiConfig['max_tries'] ?? 2),
             timeout: (int) ($aiConfig['timeout'] ?? 60)
         );
-        $emit('  → aihelper log: ' . $logPath);
 
         $categoryList = implode(separator: ', ', array: $categories);
         $result = [];
@@ -3519,7 +3516,6 @@ final class Extrablatt
             model: (string) ($aiConfig['model'] ?? ''),
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
-            log: $this->logDir . '/aihelper.log',
             max_tries: (int) ($aiConfig['max_tries'] ?? 2),
             timeout: (int) ($aiConfig['timeout'] ?? 60)
         );
@@ -3686,7 +3682,6 @@ final class Extrablatt
                 model: (string) ($aiConfig['model'] ?? ''),
                 temperature: (float) ($aiConfig['temperature'] ?? 0.0),
                 api_key: $apiKey,
-                log: $this->logDir . '/aihelper.log',
                 max_tries: (int) ($aiConfig['max_tries'] ?? 2),
                 timeout: (int) ($aiConfig['timeout'] ?? 60)
             );
