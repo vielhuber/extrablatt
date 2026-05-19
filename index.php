@@ -88,8 +88,9 @@ final class Extrablatt
     // while still working against archive.ph and the publisher HTML probes.
     private const CURL_IMPERSONATE_BIN = __DIR__ . '/.bin/curl_chrome123';
     private const CACHE_DIR = __DIR__ . '/.cache';
+    private const DATA_DIR = __DIR__ . '/.data';
     private const LOG_DIR = __DIR__ . '/.logs';
-    private const DATABASE_FILE = __DIR__ . '/.cache/articles.sqlite';
+    private const DATABASE_FILE = __DIR__ . '/.data/database.sqlite';
     private const CONFIG_FILE = __DIR__ . '/config.json';
     private const ENV_FILE = __DIR__ . '/.env';
     private const AIHELPER_AUTOLOAD = '/var/www/aihelper/vendor/autoload.php';
@@ -506,7 +507,7 @@ final class Extrablatt
             $db = $this->openDatabase();
             $db->exec(statement: 'DELETE FROM articles');
             foreach ((array) glob(pattern: self::CACHE_DIR . '/*') as $file) {
-                if (is_file(filename: (string) $file) && (string) $file !== self::DATABASE_FILE) {
+                if (is_file(filename: (string) $file)) {
                     @unlink(filename: (string) $file);
                 }
             }
@@ -1774,8 +1775,8 @@ final class Extrablatt
         if ($db !== null) {
             return $db;
         }
-        if (!is_dir(filename: self::CACHE_DIR)) {
-            mkdir(directory: self::CACHE_DIR, permissions: 0755, recursive: true);
+        if (!is_dir(filename: self::DATA_DIR)) {
+            mkdir(directory: self::DATA_DIR, permissions: 0755, recursive: true);
         }
         $db = new PDO(dsn: 'sqlite:' . self::DATABASE_FILE);
         $db->setAttribute(attribute: PDO::ATTR_ERRMODE, value: PDO::ERRMODE_EXCEPTION);
