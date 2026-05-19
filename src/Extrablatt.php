@@ -87,9 +87,9 @@ final class Extrablatt
 
     // Path-related state is initialised in the constructor against the
     // consumer-supplied rootDir, so the package can be installed via
-    // `composer require` and the runtime files (.cache/, .data/, .cookies/,
-    // .bin/, .logs/, config.json, .env) live in the consumer's webroot
-    // rather than next to the library code in vendor/.
+    // `composer require` and the runtime files (.data/{cache,cookies,
+    // config.json,.env,database.sqlite}, .bin/, .logs/) live in the
+    // consumer's webroot rather than next to the library code in vendor/.
     private string $cookieDir;
     // css/ and pwa/ live next to the library code so they ship as part of the
     // composer package — the consumer doesn't need to copy them into their
@@ -155,9 +155,9 @@ final class Extrablatt
     }
 
     // Caches never expire automatically — only the manual Reset button (which
-    // runs DELETE FROM articles plus a sweep of .cache/) drops them. Subsequent
-    // scrapes upsert on top, so existing cached entries are preserved unless the
-    // user explicitly resets.
+    // runs DELETE FROM articles plus a sweep of .data/cache/) drops them.
+    // Subsequent scrapes upsert on top, so existing cached entries are
+    // preserved unless the user explicitly resets.
     // Only enforced for the two social sources (reddit, x) — classical RSS
     // feeds and sitemaps are ingested without any cap.
     private const SOCIAL_FEED_MAX_ITEMS = 100;
