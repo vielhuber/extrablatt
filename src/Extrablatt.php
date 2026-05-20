@@ -2316,8 +2316,10 @@ final class Extrablatt
         );
 
         $existingByTitle = [];
+        $existingUrls = [];
         foreach ($db->query(query: 'SELECT title, url FROM articles')->fetchAll(mode: PDO::FETCH_ASSOC) ?: [] as $row) {
             $existingByTitle[$this->normalizeTitle(title: (string) $row['title'])] = (string) $row['url'];
+            $existingUrls[(string) $row['url']] = true;
         }
 
         $now = time();
@@ -2333,6 +2335,7 @@ final class Extrablatt
                 $skipped++;
                 continue;
             }
+            $wasExisting = isset($existingUrls[$item->link]);
             $isArchived = ($availability[$item->link] ?? false) === true;
             $pw = $paywallStatus[$item->link] ?? null;
             $full = $archiveFull[$item->link] ?? null;
@@ -2360,10 +2363,11 @@ final class Extrablatt
                 ':rating' => $item->rating,
                 ':now' => $now
             ]);
-            if ($stmt->rowCount() === 1) {
-                $inserted++;
-            } else {
+            if ($wasExisting) {
                 $updated++;
+            } else {
+                $inserted++;
+                $existingUrls[$item->link] = true;
             }
             $existingByTitle[$titleKey] = $item->link;
         }
