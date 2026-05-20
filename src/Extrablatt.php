@@ -2286,8 +2286,8 @@ final class Extrablatt
               AND image_url IS NOT NULL AND image_url != ''
               AND (COALESCE(paywall, 0) != 1 OR status = 'archive')
               AND paper NOT IN ('reddit', 'hackernews')
-            ORDER BY published_at DESC
-            LIMIT 30
+            ORDER BY published_at ASC
+            LIMIT 500
         ")->fetchAll(mode: PDO::FETCH_ASSOC);
         if ($genBfRows !== []) {
             $genBfImages = [];
