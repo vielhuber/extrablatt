@@ -3547,23 +3547,49 @@ final class Extrablatt
         ")->fetchAll(mode: PDO::FETCH_ASSOC);
         if ($missing !== []) {
             $emit(sprintf('  %d Artikel ohne Embedding → berechnen', count(value: $missing)));
-            $texts = [];
-            foreach ($missing as $i => $r) {
-                $texts[$i] = '[' . (string) $r['paper'] . '] ' .
-                    mb_substr(string: (string) $r['title'], start: 0, length: 300);
-            }
-            $vectors = $this->computeEmbeddings(texts: $texts, apiKey: $apiKey, model: $embedModel, emit: $emit);
             $stmt = $db->prepare(query: 'UPDATE articles SET embedding = :emb WHERE url = :url');
+            $chunks = array_chunk(array: $missing, length: 100);
             $written = 0;
-            foreach ($vectors as $i => $vec) {
-                if ($vec === null) {
-                    continue;
+            foreach ($chunks as $chunkIdx => $chunk) {
+                $texts = [];
+                foreach ($chunk as $i => $r) {
+                    $texts[$i] = '[' . (string) $r['paper'] . '] ' .
+                        mb_substr(string: (string) $r['title'], start: 0, length: 300);
                 }
-                $stmt->execute(params: [
-                    ':emb' => pack('f*', ...$vec),
-                    ':url' => (string) $missing[$i]['url']
-                ]);
-                $written++;
+                $batchError = null;
+                $vectors = $this->computeEmbeddingsBatch(
+                    texts: $texts,
+                    apiKey: $apiKey,
+                    model: $embedModel,
+                    error: $batchError
+                );
+                $batchOk = 0;
+                foreach ($vectors as $i => $vec) {
+                    if ($vec === null) {
+                        continue;
+                    }
+                    $stmt->execute(params: [
+                        ':emb' => pack('f*', ...$vec),
+                        ':url' => (string) $chunk[$i]['url']
+                    ]);
+                    $written++;
+                    $batchOk++;
+                }
+                $emit(sprintf('  Embedding-Batch %d/%d: %d Vektoren (gesamt %d)', $chunkIdx + 1, count(value: $chunks), $batchOk, $written));
+                if ($batchOk === 0) {
+                    // API call failed — bail rather than spam more failing
+                    // requests. The successfully embedded articles up to this
+                    // point are already in the DB; next scrape resumes from
+                    // there.
+                    if ($batchError !== null) {
+                        $emit('  ⚠️  ' . $batchError);
+                    }
+                    $emit('  ⚠️  Embedding-API liefert nichts mehr — Backfill abgebrochen, wird beim nächsten Lauf fortgesetzt');
+                    break;
+                }
+                if (count(value: $chunks) > 1) {
+                    usleep(microseconds: 100000);
+                }
             }
             $emit(sprintf('  → %d Embeddings gespeichert', $written));
         }
@@ -3642,16 +3668,17 @@ final class Extrablatt
     }
 
     /**
-     * Batch-compute embeddings via Google's batchEmbedContents endpoint.
-     * Returns an array keyed identically to $texts. Missing entries (API
-     * failure for a single item) come back as null so the caller can skip
-     * them rather than poison the loop.
+     * One round-trip to Google's batchEmbedContents endpoint. Returns an
+     * array keyed identically to $texts; entries that the API didn't return
+     * a vector for stay null. $error is set to a human-readable message
+     * when something went wrong (curl error, non-200 HTTP, API error body).
      *
      * @param array<int|string, string> $texts
      * @return array<int|string, array<int, float>|null>
      */
-    private function computeEmbeddings(array $texts, string $apiKey, string $model, callable $emit): array
+    private function computeEmbeddingsBatch(array $texts, string $apiKey, string $model, ?string &$error = null): array
     {
+        $error = null;
         $result = [];
         foreach (array_keys(array: $texts) as $k) {
             $result[$k] = null;
@@ -3660,49 +3687,48 @@ final class Extrablatt
             return $result;
         }
         $keys = array_keys(array: $texts);
-        $chunks = array_chunk(array: $keys, length: 100);
+        $requests = [];
+        foreach ($keys as $k) {
+            $requests[] = [
+                'model' => 'models/' . $model,
+                'content' => ['parts' => [['text' => $texts[$k]]]]
+            ];
+        }
         $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model
             . ':batchEmbedContents?key=' . urlencode(string: $apiKey);
-        $chunkNum = 0;
-        foreach ($chunks as $chunkKeys) {
-            $chunkNum++;
-            $requests = [];
-            foreach ($chunkKeys as $k) {
-                $requests[] = [
-                    'model' => 'models/' . $model,
-                    'content' => ['parts' => [['text' => $texts[$k]]]]
-                ];
-            }
-            $body = json_encode(value: ['requests' => $requests]);
-            $ch = curl_init(url: $url);
-            curl_setopt_array(handle: $ch, options: [
-                CURLOPT_POST => true,
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-                CURLOPT_POSTFIELDS => $body,
-                CURLOPT_TIMEOUT => 60,
-                CURLOPT_CONNECTTIMEOUT => 10
-            ]);
-            $raw = curl_exec(handle: $ch);
-            $http = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
-            curl_close(handle: $ch);
-            if (!is_string(value: $raw) || $http !== 200) {
-                $emit(sprintf('  ⚠️  Embedding-Batch %d/%d: HTTP %d', $chunkNum, count(value: $chunks), $http));
-                continue;
-            }
-            $decoded = json_decode(json: $raw, associative: true);
-            $embeddings = (array) ($decoded['embeddings'] ?? []);
-            $got = 0;
-            foreach ($chunkKeys as $i => $k) {
-                $values = $embeddings[$i]['values'] ?? null;
-                if (is_array(value: $values)) {
-                    $result[$k] = array_map(callback: 'floatval', array: $values);
-                    $got++;
-                }
-            }
-            $emit(sprintf('  Embedding-Batch %d/%d: %d Vektoren', $chunkNum, count(value: $chunks), $got));
-            if (count(value: $chunks) > 1) {
-                usleep(microseconds: 100000);
+        $ch = curl_init(url: $url);
+        curl_setopt_array(handle: $ch, options: [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS => json_encode(value: ['requests' => $requests]),
+            CURLOPT_TIMEOUT => 60,
+            CURLOPT_CONNECTTIMEOUT => 10
+        ]);
+        $raw = curl_exec(handle: $ch);
+        $curlErr = curl_error(handle: $ch);
+        $http = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
+        curl_close(handle: $ch);
+        if (!is_string(value: $raw)) {
+            $error = sprintf('Embedding curl-Fehler: %s', $curlErr !== '' ? $curlErr : 'unbekannt');
+            return $result;
+        }
+        if ($http !== 200) {
+            $snippet = mb_substr(string: $raw, start: 0, length: 400);
+            $error = sprintf('Embedding HTTP %d: %s', $http, $snippet);
+            return $result;
+        }
+        $decoded = json_decode(json: $raw, associative: true);
+        if (!is_array(value: $decoded) || !isset($decoded['embeddings'])) {
+            $snippet = mb_substr(string: $raw, start: 0, length: 400);
+            $error = sprintf('Embedding-Response ungültig: %s', $snippet);
+            return $result;
+        }
+        $embeddings = (array) $decoded['embeddings'];
+        foreach ($keys as $i => $k) {
+            $values = $embeddings[$i]['values'] ?? null;
+            if (is_array(value: $values)) {
+                $result[$k] = array_map(callback: 'floatval', array: $values);
             }
         }
         return $result;
