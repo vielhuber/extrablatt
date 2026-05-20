@@ -1771,6 +1771,10 @@ final class Extrablatt
         if (!in_array(needle: 'embedding', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN embedding BLOB DEFAULT NULL');
         }
+        // 768-dim float32 vector = 3072 bytes. Anything bigger (early
+        // 3072-dim runs) is incompatible with the current similarity loop
+        // and gets reset so the next run re-embeds with the right size.
+        $db->exec(statement: 'UPDATE articles SET embedding = NULL WHERE LENGTH(embedding) > 3072');
     }
 
     /**
@@ -3687,11 +3691,16 @@ final class Extrablatt
             return $result;
         }
         $keys = array_keys(array: $texts);
+        // gemini-embedding-001 defaults to 3072 dims — too heavy to fit
+        // thousands of vectors in PHP memory on a shared host. 768 dims is
+        // the official Matryoshka cut-off that still gives near-3072 recall
+        // for short-text similarity.
         $requests = [];
         foreach ($keys as $k) {
             $requests[] = [
                 'model' => 'models/' . $model,
-                'content' => ['parts' => [['text' => $texts[$k]]]]
+                'content' => ['parts' => [['text' => $texts[$k]]]],
+                'outputDimensionality' => 768
             ];
         }
         $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model
