@@ -3040,6 +3040,11 @@ final class Extrablatt
             $key = md5(string: $articleUrl);
             $lines[] = $imageUrl . "\t" . $tmpDir . '/' . $key . '.bin' . "\t" . $articleUrl;
         }
+        if ($lines === []) {
+            $emit('  ⚠️  keine Bild-URL für die Kandidaten verfügbar');
+            @unlink(filename: $tmpIn);
+            return [];
+        }
         file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $lines));
 
         $innerCmd =
@@ -3059,9 +3064,12 @@ final class Extrablatt
             escapeshellarg(arg: $innerCmd)
         );
 
-        $pipe = popen(command: $cmd . ' 2>/dev/null', mode: 'r');
+        // Capture stderr too — silent failures (binary missing, xargs flag
+        // unsupported, etc.) used to swallow the whole phase.
+        $pipe = popen(command: $cmd . ' 2>&1', mode: 'r');
         if ($pipe === false) {
-            unlink(filename: $tmpIn);
+            $emit('  ⚠️  popen für Thumbnail-Pipeline fehlgeschlagen');
+            @unlink(filename: $tmpIn);
             return [];
         }
 
@@ -3075,6 +3083,8 @@ final class Extrablatt
                 continue;
             }
             if (!preg_match(pattern: '~^SIZE:(\d+)\|DST:(.+?)\|URL:(.+)$~', subject: $line, matches: $m)) {
+                // Non-SIZE output = stderr from xargs/sh/curl. Surface it.
+                $emit('  ⚠️  Pipeline-stderr: ' . mb_substr(string: $line, start: 0, length: 200));
                 continue;
             }
             $size = (int) $m[1];
