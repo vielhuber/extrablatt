@@ -1765,6 +1765,14 @@ final class Extrablatt
         if (!in_array(needle: 'duplicate_of', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN duplicate_of TEXT DEFAULT NULL');
         }
+        if (!in_array(needle: 'dedup_checked_at', haystack: $columns, strict: true)) {
+            $db->exec(statement: 'ALTER TABLE articles ADD COLUMN dedup_checked_at INTEGER DEFAULT NULL');
+            // Backfill: any article that already exists at the moment of this
+            // schema migration was processed by the pre-diff Phase 8 — mark
+            // it as checked so the first incremental run doesn't redo
+            // everything from scratch.
+            $db->exec(statement: 'UPDATE articles SET dedup_checked_at = ' . time() . ' WHERE dedup_checked_at IS NULL');
+        }
     }
 
     /**
@@ -3510,15 +3518,11 @@ final class Extrablatt
 
     /**
      * AI-driven duplicate clustering across the latest 7 days of articles.
-     * Sends batched lists of titles (grouped by 24h publish window — typical
-     * news-velocity for cross-source duplicates) to the LLM and asks for a
-     * pure-JSON cluster mapping. A canonical article per cluster is picked
-     * (non-social papers preferred, then newest); the rest get their
-     * `duplicate_of` column pointed at the canonical URL.
-     *
-     * Wall-time budget: ~1-3s per batch, ~5-7 batches/scrape = ~10-20s total
-     * with the configured cheap-model (e.g. Gemini Flash Lite). One LLM call
-     * per 24h window keeps prompts small and parallelisable across days.
+     * Incremental: only articles that haven't been checked yet (dedup_checked_at
+     * IS NULL) are clustered. For each such "new" article we still send the
+     * canonical articles of the same publish day as context so the LLM can
+     * link the new one back to an existing cluster — but old↔old comparisons
+     * never get re-asked.
      *
      * @param array<string, mixed> $aiConfig
      */
@@ -3529,28 +3533,56 @@ final class Extrablatt
             return;
         }
         $cutoff = time() - 7 * 86400;
-        $rows = (array) $db->query(query: "
+
+        // The "new" articles drive the diff — anything inside the 7d window
+        // that hasn't been dedup-checked yet.
+        $newRows = (array) $db->query(query: "
             SELECT url, paper, title, published_at
             FROM articles
-            WHERE published_at IS NOT NULL AND published_at > {$cutoff}
+            WHERE published_at IS NOT NULL
+              AND published_at > {$cutoff}
+              AND dedup_checked_at IS NULL
             ORDER BY published_at DESC
         ")->fetchAll(mode: PDO::FETCH_ASSOC);
-        if (count(value: $rows) < 2) {
-            $emit('  → zu wenige Kandidaten');
+        if ($newRows === []) {
+            $emit('  → keine neuen Kandidaten seit letztem Lauf');
             return;
         }
-        $emit(sprintf('  %d Kandidaten (letzte 7 Tage)', count(value: $rows)));
 
-        // Index rows so the LLM-returned 1-based indices map back to URLs.
+        // Canonicals of the same window as context — already-clustered
+        // duplicates are skipped (their canonical is in this list).
+        $existingRows = (array) $db->query(query: "
+            SELECT url, paper, title, published_at
+            FROM articles
+            WHERE published_at IS NOT NULL
+              AND published_at > {$cutoff}
+              AND dedup_checked_at IS NOT NULL
+              AND duplicate_of IS NULL
+            ORDER BY published_at DESC
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+
+        $emit(sprintf('  %d neue + %d bestehende canonicals (letzte 7 Tage)', count(value: $newRows), count(value: $existingRows)));
+
+        // Combined index: new articles first (so smaller idx) then existing
+        // canonicals. Mark which are new so the prompt can require each
+        // cluster to contain at least one new item.
+        $rows = [];
+        $newUrls = [];
+        foreach ($newRows as $r) {
+            $rows[] = $r + ['_new' => true];
+            $newUrls[(string) $r['url']] = true;
+        }
+        foreach ($existingRows as $r) {
+            $rows[] = $r + ['_new' => false];
+        }
         $byUrl = [];
         foreach ($rows as $r) {
             $byUrl[(string) $r['url']] = $r;
         }
 
-        // Bucket by 24h publish window — most cross-source duplicates land
-        // within the same day. Then split each day into chunks of <=500 so
-        // single prompts stay around ~25k tokens (avoids Gemini 503s on big
-        // days + keeps response time inside the curl timeout).
+        // Bucket by 24h publish window. A bucket only enters the pipeline if
+        // it contains at least one new article — pure old-canonical days are
+        // skipped, which is the whole point of the diff.
         $byDayRaw = [];
         foreach ($rows as $i => $row) {
             $day = (int) ((int) $row['published_at'] / 86400);
@@ -3558,13 +3590,24 @@ final class Extrablatt
                 'globalIdx' => $i + 1,
                 'paper' => (string) $row['paper'],
                 'title' => (string) $row['title'],
-                'url' => (string) $row['url']
+                'url' => (string) $row['url'],
+                'new' => (bool) $row['_new']
             ];
         }
         krsort(array: $byDayRaw);
         $batchSizeMax = 500;
         $byDay = [];
         foreach ($byDayRaw as $day => $entries) {
+            $hasNew = false;
+            foreach ($entries as $e) {
+                if ($e['new'] === true) {
+                    $hasNew = true;
+                    break;
+                }
+            }
+            if (!$hasNew) {
+                continue;
+            }
             if (count(value: $entries) <= $batchSizeMax) {
                 $byDay[] = $entries;
                 continue;
@@ -3608,8 +3651,13 @@ final class Extrablatt
                 timeout: (int) ($aiConfig['timeout'] ?? 120)
             );
             $lines = [];
+            $newCount = 0;
             foreach ($entries as $e) {
-                $lines[] = $e['globalIdx'] . '. [' . $e['paper'] . '] ' .
+                $marker = $e['new'] === true ? '*' : ' ';
+                if ($e['new'] === true) {
+                    $newCount++;
+                }
+                $lines[] = $marker . ' ' . $e['globalIdx'] . '. [' . $e['paper'] . '] ' .
                     mb_substr(string: $e['title'], start: 0, length: 180);
             }
             $prompt =
@@ -3619,6 +3667,10 @@ final class Extrablatt
                 "- gleiche Person/Organisation/Ort UND gleiches Ereignis\n" .
                 "- gleicher Zahlenwert/Datum/Fakt wenn nennenswert\n" .
                 "- nicht nur thematisch ähnlich (zwei Artikel über AI generell sind KEIN Duplikat)\n\n" .
+                "WICHTIG: Mit '*' markierte Einträge sind NEU. " .
+                "Gib NUR Cluster zurück, die mindestens einen mit '*' markierten Eintrag enthalten. " .
+                "Unmarkierte Einträge dienen nur als Kontext (bestehende Artikel) und werden " .
+                "untereinander nicht erneut geclustert.\n\n" .
                 "Antworte mit REINEM JSON, keine Erklärung, kein Markdown-Codeblock:\n" .
                 '{"clusters": [[idx, idx, ...], [idx, idx, ...]]}' . "\n\n" .
                 "- idx = die 1-basierten Indizes aus der Liste unten\n" .
@@ -3701,21 +3753,18 @@ final class Extrablatt
             $emit(sprintf('  Batch %d: %d Titel → %d Cluster', $batchNum, count(value: $entries), $batchClusterCount));
         }
 
-        // Reset duplicate_of within the window so re-clustering doesn't
-        // leave stale references when the LLM groups items differently.
-        $db->exec(statement: "UPDATE articles SET duplicate_of = NULL WHERE published_at > {$cutoff}");
-
+        // Diff-mode: existing duplicate_of values stay intact. We only assign
+        // duplicate_of to *new* articles. Within a cluster, an existing
+        // canonical (one of the context entries) is preferred as the target;
+        // otherwise we pick by the usual social/recency rule among new items.
         $socialPapers = ['hackernews' => 1, 'reddit' => 1, 'x' => 1];
         $update = $db->prepare(query: 'UPDATE articles SET duplicate_of = :dup WHERE url = :url');
         $dupsWritten = 0;
         $appliedClusters = 0;
-        $assigned = [];
+        $assignedNew = [];
         foreach ($allClusters as $urls) {
             $clusterRows = [];
             foreach ($urls as $u) {
-                if (isset($assigned[$u])) {
-                    continue; // url already in an earlier cluster — skip
-                }
                 if (isset($byUrl[$u])) {
                     $clusterRows[] = $byUrl[$u];
                 }
@@ -3723,25 +3772,76 @@ final class Extrablatt
             if (count(value: $clusterRows) < 2) {
                 continue;
             }
-            usort(array: $clusterRows, callback: function (array $a, array $b) use ($socialPapers): int {
-                $aSocial = isset($socialPapers[$a['paper']]) ? 1 : 0;
-                $bSocial = isset($socialPapers[$b['paper']]) ? 1 : 0;
-                if ($aSocial !== $bSocial) {
-                    return $aSocial - $bSocial;
-                }
-                return ((int) $b['published_at']) - ((int) $a['published_at']);
-            });
-            $canonical = (string) $clusterRows[0]['url'];
-            $assigned[$canonical] = true;
-            for ($i = 1; $i < count(value: $clusterRows); $i++) {
-                $url = (string) $clusterRows[$i]['url'];
-                $update->execute(params: [':dup' => $canonical, ':url' => $url]);
-                $assigned[$url] = true;
-                $dupsWritten++;
+            // Prefer an existing canonical (context entry) as cluster target —
+            // keeps already-established clusters stable across runs.
+            $existingInCluster = array_values(array: array_filter(
+                array: $clusterRows,
+                callback: fn(array $r): bool => ($r['_new'] ?? false) === false
+            ));
+            if ($existingInCluster !== []) {
+                usort(array: $existingInCluster, callback: function (array $a, array $b) use ($socialPapers): int {
+                    $aSocial = isset($socialPapers[$a['paper']]) ? 1 : 0;
+                    $bSocial = isset($socialPapers[$b['paper']]) ? 1 : 0;
+                    if ($aSocial !== $bSocial) {
+                        return $aSocial - $bSocial;
+                    }
+                    return ((int) $b['published_at']) - ((int) $a['published_at']);
+                });
+                $canonical = (string) $existingInCluster[0]['url'];
+            } else {
+                usort(array: $clusterRows, callback: function (array $a, array $b) use ($socialPapers): int {
+                    $aSocial = isset($socialPapers[$a['paper']]) ? 1 : 0;
+                    $bSocial = isset($socialPapers[$b['paper']]) ? 1 : 0;
+                    if ($aSocial !== $bSocial) {
+                        return $aSocial - $bSocial;
+                    }
+                    return ((int) $b['published_at']) - ((int) $a['published_at']);
+                });
+                $canonical = (string) $clusterRows[0]['url'];
             }
-            $appliedClusters++;
+            // Mark every new article in this cluster (except the canonical
+            // itself, if it happens to be new) as duplicate of canonical.
+            $clusterApplied = false;
+            foreach ($clusterRows as $r) {
+                $url = (string) $r['url'];
+                if ($url === $canonical) {
+                    continue;
+                }
+                if (($r['_new'] ?? false) !== true) {
+                    continue;
+                }
+                if (isset($assignedNew[$url])) {
+                    continue;
+                }
+                $update->execute(params: [':dup' => $canonical, ':url' => $url]);
+                $assignedNew[$url] = true;
+                $dupsWritten++;
+                $clusterApplied = true;
+            }
+            if ($clusterApplied) {
+                $appliedClusters++;
+            }
         }
-        $emit(sprintf('  → %d Duplikate in %d Clustern markiert', $dupsWritten, $appliedClusters));
+
+        // Mark every new article that survived this run as checked — both
+        // the ones that ended up as duplicates and the ones that didn't.
+        // Skip articles whose batch failed (they stay NULL and get retried).
+        $newUrlsProcessed = [];
+        foreach ($byDay as $entries) {
+            foreach ($entries as $e) {
+                if ($e['new'] === true) {
+                    $newUrlsProcessed[(string) $e['url']] = true;
+                }
+            }
+        }
+        if ($newUrlsProcessed !== []) {
+            $now = time();
+            $checkStmt = $db->prepare(query: 'UPDATE articles SET dedup_checked_at = :ts WHERE url = :url');
+            foreach (array_keys(array: $newUrlsProcessed) as $url) {
+                $checkStmt->execute(params: [':ts' => $now, ':url' => $url]);
+            }
+        }
+        $emit(sprintf('  → %d neue Duplikate in %d Clustern markiert', $dupsWritten, $appliedClusters));
     }
 
     /**
