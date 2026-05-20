@@ -1596,12 +1596,11 @@ final class Extrablatt
             '-w "STATUS:%{http_code}|LOCATION:%header{location}|TARGET:$2\n" ' .
             '"https://archive.ph/newest/$2" 2>/dev/null';
 
-        $cmd = sprintf(
-            'cat %s | xargs -P %d -d "\n" -I {} sh -c %s _ %s {}',
-            escapeshellarg(arg: $tmpIn),
-            self::ARCHIVE_CHECK_CONCURRENCY,
-            escapeshellarg(arg: $innerCmd),
-            escapeshellarg(arg: 'Cookie: ' . $cookieHeader)
+        $cmd = $this->buildParallelPipeline(
+            tmpIn: $tmpIn,
+            innerCmd: $innerCmd,
+            concurrency: self::ARCHIVE_CHECK_CONCURRENCY,
+            extraArg: 'Cookie: ' . $cookieHeader
         );
 
         $output = (string) shell_exec(command: $cmd);
@@ -2877,12 +2876,11 @@ final class Extrablatt
             'sz=$(stat -c%s "$dst" 2>/dev/null || echo 0); ' .
             'echo "SIZE:$sz|FINAL:$final|FILE:$dst|URL:$src"';
 
-        $cmd = sprintf(
-            'cat %s | xargs -P %d -d "\n" -I {} sh -c %s _ %s {}',
-            escapeshellarg(arg: $tmpIn),
-            self::ARCHIVE_CHECK_CONCURRENCY,
-            escapeshellarg(arg: $innerCmd),
-            escapeshellarg(arg: 'Cookie: ' . $cookieHeader)
+        $cmd = $this->buildParallelPipeline(
+            tmpIn: $tmpIn,
+            innerCmd: $innerCmd,
+            concurrency: self::ARCHIVE_CHECK_CONCURRENCY,
+            extraArg: 'Cookie: ' . $cookieHeader
         );
 
         $pipe = popen(command: $cmd . ' 2>/dev/null', mode: 'r');
@@ -3014,6 +3012,25 @@ final class Extrablatt
      * @param array<string, string> $imageUrls
      * @return array<string, ?string>
      */
+    /**
+     * Build a shell pipeline that runs $innerCmd for every line in $tmpIn
+     * with bounded concurrency, without depending on xargs. Some shared
+     * hosts deny exec on /usr/bin/xargs but allow popen/shell_exec on plain
+     * sh — this helper keeps the same `sh -c ... _ [extra] $line` calling
+     * convention so existing inner-command bodies need no change.
+     */
+    private function buildParallelPipeline(string $tmpIn, string $innerCmd, int $concurrency, ?string $extraArg = null): string
+    {
+        $extra = $extraArg !== null ? escapeshellarg(arg: $extraArg) . ' ' : '';
+        return sprintf(
+            'n=0; while IFS= read -r line; do sh -c %s _ %s"$line" & n=$((n+1)); [ $((n %% %d)) -eq 0 ] && wait; done < %s; wait',
+            escapeshellarg(arg: $innerCmd),
+            $extra,
+            $concurrency,
+            escapeshellarg(arg: $tmpIn)
+        );
+    }
+
     private function downloadThumbnailsStreaming(array $items, array $imageUrls, callable $emit): array
     {
         if (empty($items)) {
@@ -3057,15 +3074,13 @@ final class Extrablatt
             'sz=$(stat -c%s "$dst" 2>/dev/null || echo 0); ' .
             'echo "SIZE:$sz|DST:$dst|URL:$lnk"';
 
-        $cmd = sprintf(
-            'cat %s | xargs -P %d -d "\n" -I {} sh -c %s _ {}',
-            escapeshellarg(arg: $tmpIn),
-            self::ARCHIVE_CHECK_CONCURRENCY,
-            escapeshellarg(arg: $innerCmd)
+        $cmd = $this->buildParallelPipeline(
+            tmpIn: $tmpIn,
+            innerCmd: $innerCmd,
+            concurrency: self::ARCHIVE_CHECK_CONCURRENCY
         );
 
-        // Capture stderr too — silent failures (binary missing, xargs flag
-        // unsupported, etc.) used to swallow the whole phase.
+        // Capture stderr too — silent failures used to swallow the whole phase.
         $pipe = popen(command: $cmd . ' 2>&1', mode: 'r');
         if ($pipe === false) {
             $emit('  ⚠️  popen für Thumbnail-Pipeline fehlgeschlagen');
@@ -3362,11 +3377,10 @@ final class Extrablatt
             'if [ -z "$og" ]; then og=$(printf "%s" "$body" | grep -oP ' . escapeshellarg(arg: $twPattern) . ' 2>/dev/null | head -1); fi; ' .
             'echo "PAYWALL:${pw:-0}|OGIMG:${og}|URL:$1"';
 
-        $cmd = sprintf(
-            'cat %s | xargs -P %d -d "\n" -I {} sh -c %s _ {}',
-            escapeshellarg(arg: $tmpIn),
-            self::ARCHIVE_CHECK_CONCURRENCY,
-            escapeshellarg(arg: $innerCmd)
+        $cmd = $this->buildParallelPipeline(
+            tmpIn: $tmpIn,
+            innerCmd: $innerCmd,
+            concurrency: self::ARCHIVE_CHECK_CONCURRENCY
         );
 
         $pipe = popen(command: $cmd . ' 2>/dev/null', mode: 'r');
