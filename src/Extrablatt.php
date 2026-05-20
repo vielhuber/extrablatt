@@ -2284,7 +2284,7 @@ final class Extrablatt
             FROM articles
             WHERE thumbnail IS NULL
               AND image_url IS NOT NULL AND image_url != ''
-              AND (paywall != 1 OR status = 'archive')
+              AND (COALESCE(paywall, 0) != 1 OR status = 'archive')
               AND paper NOT IN ('reddit', 'hackernews')
             ORDER BY published_at DESC
             LIMIT 30
