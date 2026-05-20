@@ -2269,9 +2269,35 @@ final class Extrablatt
                 $this->writeCategoryCache(title: $title, category: $knownCategories[$linkUrl]);
             }
         }
+        // Mirror Phase 7's skip rules: don't categorise items that will be
+        // dropped on insert (title duplicates pointing to a different URL,
+        // PLUS articles without a usable archive snapshot). Otherwise we
+        // re-categorise the same ~100 throw-away items on every scrape.
+        $existingByTitleEarly = [];
+        foreach ($db->query(query: 'SELECT title, url FROM articles')->fetchAll(mode: PDO::FETCH_ASSOC) ?: [] as $row) {
+            $existingByTitleEarly[$this->normalizeTitle(title: (string) $row['title'])] = (string) $row['url'];
+        }
         $toCategorize = array_values(array: array_filter(
             array: $allItems,
-            callback: fn(array $entry): bool => !array_key_exists(key: $entry['item']->link, array: $knownCategories)
+            callback: function (array $entry) use ($knownCategories, $existingByTitleEarly, $paywallStatus, $availability, $archiveFull): bool {
+                $url = $entry['item']->link;
+                if (array_key_exists(key: $url, array: $knownCategories)) {
+                    return false;
+                }
+                $existingUrl = $existingByTitleEarly[$this->normalizeTitle(title: $entry['item']->title)] ?? null;
+                if ($existingUrl !== null && $existingUrl !== $url) {
+                    return false; // title duplicate — Phase 7 would skip it
+                }
+                $pw = $paywallStatus[$url] ?? null;
+                if ($pw === true) {
+                    $usableArchive = ($availability[$url] ?? false) === true
+                        && ($archiveFull[$url] ?? null) === true;
+                    if (!$usableArchive) {
+                        return false; // PLUS without archive — Phase 7 drops it
+                    }
+                }
+                return true;
+            }
         ));
         $emit(sprintf('  %d bereits kategorisiert, %d zu kategorisieren', count(value: $knownCategories), count(value: $toCategorize)));
         $freshCategories = [];
