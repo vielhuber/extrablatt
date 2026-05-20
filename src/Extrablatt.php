@@ -1767,11 +1767,9 @@ final class Extrablatt
         }
         if (!in_array(needle: 'dedup_checked_at', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN dedup_checked_at INTEGER DEFAULT NULL');
-            // Backfill: any article that already exists at the moment of this
-            // schema migration was processed by the pre-diff Phase 8 — mark
-            // it as checked so the first incremental run doesn't redo
-            // everything from scratch.
-            $db->exec(statement: 'UPDATE articles SET dedup_checked_at = ' . time() . ' WHERE dedup_checked_at IS NULL');
+        }
+        if (!in_array(needle: 'embedding', haystack: $columns, strict: true)) {
+            $db->exec(statement: 'ALTER TABLE articles ADD COLUMN embedding BLOB DEFAULT NULL');
         }
     }
 
@@ -1943,7 +1941,7 @@ final class Extrablatt
         $aiConfig = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProvider, 'model' => $aiModel];
 
         if ($phase === 8) {
-            $emit('Phase 8/9: Duplikat-Clustering per AI');
+            $emit('Phase 8/9: Duplikat-Erkennung per Embedding-Vergleich');
             if ($aiProvider === '' || $aiModel === '') {
                 $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
             } else {
@@ -2378,7 +2376,7 @@ final class Extrablatt
         // Phase 8: AI duplicate clustering. Same story across multiple
         // sources gets collapsed to one canonical entry — must run BEFORE
         // magic bucket so the bucket doesn't pick duplicates.
-        $emit('Phase 8/9: Duplikat-Clustering per AI');
+        $emit('Phase 8/9: Duplikat-Erkennung per Embedding-Vergleich');
         $phaseStart = microtime(as_float: true);
         $envDup = $this->loadEnv();
         $aiProviderDup = (string) ($envDup['AI_PROVIDER'] ?? '');
@@ -3517,331 +3515,222 @@ final class Extrablatt
     }
 
     /**
-     * AI-driven duplicate clustering across the latest 7 days of articles.
-     * Incremental: only articles that haven't been checked yet (dedup_checked_at
-     * IS NULL) are clustered. For each such "new" article we still send the
-     * canonical articles of the same publish day as context so the LLM can
-     * link the new one back to an existing cluster — but old↔old comparisons
-     * never get re-asked.
+     * Duplicate detection via title embeddings (Google text-embedding-004).
+     * Each article gets a 768-dim vector computed once and stored as BLOB.
+     * For every new (= not-yet-checked) article we run a cosine similarity
+     * sweep over the existing canonicals in the 7-day window; on a hit above
+     * the threshold the new article gets duplicate_of set to that canonical
+     * (chain followed to the root). Articles that don't match end up as new
+     * canonicals themselves and become matchable for subsequent candidates.
+     *
+     * Wall-time: dominated by the embed-API call (~30-50 ms per request when
+     * batched), cosine pass over 7k vectors is ~50 ms in pure PHP.
      *
      * @param array<string, mixed> $aiConfig
      */
     private function clusterDuplicates(PDO $db, array $aiConfig, string $apiKey, callable $emit): void
     {
-        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
-            $emit('  ⚠️  aihelper nicht installiert (`composer install`), Phase übersprungen');
-            return;
-        }
         $cutoff = time() - 7 * 86400;
+        $threshold = 0.85;
+        $embedModel = 'text-embedding-004';
 
-        // The "new" articles drive the diff — anything inside the 7d window
-        // that hasn't been dedup-checked yet.
-        $newRows = (array) $db->query(query: "
-            SELECT url, paper, title, published_at
+        // 1. Backfill embeddings for any article in the window that doesn't
+        // have one yet — both fresh imports from this scrape and existing
+        // articles from before this feature was added.
+        $missing = (array) $db->query(query: "
+            SELECT url, paper, title
             FROM articles
             WHERE published_at IS NOT NULL
               AND published_at > {$cutoff}
-              AND dedup_checked_at IS NULL
+              AND embedding IS NULL
             ORDER BY published_at DESC
         ")->fetchAll(mode: PDO::FETCH_ASSOC);
-        if ($newRows === []) {
-            $emit('  → keine neuen Kandidaten seit letztem Lauf');
-            return;
-        }
-
-        // Canonicals of the same window as context — already-clustered
-        // duplicates are skipped (their canonical is in this list).
-        $existingRows = (array) $db->query(query: "
-            SELECT url, paper, title, published_at
-            FROM articles
-            WHERE published_at IS NOT NULL
-              AND published_at > {$cutoff}
-              AND dedup_checked_at IS NOT NULL
-              AND duplicate_of IS NULL
-            ORDER BY published_at DESC
-        ")->fetchAll(mode: PDO::FETCH_ASSOC);
-
-        $emit(sprintf('  %d neue + %d bestehende canonicals (letzte 7 Tage)', count(value: $newRows), count(value: $existingRows)));
-
-        // Combined index: new articles first (so smaller idx) then existing
-        // canonicals. Mark which are new so the prompt can require each
-        // cluster to contain at least one new item.
-        $rows = [];
-        $newUrls = [];
-        foreach ($newRows as $r) {
-            $rows[] = $r + ['_new' => true];
-            $newUrls[(string) $r['url']] = true;
-        }
-        foreach ($existingRows as $r) {
-            $rows[] = $r + ['_new' => false];
-        }
-        $byUrl = [];
-        foreach ($rows as $r) {
-            $byUrl[(string) $r['url']] = $r;
-        }
-
-        // Bucket by 24h publish window. A bucket only enters the pipeline if
-        // it contains at least one new article — pure old-canonical days are
-        // skipped, which is the whole point of the diff.
-        $byDayRaw = [];
-        foreach ($rows as $i => $row) {
-            $day = (int) ((int) $row['published_at'] / 86400);
-            $byDayRaw[$day][] = [
-                'globalIdx' => $i + 1,
-                'paper' => (string) $row['paper'],
-                'title' => (string) $row['title'],
-                'url' => (string) $row['url'],
-                'new' => (bool) $row['_new']
-            ];
-        }
-        krsort(array: $byDayRaw);
-        $batchSizeMax = 500;
-        $byDay = [];
-        foreach ($byDayRaw as $day => $entries) {
-            $hasNew = false;
-            foreach ($entries as $e) {
-                if ($e['new'] === true) {
-                    $hasNew = true;
-                    break;
-                }
+        if ($missing !== []) {
+            $emit(sprintf('  %d Artikel ohne Embedding → berechnen', count(value: $missing)));
+            $texts = [];
+            foreach ($missing as $i => $r) {
+                $texts[$i] = '[' . (string) $r['paper'] . '] ' .
+                    mb_substr(string: (string) $r['title'], start: 0, length: 300);
             }
-            if (!$hasNew) {
-                continue;
-            }
-            if (count(value: $entries) <= $batchSizeMax) {
-                $byDay[] = $entries;
-                continue;
-            }
-            foreach (array_chunk(array: $entries, length: $batchSizeMax) as $chunk) {
-                $byDay[] = $chunk;
-            }
-        }
-
-        $aiClass = 'vielhuber\\aihelper\\aihelper';
-        // ?debug=1 → enable aihelper file log only for this phase so the raw
-        // provider response is captured when clustering returns nothing.
-        $logPath = $this->debug ? $this->logDir . '/aihelper.log' : null;
-        if ($logPath !== null) {
-            @file_put_contents(filename: $logPath, data: '');
-            $emit('  (debug) aihelper raw response → ' . $logPath);
-        }
-
-        $allClusters = [];
-        $batchNum = 0;
-        foreach ($byDay as $entries) {
-            if (count(value: $entries) < 2) {
-                continue;
-            }
-            $batchNum++;
-            // Throttle between batches — Gemini Flash Lite returns 503 "high demand"
-            // when bursting prompts back-to-back, so keep a generous gap.
-            if ($batchNum > 1) {
-                sleep(seconds: 10);
-            }
-            // Fresh instance per batch — aihelper accumulates prompts in its
-            // internal session, so reusing a single instance across batches
-            // grows the request payload until curl times out (status 0).
-            $ai = $aiClass::create(
-                provider: (string) ($aiConfig['provider'] ?? ''),
-                model: (string) ($aiConfig['model'] ?? ''),
-                temperature: (float) ($aiConfig['temperature'] ?? 0.0),
-                api_key: $apiKey,
-                log: $logPath,
-                max_tries: 2,
-                timeout: (int) ($aiConfig['timeout'] ?? 120)
-            );
-            $lines = [];
-            $newCount = 0;
-            foreach ($entries as $e) {
-                $marker = $e['new'] === true ? '*' : ' ';
-                if ($e['new'] === true) {
-                    $newCount++;
-                }
-                $lines[] = $marker . ' ' . $e['globalIdx'] . '. [' . $e['paper'] . '] ' .
-                    mb_substr(string: $e['title'], start: 0, length: 180);
-            }
-            $prompt =
-                "Erkenne Duplikate in dieser Liste von Nachrichten-Überschriften — Artikel, " .
-                "die dieselbe Story beschreiben, auch wenn anders formuliert oder aus anderer Quelle. " .
-                "Bedingungen für ein Duplikat:\n" .
-                "- gleiche Person/Organisation/Ort UND gleiches Ereignis\n" .
-                "- gleicher Zahlenwert/Datum/Fakt wenn nennenswert\n" .
-                "- nicht nur thematisch ähnlich (zwei Artikel über AI generell sind KEIN Duplikat)\n\n" .
-                "WICHTIG: Mit '*' markierte Einträge sind NEU. " .
-                "Gib NUR Cluster zurück, die mindestens einen mit '*' markierten Eintrag enthalten. " .
-                "Unmarkierte Einträge dienen nur als Kontext (bestehende Artikel) und werden " .
-                "untereinander nicht erneut geclustert.\n\n" .
-                "Antworte mit REINEM JSON, keine Erklärung, kein Markdown-Codeblock:\n" .
-                '{"clusters": [[idx, idx, ...], [idx, idx, ...]]}' . "\n\n" .
-                "- idx = die 1-basierten Indizes aus der Liste unten\n" .
-                "- jede innere Liste = eine Gruppe Duplikate (min. 2 Einträge)\n" .
-                "- Einzelartikel ohne Duplikat NICHT auflisten\n\n" .
-                "Artikel:\n" . implode(separator: "\n", array: $lines);
-
-            // Manual outer retry on top of aihelper's built-in retries — when the
-            // provider hands back a literal "No response from provider." string
-            // (transient 503), wait longer and try the whole batch again.
-            $data = null;
-            $response = null;
-            $manualAttempts = 2;
-            for ($attempt = 1; $attempt <= $manualAttempts; $attempt++) {
-                try {
-                    // Fresh instance per attempt too — appendPromptToSession
-                    // would otherwise stack the same prompt into the session
-                    // on every retry.
-                    if ($attempt > 1) {
-                        $ai = $aiClass::create(
-                            provider: (string) ($aiConfig['provider'] ?? ''),
-                            model: (string) ($aiConfig['model'] ?? ''),
-                            temperature: (float) ($aiConfig['temperature'] ?? 0.0),
-                            api_key: $apiKey,
-                            log: $logPath,
-                            max_tries: 2,
-                            timeout: (int) ($aiConfig['timeout'] ?? 120)
-                        );
-                    }
-                    $response = $ai->ask(prompt: $prompt);
-                    $raw = $response['response'] ?? null;
-                    if (is_object(value: $raw) || is_array(value: $raw)) {
-                        // Some providers (e.g. Gemini in JSON-mode) hand back an
-                        // already-decoded structure. Normalise to associative array.
-                        $data = json_decode(json: (string) json_encode(value: $raw), associative: true);
-                    } else {
-                        $rawStr = trim(string: (string) $raw);
-                        $rawStr = (string) preg_replace(pattern: '~^```(?:json)?\s*|\s*```$~', replacement: '', subject: $rawStr);
-                        $data = json_decode(json: $rawStr, associative: true);
-                    }
-                } catch (\Throwable $e) {
-                    $emit(sprintf('  ⚠️  Batch %d Versuch %d Fehler: %s', $batchNum, $attempt, $e->getMessage()));
-                    $data = null;
-                }
-                if (is_array(value: $data) && isset($data['clusters']) && is_array(value: $data['clusters'])) {
-                    break;
-                }
-                if ($attempt < $manualAttempts) {
-                    $emit(sprintf('  … Batch %d Versuch %d fehlgeschlagen, warte 60s und versuche erneut', $batchNum, $attempt));
-                    sleep(seconds: 60);
-                }
-            }
-            if (!is_array(value: $data) || !isset($data['clusters']) || !is_array(value: $data['clusters'])) {
-                // Dump a hint of what came back so we can see *why* it didn't
-                // parse — Gemini occasionally wraps the JSON in another field.
-                $hint = json_encode(value: $response['response'] ?? null);
-                if (is_string(value: $hint) && strlen($hint) > 200) {
-                    $hint = substr(string: $hint, offset: 0, length: 200) . '…';
-                }
-                $emit(sprintf('  ⚠️  Batch %d: ungültige JSON-Antwort (got: %s)', $batchNum, (string) $hint));
-                continue;
-            }
-            $batchClusterCount = 0;
-            foreach ($data['clusters'] as $clusterIndices) {
-                if (!is_array(value: $clusterIndices) || count(value: $clusterIndices) < 2) {
+            $vectors = $this->computeEmbeddings(texts: $texts, apiKey: $apiKey, model: $embedModel, emit: $emit);
+            $stmt = $db->prepare(query: 'UPDATE articles SET embedding = :emb WHERE url = :url');
+            $written = 0;
+            foreach ($vectors as $i => $vec) {
+                if ($vec === null) {
                     continue;
                 }
-                $urls = [];
-                foreach ($clusterIndices as $idx) {
-                    $idxInt = (int) $idx;
-                    if ($idxInt >= 1 && $idxInt <= count(value: $rows)) {
-                        $urls[] = (string) $rows[$idxInt - 1]['url'];
-                    }
-                }
-                if (count(value: $urls) >= 2) {
-                    $allClusters[] = array_values(array: array_unique(array: $urls));
-                    $batchClusterCount++;
-                }
+                $stmt->execute(params: [
+                    ':emb' => pack('f*', ...$vec),
+                    ':url' => (string) $missing[$i]['url']
+                ]);
+                $written++;
             }
-            $emit(sprintf('  Batch %d: %d Titel → %d Cluster', $batchNum, count(value: $entries), $batchClusterCount));
+            $emit(sprintf('  → %d Embeddings gespeichert', $written));
         }
 
-        // Diff-mode: existing duplicate_of values stay intact. We only assign
-        // duplicate_of to *new* articles. Within a cluster, an existing
-        // canonical (one of the context entries) is preferred as the target;
-        // otherwise we pick by the usual social/recency rule among new items.
+        // 2. Load every embedding-equipped article in the window. Canonicals
+        // (duplicate_of IS NULL, dedup_checked_at IS NOT NULL) form the match
+        // pool; new candidates (dedup_checked_at IS NULL) drive the loop.
+        $all = (array) $db->query(query: "
+            SELECT url, paper, title, published_at, duplicate_of, dedup_checked_at, embedding
+            FROM articles
+            WHERE published_at IS NOT NULL
+              AND published_at > {$cutoff}
+              AND embedding IS NOT NULL
+            ORDER BY published_at ASC
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+
+        $pool = [];
+        $candidates = [];
+        foreach ($all as $r) {
+            $row = [
+                'url' => (string) $r['url'],
+                'paper' => (string) $r['paper'],
+                'publishedAt' => (int) $r['published_at'],
+                'vector' => array_values(array: (array) unpack(format: 'f*', string: (string) $r['embedding']))
+            ];
+            if ($r['dedup_checked_at'] === null) {
+                $candidates[] = $row;
+            } elseif ($r['duplicate_of'] === null) {
+                $pool[] = $row;
+            }
+        }
+        if ($candidates === []) {
+            $emit('  → keine neuen Kandidaten');
+            return;
+        }
+        $emit(sprintf('  %d neue Kandidaten vs. %d bestehende canonicals', count(value: $candidates), count(value: $pool)));
+
+        // 3. For each candidate find the closest canonical. Above threshold
+        // → duplicate; otherwise the candidate becomes a canonical itself
+        // and joins the pool for the rest of this run.
         $socialPapers = ['hackernews' => 1, 'reddit' => 1, 'x' => 1];
         $update = $db->prepare(query: 'UPDATE articles SET duplicate_of = :dup WHERE url = :url');
+        $checkStmt = $db->prepare(query: 'UPDATE articles SET dedup_checked_at = :ts WHERE url = :url');
+        $now = time();
         $dupsWritten = 0;
-        $appliedClusters = 0;
-        $assignedNew = [];
-        foreach ($allClusters as $urls) {
-            $clusterRows = [];
-            foreach ($urls as $u) {
-                if (isset($byUrl[$u])) {
-                    $clusterRows[] = $byUrl[$u];
+        foreach ($candidates as $cand) {
+            $bestSim = 0.0;
+            $bestIdx = null;
+            foreach ($pool as $i => $p) {
+                $sim = $this->cosineSimilarity(a: $cand['vector'], b: $p['vector']);
+                if ($sim > $bestSim) {
+                    $bestSim = $sim;
+                    $bestIdx = $i;
                 }
             }
-            if (count(value: $clusterRows) < 2) {
+            if ($bestIdx !== null && $bestSim >= $threshold) {
+                $canonical = $pool[$bestIdx];
+                // Swap canonical if the candidate is non-social and the
+                // current canonical is social — preserves the rule that a
+                // real publication beats a Reddit/X reshare.
+                $candSocial = isset($socialPapers[$cand['paper']]) ? 1 : 0;
+                $canonSocial = isset($socialPapers[$canonical['paper']]) ? 1 : 0;
+                if ($candSocial === 0 && $canonSocial === 1) {
+                    $update->execute(params: [':dup' => $cand['url'], ':url' => $canonical['url']]);
+                    $pool[$bestIdx] = $cand;
+                } else {
+                    $update->execute(params: [':dup' => $canonical['url'], ':url' => $cand['url']]);
+                }
+                $dupsWritten++;
+            } else {
+                $pool[] = $cand;
+            }
+            $checkStmt->execute(params: [':ts' => $now, ':url' => $cand['url']]);
+        }
+        $emit(sprintf('  → %d Duplikate per Embedding markiert (Threshold %.2f)', $dupsWritten, $threshold));
+    }
+
+    /**
+     * Batch-compute embeddings via Google's batchEmbedContents endpoint.
+     * Returns an array keyed identically to $texts. Missing entries (API
+     * failure for a single item) come back as null so the caller can skip
+     * them rather than poison the loop.
+     *
+     * @param array<int|string, string> $texts
+     * @return array<int|string, array<int, float>|null>
+     */
+    private function computeEmbeddings(array $texts, string $apiKey, string $model, callable $emit): array
+    {
+        $result = [];
+        foreach (array_keys(array: $texts) as $k) {
+            $result[$k] = null;
+        }
+        if ($texts === []) {
+            return $result;
+        }
+        $keys = array_keys(array: $texts);
+        $chunks = array_chunk(array: $keys, length: 100);
+        $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model
+            . ':batchEmbedContents?key=' . urlencode(string: $apiKey);
+        $chunkNum = 0;
+        foreach ($chunks as $chunkKeys) {
+            $chunkNum++;
+            $requests = [];
+            foreach ($chunkKeys as $k) {
+                $requests[] = [
+                    'model' => 'models/' . $model,
+                    'content' => ['parts' => [['text' => $texts[$k]]]]
+                ];
+            }
+            $body = json_encode(value: ['requests' => $requests]);
+            $ch = curl_init(url: $url);
+            curl_setopt_array(handle: $ch, options: [
+                CURLOPT_POST => true,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                CURLOPT_POSTFIELDS => $body,
+                CURLOPT_TIMEOUT => 60,
+                CURLOPT_CONNECTTIMEOUT => 10
+            ]);
+            $raw = curl_exec(handle: $ch);
+            $http = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
+            curl_close(handle: $ch);
+            if (!is_string(value: $raw) || $http !== 200) {
+                $emit(sprintf('  ⚠️  Embedding-Batch %d/%d: HTTP %d', $chunkNum, count(value: $chunks), $http));
                 continue;
             }
-            // Prefer an existing canonical (context entry) as cluster target —
-            // keeps already-established clusters stable across runs.
-            $existingInCluster = array_values(array: array_filter(
-                array: $clusterRows,
-                callback: fn(array $r): bool => ($r['_new'] ?? false) === false
-            ));
-            if ($existingInCluster !== []) {
-                usort(array: $existingInCluster, callback: function (array $a, array $b) use ($socialPapers): int {
-                    $aSocial = isset($socialPapers[$a['paper']]) ? 1 : 0;
-                    $bSocial = isset($socialPapers[$b['paper']]) ? 1 : 0;
-                    if ($aSocial !== $bSocial) {
-                        return $aSocial - $bSocial;
-                    }
-                    return ((int) $b['published_at']) - ((int) $a['published_at']);
-                });
-                $canonical = (string) $existingInCluster[0]['url'];
-            } else {
-                usort(array: $clusterRows, callback: function (array $a, array $b) use ($socialPapers): int {
-                    $aSocial = isset($socialPapers[$a['paper']]) ? 1 : 0;
-                    $bSocial = isset($socialPapers[$b['paper']]) ? 1 : 0;
-                    if ($aSocial !== $bSocial) {
-                        return $aSocial - $bSocial;
-                    }
-                    return ((int) $b['published_at']) - ((int) $a['published_at']);
-                });
-                $canonical = (string) $clusterRows[0]['url'];
+            $decoded = json_decode(json: $raw, associative: true);
+            $embeddings = (array) ($decoded['embeddings'] ?? []);
+            foreach ($chunkKeys as $i => $k) {
+                $values = $embeddings[$i]['values'] ?? null;
+                if (is_array(value: $values)) {
+                    $result[$k] = array_map(callback: 'floatval', array: $values);
+                }
             }
-            // Mark every new article in this cluster (except the canonical
-            // itself, if it happens to be new) as duplicate of canonical.
-            $clusterApplied = false;
-            foreach ($clusterRows as $r) {
-                $url = (string) $r['url'];
-                if ($url === $canonical) {
-                    continue;
-                }
-                if (($r['_new'] ?? false) !== true) {
-                    continue;
-                }
-                if (isset($assignedNew[$url])) {
-                    continue;
-                }
-                $update->execute(params: [':dup' => $canonical, ':url' => $url]);
-                $assignedNew[$url] = true;
-                $dupsWritten++;
-                $clusterApplied = true;
-            }
-            if ($clusterApplied) {
-                $appliedClusters++;
+            if (count(value: $chunks) > 1) {
+                usleep(microseconds: 100000);
             }
         }
+        return $result;
+    }
 
-        // Mark every new article that survived this run as checked — both
-        // the ones that ended up as duplicates and the ones that didn't.
-        // Skip articles whose batch failed (they stay NULL and get retried).
-        $newUrlsProcessed = [];
-        foreach ($byDay as $entries) {
-            foreach ($entries as $e) {
-                if ($e['new'] === true) {
-                    $newUrlsProcessed[(string) $e['url']] = true;
-                }
-            }
+    /**
+     * Cosine similarity between two equal-length float vectors. Returns 0.0
+     * if either side is a zero vector to keep the caller's threshold logic
+     * monotone.
+     *
+     * @param array<int, float> $a
+     * @param array<int, float> $b
+     */
+    private function cosineSimilarity(array $a, array $b): float
+    {
+        $n = min(count(value: $a), count(value: $b));
+        if ($n === 0) {
+            return 0.0;
         }
-        if ($newUrlsProcessed !== []) {
-            $now = time();
-            $checkStmt = $db->prepare(query: 'UPDATE articles SET dedup_checked_at = :ts WHERE url = :url');
-            foreach (array_keys(array: $newUrlsProcessed) as $url) {
-                $checkStmt->execute(params: [':ts' => $now, ':url' => $url]);
-            }
+        $dot = 0.0;
+        $magA = 0.0;
+        $magB = 0.0;
+        for ($i = 0; $i < $n; $i++) {
+            $dot += $a[$i] * $b[$i];
+            $magA += $a[$i] * $a[$i];
+            $magB += $b[$i] * $b[$i];
         }
-        $emit(sprintf('  → %d neue Duplikate in %d Clustern markiert', $dupsWritten, $appliedClusters));
+        if ($magA <= 0.0 || $magB <= 0.0) {
+            return 0.0;
+        }
+        return $dot / (sqrt(num: $magA) * sqrt(num: $magB));
     }
 
     /**
