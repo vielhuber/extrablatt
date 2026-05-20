@@ -2497,6 +2497,28 @@ final class Extrablatt
         // next flush() after the client goes away, before Phase 7 (DB upsert)
         // runs.
         ignore_user_abort(enable: true);
+        // Capture fatal errors (out-of-memory, etc.) that PHP otherwise kills
+        // the process for silently, so we can see them in scrape.log.
+        $logFile = $this->logDir . '/scrape.log';
+        register_shutdown_function(callback: static function () use ($logFile): void {
+            $err = error_get_last();
+            if ($err === null) {
+                return;
+            }
+            $fatalTypes = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
+            if (($err['type'] & $fatalTypes) === 0) {
+                return;
+            }
+            $msg = sprintf(
+                "\n💥 FATAL: %s in %s:%d\n",
+                $err['message'] ?? 'unknown',
+                $err['file'] ?? '?',
+                $err['line'] ?? 0
+            );
+            @file_put_contents(filename: $logFile, data: $msg, flags: FILE_APPEND);
+            echo $msg;
+            @flush();
+        });
     }
 
     /**
@@ -3598,26 +3620,29 @@ final class Extrablatt
             $emit(sprintf('  → %d Embeddings gespeichert', $written));
         }
 
-        // 2. Load every embedding-equipped article in the window. Canonicals
-        // (duplicate_of IS NULL, dedup_checked_at IS NOT NULL) form the match
-        // pool; new candidates (dedup_checked_at IS NULL) drive the loop.
-        $all = (array) $db->query(query: "
-            SELECT url, paper, title, published_at, duplicate_of, dedup_checked_at, embedding
+        // 2. Stream every embedding-equipped article in the window. We hold
+        // raw blobs (3 KB each at 768 dims) rather than unpacked PHP float
+        // arrays (~80 KB each) — PHP's per-element array overhead would
+        // otherwise blow past the shared-host memory limit at N=9000+.
+        // Canonicals (duplicate_of IS NULL, dedup_checked_at IS NOT NULL)
+        // form the match pool; new candidates (dedup_checked_at IS NULL)
+        // drive the loop.
+        $stmt = $db->query(query: "
+            SELECT url, paper, published_at, duplicate_of, dedup_checked_at, embedding
             FROM articles
             WHERE published_at IS NOT NULL
               AND published_at > {$cutoff}
               AND embedding IS NOT NULL
             ORDER BY published_at ASC
-        ")->fetchAll(mode: PDO::FETCH_ASSOC);
-
+        ");
         $pool = [];
         $candidates = [];
-        foreach ($all as $r) {
+        while ($r = $stmt->fetch(mode: PDO::FETCH_ASSOC)) {
             $row = [
                 'url' => (string) $r['url'],
                 'paper' => (string) $r['paper'],
                 'publishedAt' => (int) $r['published_at'],
-                'vector' => array_values(array: (array) unpack(format: 'f*', string: (string) $r['embedding']))
+                'blob' => (string) $r['embedding']
             ];
             if ($r['dedup_checked_at'] === null) {
                 $candidates[] = $row;
@@ -3625,25 +3650,30 @@ final class Extrablatt
                 $pool[] = $row;
             }
         }
+        unset($stmt);
         if ($candidates === []) {
             $emit('  → keine neuen Kandidaten');
             return;
         }
         $emit(sprintf('  %d neue Kandidaten vs. %d bestehende canonicals', count(value: $candidates), count(value: $pool)));
 
-        // 3. For each candidate find the closest canonical. Above threshold
-        // → duplicate; otherwise the candidate becomes a canonical itself
-        // and joins the pool for the rest of this run.
+        // 3. For each candidate find the closest canonical. Unpacks happen
+        // inline so the float arrays live only for one cosine call and get
+        // GC'd straight after. Above threshold → duplicate; otherwise the
+        // candidate becomes a canonical itself and joins the pool for the
+        // rest of this run.
         $socialPapers = ['hackernews' => 1, 'reddit' => 1, 'x' => 1];
         $update = $db->prepare(query: 'UPDATE articles SET duplicate_of = :dup WHERE url = :url');
         $checkStmt = $db->prepare(query: 'UPDATE articles SET dedup_checked_at = :ts WHERE url = :url');
         $now = time();
         $dupsWritten = 0;
         foreach ($candidates as $cand) {
+            $candVec = array_values(array: (array) unpack(format: 'f*', string: $cand['blob']));
             $bestSim = 0.0;
             $bestIdx = null;
             foreach ($pool as $i => $p) {
-                $sim = $this->cosineSimilarity(a: $cand['vector'], b: $p['vector']);
+                $pVec = array_values(array: (array) unpack(format: 'f*', string: $p['blob']));
+                $sim = $this->cosineSimilarity(a: $candVec, b: $pVec);
                 if ($sim > $bestSim) {
                     $bestSim = $sim;
                     $bestIdx = $i;
