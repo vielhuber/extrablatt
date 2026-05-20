@@ -3532,7 +3532,7 @@ final class Extrablatt
     {
         $cutoff = time() - 7 * 86400;
         $threshold = 0.85;
-        $embedModel = 'text-embedding-004';
+        $embedModel = 'gemini-embedding-001';
 
         // 1. Backfill embeddings for any article in the window that doesn't
         // have one yet — both fresh imports from this scrape and existing
