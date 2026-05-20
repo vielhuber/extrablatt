@@ -3692,12 +3692,15 @@ final class Extrablatt
             }
             $decoded = json_decode(json: $raw, associative: true);
             $embeddings = (array) ($decoded['embeddings'] ?? []);
+            $got = 0;
             foreach ($chunkKeys as $i => $k) {
                 $values = $embeddings[$i]['values'] ?? null;
                 if (is_array(value: $values)) {
                     $result[$k] = array_map(callback: 'floatval', array: $values);
+                    $got++;
                 }
             }
+            $emit(sprintf('  Embedding-Batch %d/%d: %d Vektoren', $chunkNum, count(value: $chunks), $got));
             if (count(value: $chunks) > 1) {
                 usleep(microseconds: 100000);
             }
