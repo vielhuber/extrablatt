@@ -2273,6 +2273,52 @@ final class Extrablatt
                 $emit(sprintf('  → HN-Backfill: %d Thumbnails in DB geschrieben (%d ms)', $hnWritten, $hnMs));
             }
         }
+
+        // Generic backfill: any paper article in DB with image_url set but
+        // thumbnail missing — covers items that slipped through earlier
+        // because Phase 5 was broken (xargs denied, image host blip, etc.).
+        // Capped at 30 per scrape so wall-time stays bounded; the backlog
+        // drains over a few runs.
+        $genBfRows = (array) $db->query(query: "
+            SELECT url, paper, title, image_url
+            FROM articles
+            WHERE thumbnail IS NULL
+              AND image_url IS NOT NULL AND image_url != ''
+              AND (paywall != 1 OR status = 'archive')
+              AND paper NOT IN ('reddit', 'hackernews')
+            ORDER BY published_at DESC
+            LIMIT 30
+        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+        if ($genBfRows !== []) {
+            $genBfImages = [];
+            $genBfCandidates = [];
+            foreach ($genBfRows as $row) {
+                $url = (string) $row['url'];
+                $genBfImages[$url] = (string) $row['image_url'];
+                $genBfCandidates[] = [
+                    'paper' => (string) $row['paper'],
+                    'item' => new FeedItem(
+                        title: (string) $row['title'],
+                        link: $url,
+                        publishedAt: null,
+                        imageUrl: (string) $row['image_url']
+                    )
+                ];
+            }
+            $emit(sprintf('  Generic-Backfill: %d ältere Artikel ohne Thumbnail', count(value: $genBfCandidates)));
+            $genStart = microtime(as_float: true);
+            $genThumbs = $this->downloadThumbnailsStreaming(items: $genBfCandidates, imageUrls: $genBfImages, emit: $emit);
+            $genUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+            $genWritten = 0;
+            foreach ($genThumbs as $url => $thumb) {
+                if ($thumb !== null) {
+                    $genUpdate->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
+                    $genWritten++;
+                }
+            }
+            $genMs = (int) round(num: (microtime(as_float: true) - $genStart) * 1000);
+            $emit(sprintf('  → Generic-Backfill: %d Thumbnails in DB geschrieben (%d ms)', $genWritten, $genMs));
+        }
         $emit('');
 
         // Phase 6: AI categorisation.
