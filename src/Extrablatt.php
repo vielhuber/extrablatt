@@ -2142,11 +2142,38 @@ final class Extrablatt
                 $effectiveImages[$url] = $img;
             }
         }
+        // Same pre-filter as Phase 6 / 7 — don't download thumbnails for
+        // items that Phase 7 will drop (title duplicates pointing to a
+        // different URL, PLUS articles without a usable archive snapshot).
+        // Otherwise we burn the same ~300 downloads on every scrape.
+        $existingByTitleEarly = [];
+        foreach ($db->query(query: 'SELECT title, url FROM articles')->fetchAll(mode: PDO::FETCH_ASSOC) ?: [] as $row) {
+            $existingByTitleEarly[$this->normalizeTitle(title: (string) $row['title'])] = (string) $row['url'];
+        }
         $thumbCandidates = array_values(array: array_filter(
             array: $allItems,
-            callback: fn(array $entry): bool =>
-                isset($effectiveImages[$entry['item']->link])
-                && !in_array(needle: $entry['item']->link, haystack: $knownThumbs, strict: true)
+            callback: function (array $entry) use ($effectiveImages, $knownThumbs, $existingByTitleEarly, $paywallStatus, $availability, $archiveFull): bool {
+                $url = $entry['item']->link;
+                if (!isset($effectiveImages[$url])) {
+                    return false;
+                }
+                if (in_array(needle: $url, haystack: $knownThumbs, strict: true)) {
+                    return false;
+                }
+                $existingUrl = $existingByTitleEarly[$this->normalizeTitle(title: $entry['item']->title)] ?? null;
+                if ($existingUrl !== null && $existingUrl !== $url) {
+                    return false; // title duplicate — Phase 7 would skip it
+                }
+                $pw = $paywallStatus[$url] ?? null;
+                if ($pw === true) {
+                    $usableArchive = ($availability[$url] ?? false) === true
+                        && ($archiveFull[$url] ?? null) === true;
+                    if (!$usableArchive) {
+                        return false; // PLUS without archive — Phase 7 drops it
+                    }
+                }
+                return true;
+            }
         ));
         $emit(sprintf(
             '  %d bereits gecached, %d neu, %d ohne Bild-URL',
