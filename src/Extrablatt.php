@@ -424,6 +424,7 @@ final class Extrablatt
         $readFilter = (string) ($_GET['read'] ?? '');
         $sortFilter = (string) ($_GET['sort'] ?? '');
         $magicFilter = (string) ($_GET['magic'] ?? '');
+        $thumbFilter = (string) ($_GET['thumb'] ?? '');
 
         if (isset($_POST['reset']) && $_POST['reset'] === '1') {
             $db = $this->openDatabase();
@@ -490,6 +491,9 @@ final class Extrablatt
             if (!in_array(needle: $magicFilter, haystack: ['', 'all'], strict: true)) {
                 $magicFilter = '';
             }
+            if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
+                $thumbFilter = '';
+            }
             header(header: 'Content-Type: text/html; charset=utf-8');
             echo $this->renderDashboard(
                 paperFilter: $paperFilter,
@@ -498,7 +502,8 @@ final class Extrablatt
                 categoryFilter: $categoryFilter,
                 readFilter: $readFilter,
                 sortFilter: $sortFilter,
-                magicFilter: $magicFilter
+                magicFilter: $magicFilter,
+                thumbFilter: $thumbFilter
             );
             return;
         }
@@ -4140,7 +4145,8 @@ final class Extrablatt
         string $categoryFilter,
         string $readFilter,
         string $sortFilter,
-        string $magicFilter
+        string $magicFilter,
+        string $thumbFilter
     ): array {
         $db = $this->openDatabase();
         $where = [];
@@ -4156,6 +4162,11 @@ final class Extrablatt
         if ($paywallFilter !== '') {
             $where[] = 'paywall = :paywall';
             $params[':paywall'] = $paywallFilter === 'plus' ? 1 : 0;
+        }
+        if ($thumbFilter === 'yes') {
+            $where[] = 'thumbnail IS NOT NULL';
+        } elseif ($thumbFilter === 'no') {
+            $where[] = 'thumbnail IS NULL';
         }
         // Read articles are hidden by default — they only surface when the
         // user explicitly picks the "gelesen" filter.
@@ -4209,7 +4220,8 @@ final class Extrablatt
         string $categoryFilter,
         string $readFilter,
         string $sortFilter,
-        string $magicFilter
+        string $magicFilter,
+        string $thumbFilter
     ): string {
         $articles = $this->fetchArticlesForDashboard(
             paperFilter: $paperFilter,
@@ -4218,7 +4230,8 @@ final class Extrablatt
             categoryFilter: $categoryFilter,
             readFilter: $readFilter,
             sortFilter: $sortFilter,
-            magicFilter: $magicFilter
+            magicFilter: $magicFilter,
+            thumbFilter: $thumbFilter
         );
 
         // Auto-submitting <select> dropdowns. The form's GET action keeps
@@ -4274,6 +4287,12 @@ final class Extrablatt
         foreach (['' => 'Magisch', 'all' => 'Alle'] as $value => $label) {
             $sel = $magicFilter === $value ? ' selected' : '';
             $magicOptions .= '<option value="' . $value . '"' . $sel . '>' . $label . '</option>';
+        }
+
+        $thumbOptions = '<option value="">Bild</option>';
+        foreach (['yes' => 'mit Bild', 'no' => 'ohne Bild'] as $value => $label) {
+            $sel = $thumbFilter === $value ? ' selected' : '';
+            $thumbOptions .= '<option value="' . $value . '"' . $sel . '>' . $label . '</option>';
         }
 
         $categoryOptions = '<option value="">Kategorie</option>';
@@ -4478,7 +4497,7 @@ final class Extrablatt
                 header.top .reset-btn:hover { background: #fef2f2; border-color: #f87171; }
                 header.top .markall-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #1e40af; padding: 8px 12px; border-radius: 6px; border: 1px solid #bfdbfe; cursor: pointer; }
                 header.top .markall-btn:hover { background: #eff6ff; border-color: #60a5fa; }
-                form.filters { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; margin: 0 0 1rem; }
+                form.filters { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 0 0 1rem; }
                 form.filters select { min-width: 0; width: 100%; font: 600 12px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 8px 22px 8px 8px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 7px center; background-size: 8px 5px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
                 form.filters select:focus { outline: none; border-color: #18181b; }
@@ -4556,6 +4575,7 @@ final class Extrablatt
                     <select name="paper" onchange="this.form.submit()">{$paperOptions}</select>
                     <select name="status" onchange="this.form.submit()">{$statusOptions}</select>
                     <select name="paywall" onchange="this.form.submit()">{$paywallOptions}</select>
+                    <select name="thumb" onchange="this.form.submit()">{$thumbOptions}</select>
                     <select name="category" onchange="this.form.submit()">{$categoryOptions}</select>
                     <select name="read" onchange="this.form.submit()">{$readOptions}</select>
                     <select name="magic" onchange="this.form.submit()">{$magicOptions}</select>
