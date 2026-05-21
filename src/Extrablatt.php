@@ -2545,21 +2545,17 @@ final class Extrablatt
             }
             unset($row);
             usort(array: $unread, callback: fn(array $a, array $b): int => $b['_score'] <=> $a['_score']);
-            // Variance over volume: strict top 2 per paper across the
-            // whole unread pool — no leftover fallback. Bucket size = ~2x
-            // active sources. Ensures every source the user follows
-            // surfaces, not just the loudest few.
             $candidates = [];
             $perPaper = [];
             foreach ($unread as $row) {
                 $paper = (string) ($row['paper'] ?? '');
                 $perPaper[$paper] = $perPaper[$paper] ?? 0;
-                if ($perPaper[$paper] < 2) {
+                if ($perPaper[$paper] < 1) {
                     $candidates[] = $row;
                     $perPaper[$paper]++;
                 }
             }
-            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 2/Quelle)', count(value: $unread), count(value: $candidates)));
+            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 1/Quelle)', count(value: $unread), count(value: $candidates)));
 
             $env = $this->loadEnv();
             $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
