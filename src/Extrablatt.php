@@ -2318,9 +2318,7 @@ final class Extrablatt
             SELECT url, paper, title, image_url
             FROM articles
             WHERE thumbnail IS NULL
-              AND image_url IS NOT NULL AND image_url != ''
               AND (COALESCE(paywall, 0) != 1 OR status = 'archive')
-              AND paper NOT IN ('reddit', 'hackernews')
             ORDER BY published_at ASC
             LIMIT 500
         ")->fetchAll(mode: PDO::FETCH_ASSOC);
@@ -2329,14 +2327,30 @@ final class Extrablatt
             $genBfCandidates = [];
             foreach ($genBfRows as $row) {
                 $url = (string) $row['url'];
-                $genBfImages[$url] = (string) $row['image_url'];
+                $img = (string) ($row['image_url'] ?? '');
+                if ($img === '') {
+                    $img = (string) ($papersConfig[$row['paper']]['default_image'] ?? '');
+                }
+                if ($img === '') {
+                    $host = (string) parse_url(
+                        url: (string) ($papersConfig[$row['paper']]['url'] ?? ''),
+                        component: PHP_URL_HOST
+                    );
+                    if ($host !== '') {
+                        $img = 'https://www.google.com/s2/favicons?domain=' . rawurlencode(string: $host) . '&sz=128';
+                    }
+                }
+                if ($img === '') {
+                    continue;
+                }
+                $genBfImages[$url] = $img;
                 $genBfCandidates[] = [
                     'paper' => (string) $row['paper'],
                     'item' => new FeedItem(
                         title: (string) $row['title'],
                         link: $url,
                         publishedAt: null,
-                        imageUrl: (string) $row['image_url']
+                        imageUrl: $img
                     )
                 ];
             }
@@ -2658,6 +2672,30 @@ final class Extrablatt
             }
         }
         $emit(sprintf('  → %d Snapshots gelöscht (%d MB frei)', $deletedSnap, intdiv($bytesSnap, 1048576)));
+
+        // One-time migration: re-compress any snapshot still stored in plain
+        // form (no zlib magic byte at position 0). Brings the cache table
+        // from ~1.3 MB/entry to ~120 KB/entry.
+        $updateStmt = $db->prepare(query: 'UPDATE cache SET value = :v WHERE key = :k');
+        $scan = $db->query(query: "SELECT key, value FROM cache WHERE key LIKE 'snapshot:%'");
+        $recompressed = 0;
+        $bytesSaved = 0;
+        while ($row = $scan->fetch(mode: PDO::FETCH_ASSOC)) {
+            $blob = (string) $row['value'];
+            if (strlen(string: $blob) < 2 || ord($blob[0]) === 0x78) {
+                continue;
+            }
+            $compressed = gzcompress(data: $blob, level: 6);
+            if ($compressed === false) {
+                continue;
+            }
+            $bytesSaved += strlen(string: $blob) - strlen(string: $compressed);
+            $updateStmt->execute(params: [':v' => $compressed, ':k' => (string) $row['key']]);
+            $recompressed++;
+        }
+        if ($recompressed > 0) {
+            $emit(sprintf('  → %d Snapshots gzip-komprimiert (%d MB frei)', $recompressed, intdiv($bytesSaved, 1048576)));
+        }
 
         $feedBytes = (int) $db->query(query: "SELECT COALESCE(SUM(LENGTH(value)),0) FROM cache WHERE key LIKE 'feed:%'")->fetchColumn();
         $feedDeleted = $db->exec(statement: "DELETE FROM cache WHERE key LIKE 'feed:%'");
