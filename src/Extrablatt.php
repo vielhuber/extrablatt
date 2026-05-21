@@ -1786,12 +1786,7 @@ final class Extrablatt
     }
 
     /**
-     * @return array{
-     *   ai: array<string, mixed>,
-     *   categories: array<string, array<int, string>>,
-     *   papers: array<string, array{url: string, label: string, rss: string}>,
-     *   archive_fulltext_check?: array<string, mixed>
-     * }
+     * @return array{papers: array<string, array{url: string, label: string, rss: string}>}
      */
     private function loadConfig(): array
     {
@@ -1801,28 +1796,34 @@ final class Extrablatt
         }
         $raw = @file_get_contents(filename: $this->configFile);
         $parsed = $raw !== false ? json_decode(json: $raw, associative: true) : null;
-        $rawCats = $parsed['categories'] ?? [];
-        $tree = [];
-        if (is_array(value: $rawCats)) {
-            if (array_is_list(array: $rawCats)) {
-                foreach ($rawCats as $cat) {
-                    $tree[(string) $cat] = [];
-                }
-            } else {
-                foreach ($rawCats as $parent => $children) {
-                    $tree[(string) $parent] = is_array(value: $children) ? array_values($children) : [];
-                }
-            }
-        }
         $cached = [
-            'ai' => is_array(value: $parsed['ai'] ?? null) ? $parsed['ai'] : [],
-            'categories' => $tree,
-            'papers' => is_array(value: $parsed['papers'] ?? null) ? $parsed['papers'] : [],
-            'archive_fulltext_check' => is_array(value: $parsed['archive_fulltext_check'] ?? null)
-                ? $parsed['archive_fulltext_check']
-                : []
+            'papers' => is_array(value: $parsed['papers'] ?? null) ? $parsed['papers'] : []
         ];
         return $cached;
+    }
+
+    /**
+     * @return array<string, array<int, string>>
+     */
+    private function categories(): array
+    {
+        return [
+            'Politik' => ['Innenpolitik', 'Außenpolitik', 'Ukraine-Krieg', 'Nahost-Konflikt', 'Justiz & Verfassung'],
+            'Wirtschaft & Finanzen' => ['Konjunktur', 'Unternehmen', 'Börse & Märkte', 'Krypto', 'Arbeitsmarkt'],
+            'Sport' => ['Fußball', 'Motorsport', 'Tennis', 'Wintersport', 'Sportbusiness'],
+            'Kultur & Medien' => ['Musik', 'Film & TV', 'Kunst & Ausstellungen', 'Reality-TV', 'Kulturbetrieb'],
+            'Wissen & Technik' => [
+                'AI', 'CSS', 'Programmierung', 'Open Source', 'Web & Internet', 'DevOps & Cloud',
+                'Hardware', 'Mobilgeräte', 'Wearables', 'GPUs & Chips', 'Gaming', 'Cybersecurity',
+                'Datenschutz', 'Wissenschaft', 'Klima & Umwelt', 'Tiere & Natur', 'Weltraum',
+                'Energie', 'Robotik', 'Militärtechnik'
+            ],
+            'Gesundheit' => ['Ernährung', 'Mentale Gesundheit', 'Krankheiten & Epidemien', 'Medizin & Pharma', 'Fitness & Longevity'],
+            'Gesellschaft & Panorama' => ['Kriminalität', 'Religion & Kirche', 'Brauchtum & Tradition', 'Familie & Beziehungen', 'Bildung'],
+            'Lokal & Regional' => ['Bayern', 'Berlin', 'Norddeutschland', 'NRW & Westdeutschland', 'Verkehr & Infrastruktur'],
+            'Reise & Lifestyle' => ['Kulinarik', 'Reiseziele', 'Wein & Getränke', 'Auto-Lifestyle', 'Haushaltstipps'],
+            'Sonstiges' => ['Auto & Verkehr', 'Garten & Pflanzen', 'Wetter & Natur', 'Unfälle', 'Verbraucher']
+        ];
     }
 
     /**
@@ -1843,7 +1844,7 @@ final class Extrablatt
     private function leafCategories(): array
     {
         $leaves = [];
-        foreach ($this->loadConfig()['categories'] as $parent => $children) {
+        foreach ($this->categories() as $parent => $children) {
             if (empty($children)) {
                 $leaves[] = (string) $parent;
             } else {
@@ -1863,7 +1864,7 @@ final class Extrablatt
     private function selectableCategoryValues(): array
     {
         $values = [];
-        foreach ($this->loadConfig()['categories'] as $parent => $children) {
+        foreach ($this->categories() as $parent => $children) {
             $values[] = (string) $parent;
             foreach ($children as $c) {
                 $values[] = (string) $c;
@@ -1877,7 +1878,7 @@ final class Extrablatt
      */
     private function expandCategoryFilter(string $selected): array
     {
-        $tree = $this->loadConfig()['categories'];
+        $tree = $this->categories();
         if (isset($tree[$selected]) && !empty($tree[$selected])) {
             return array_map(callback: 'strval', array: $tree[$selected]);
         }
@@ -1950,7 +1951,7 @@ final class Extrablatt
         $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
         $aiModel = (string) ($env['AI_MODEL'] ?? '');
         $apiKey = (string) ($env['AI_API_KEY'] ?? '');
-        $aiConfig = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProvider, 'model' => $aiModel];
+        $aiConfig = [] + ['provider' => $aiProvider, 'model' => $aiModel];
 
         if ($phase === 8) {
             $emit('Phase 8/9: Duplikat-Erkennung per Embedding-Vergleich');
@@ -2043,7 +2044,6 @@ final class Extrablatt
 
         // Phase 4: archive-fulltext check.
         $emit('Phase 4/9: Volltext-Check der archivierten PLUS-Artikel');
-        $fulltextCfg = $this->loadConfig()['archive_fulltext_check'] ?? [];
         $knownFulltext = $this->readKnownArchiveFulltext(urls: $urls);
         $fulltextCandidates = array_values(array: array_filter(
             array: $allItems,
@@ -2062,7 +2062,7 @@ final class Extrablatt
         $phaseStart = microtime(as_float: true);
         $freshFulltext = empty($fulltextCandidates)
             ? []
-            : $this->checkArchiveFulltextStreaming(items: $fulltextCandidates, config: $fulltextCfg, emit: $emit);
+            : $this->checkArchiveFulltextStreaming(items: $fulltextCandidates, emit: $emit);
         $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
         $archiveFull = $knownFulltext + $freshFulltext;
         $fullOk = count(value: array_filter(array: $archiveFull, callback: fn(?bool $v): bool => $v === true));
@@ -2332,7 +2332,6 @@ final class Extrablatt
 
         // Phase 6: AI categorisation.
         $emit('Phase 6/9: AI-Kategorisierung');
-        $config = $this->loadConfig();
         $env = $this->loadEnv();
         $aiProvider = $env['AI_PROVIDER'] ?? '';
         $aiModel = $env['AI_MODEL'] ?? '';
@@ -2386,14 +2385,12 @@ final class Extrablatt
             $emit('  → keine neuen Artikel');
         } elseif ($aiProvider === '' || $aiModel === '') {
             $emit('  ⚠️  AI_PROVIDER / AI_MODEL in .env nicht gesetzt — Phase übersprungen');
-        } elseif (empty($config['categories'])) {
-            $emit('  ⚠️  Keine Kategorien in config.json — Phase übersprungen');
         } else {
             $phaseStart = microtime(as_float: true);
             $freshCategories = $this->categorizeArticlesStreaming(
                 items: $toCategorize,
                 categories: $this->leafCategories(),
-                aiConfig: $config['ai'] + ['provider' => $aiProvider, 'model' => $aiModel],
+                aiConfig: ['provider' => $aiProvider, 'model' => $aiModel],
                 apiKey: $apiKey,
                 emit: $emit
             );
@@ -2497,7 +2494,7 @@ final class Extrablatt
         $aiProviderDup = (string) ($envDup['AI_PROVIDER'] ?? '');
         $aiModelDup = (string) ($envDup['AI_MODEL'] ?? '');
         $apiKeyDup = (string) ($envDup['AI_API_KEY'] ?? '');
-        $aiConfigDup = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProviderDup, 'model' => $aiModelDup];
+        $aiConfigDup = [] + ['provider' => $aiProviderDup, 'model' => $aiModelDup];
         if ($aiProviderDup === '' || $aiModelDup === '') {
             $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
         } else {
@@ -2561,7 +2558,7 @@ final class Extrablatt
             $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
             $aiModel = (string) ($env['AI_MODEL'] ?? '');
             $apiKey = (string) ($env['AI_API_KEY'] ?? '');
-            $aiConfig = ($this->loadConfig()['ai'] ?? []) + ['provider' => $aiProvider, 'model' => $aiModel];
+            $aiConfig = [] + ['provider' => $aiProvider, 'model' => $aiModel];
 
             $final = null;
             if ($aiProvider !== '' && $aiModel !== '') {
@@ -2921,22 +2918,16 @@ final class Extrablatt
 
     /**
      * @param array<int, array{paper: string, item: FeedItem}> $items
-     * @param array<string, mixed> $config
      * @return array<string, bool>
      */
-    private function checkArchiveFulltextStreaming(array $items, array $config, callable $emit): array
+    private function checkArchiveFulltextStreaming(array $items, callable $emit): array
     {
         if (empty($items)) {
             return [];
         }
 
-        $minChars = (int) ($config['min_text_chars'] ?? 8000);
-        $minCharsPerPaper = is_array(value: $config['min_text_chars_per_paper'] ?? null)
-            ? $config['min_text_chars_per_paper']
-            : [];
-        $stubMarkersPerPaper = is_array(value: $config['stub_markers_per_paper'] ?? null)
-            ? $config['stub_markers_per_paper']
-            : [];
+        $minChars = 8000;
+        $papersConfig = $this->papers();
 
         $byUrl = [];
         foreach ($items as $entry) {
@@ -3008,11 +2999,14 @@ final class Extrablatt
 
             $html = (string) file_get_contents(filename: $file);
 
+            $markers = is_array(value: $papersConfig[$paper]['stub_markers'] ?? null)
+                ? $papersConfig[$paper]['stub_markers']
+                : [];
             $isFull = $this->analyzeArchiveFulltext(
                 html: $html,
                 paper: $paper,
-                minChars: (int) ($minCharsPerPaper[$paper] ?? $minChars),
-                markers: is_array(value: $stubMarkersPerPaper[$paper] ?? null) ? $stubMarkersPerPaper[$paper] : []
+                minChars: $minChars,
+                markers: $markers
             );
             $result[$url] = $isFull;
             $this->writeArchiveFulltextCache(url: $url, full: $isFull);
@@ -4186,7 +4180,7 @@ final class Extrablatt
         }
 
         $categoryOptions = '<option value="">Kategorie</option>';
-        foreach ($this->loadConfig()['categories'] as $parent => $children) {
+        foreach ($this->categories() as $parent => $children) {
             $parentName = (string) $parent;
             $escapedParent = htmlspecialchars(string: $parentName, flags: ENT_QUOTES);
             $sel = $categoryFilter === $parentName ? ' selected' : '';
