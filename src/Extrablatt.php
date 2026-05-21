@@ -2560,6 +2560,13 @@ final class Extrablatt
                 $emit('  → Fallback: Reihenfolge nach Regel-Score');
             }
 
+            // Topic-level dedup within the bucket: Phase 8 catches obvious
+            // duplicates at threshold 0.85 across all 7 days; here we apply
+            // a softer 0.70 just to the magic candidates so two near-twin
+            // takes on the same story (different sources, different
+            // framing) don't both surface. Greedy by current rerank order.
+            $final = $this->dedupMagicBucket(rows: $final, db: $db, emit: $emit);
+
             $rankStmt = $db->prepare(query: 'UPDATE articles SET magic_rank = :rank WHERE url = :url');
             foreach ($final as $i => $row) {
                 $rankStmt->execute(params: [':rank' => $i + 1, ':url' => (string) $row['url']]);
@@ -3902,6 +3909,62 @@ final class Extrablatt
      * @param array<int, float> $a
      * @param array<int, float> $b
      */
+    /**
+     * Drop near-duplicate stories from a ranked magic bucket. Loads each
+     * candidate's stored embedding, then greedily keeps a row only when it
+     * isn't too close to anything already kept. Threshold 0.70 is softer
+     * than Phase 8's 0.85 — catches semantic siblings that the
+     * cross-source dedup didn't merge.
+     *
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function dedupMagicBucket(array $rows, PDO $db, callable $emit): array
+    {
+        if (count(value: $rows) < 2) {
+            return $rows;
+        }
+        $urls = array_values(array: array_map(callback: fn(array $r): string => (string) $r['url'], array: $rows));
+        $placeholders = implode(separator: ',', array: array_fill(start_index: 0, count: count(value: $urls), value: '?'));
+        $stmt = $db->prepare(query: 'SELECT url, embedding FROM articles WHERE url IN (' . $placeholders . ')');
+        $stmt->execute(params: $urls);
+        $blobs = [];
+        while ($row = $stmt->fetch(mode: PDO::FETCH_ASSOC)) {
+            if ($row['embedding'] !== null) {
+                $blobs[(string) $row['url']] = (string) $row['embedding'];
+            }
+        }
+        $threshold = 0.70;
+        $kept = [];
+        $keptVectors = [];
+        $dropped = 0;
+        foreach ($rows as $row) {
+            $url = (string) $row['url'];
+            if (!isset($blobs[$url])) {
+                $kept[] = $row;
+                continue;
+            }
+            $vec = array_values(array: (array) unpack(format: 'f*', string: $blobs[$url]));
+            $isDup = false;
+            foreach ($keptVectors as $other) {
+                if ($this->cosineSimilarity(a: $vec, b: $other) >= $threshold) {
+                    $isDup = true;
+                    break;
+                }
+            }
+            if ($isDup) {
+                $dropped++;
+                continue;
+            }
+            $kept[] = $row;
+            $keptVectors[] = $vec;
+        }
+        if ($dropped > 0) {
+            $emit(sprintf('  → %d themenähnliche Artikel aus Bucket entfernt (Threshold %.2f)', $dropped, $threshold));
+        }
+        return $kept;
+    }
+
     private function cosineSimilarity(array $a, array $b): float
     {
         $n = min(count(value: $a), count(value: $b));

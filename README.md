@@ -20,10 +20,32 @@ composer require vielhuber/extrablatt
 
 after install, edit:
 
-- `.data/config.json`: papers, categories, ai params
-- `.data/.env`: `AI_API_KEY` / `AUTH_PASSWORD`
+- `.data/config.json`: papers (see schema below)
+- `.data/.env`: `AI_API_KEY` / `AUTH_PASSWORD` / `AI_PROVIDER` / `AI_MODEL`
 - `.data/cookies/`: drop cookie exports per host into
 - `.data/database.sqlite`: restore database (optional)
+
+## config.json schema
+
+```json
+{
+  "papers": {
+    "<paper-key>": {
+      "url":           "https://example.com",
+      "label":         "Display Name",
+      "rss":           "https://example.com/feed.xml",
+      "default_image": "https://example.com/fallback.png",
+      "stub_markers":  ["Subscribe to read", "Premium content"]
+    }
+  }
+}
+```
+
+- `default_image` (optional): fallback thumbnail when the RSS item carries no image.
+- `stub_markers` (optional): substrings present in the archive.ph snapshot of a PLUS article when it's only a teaser, so the snapshot is dropped instead of surfaced as if it were the full text.
+- Special `rss` schemes: `reddit://home` and `x://home` activate the cookie-authenticated JSON scrapers in place of XML parsing.
+
+categories, AI defaults (`temperature`, `timeout`, `max_tries`), and the archive fulltext minimum (8000 chars) are hardcoded in the package.
 
 ## usage
 
