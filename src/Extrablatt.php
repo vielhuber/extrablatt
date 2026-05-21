@@ -2534,11 +2534,20 @@ final class Extrablatt
             }
             unset($row);
             usort(array: $unread, callback: fn(array $a, array $b): int => $b['_score'] <=> $a['_score']);
-            // Variance over volume: take the top 2 per paper across the
-            // whole unread pool — bucket size is then ~2× active sources
-            // instead of a fixed top-10. Ensures every source the user
-            // follows surfaces, not just the loudest 3.
-            $candidates = $this->magicDiversitySelect(sorted: $unread, count: PHP_INT_MAX, maxPerPaper: 2);
+            // Variance over volume: strict top 2 per paper across the
+            // whole unread pool — no leftover fallback. Bucket size = ~2x
+            // active sources. Ensures every source the user follows
+            // surfaces, not just the loudest few.
+            $candidates = [];
+            $perPaper = [];
+            foreach ($unread as $row) {
+                $paper = (string) ($row['paper'] ?? '');
+                $perPaper[$paper] = $perPaper[$paper] ?? 0;
+                if ($perPaper[$paper] < 2) {
+                    $candidates[] = $row;
+                    $perPaper[$paper]++;
+                }
+            }
             $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 2/Quelle)', count(value: $unread), count(value: $candidates)));
 
             $env = $this->loadEnv();
@@ -4082,7 +4091,9 @@ final class Extrablatt
         } else {
             $sortDef = $this->sortOptions()[$sortFilter] ?? $this->sortOptions()[''];
             $orderBy = $sortDef['orderBy'];
-            $limit = self::DASHBOARD_MAX_ITEMS;
+            // Cap "Alle"-Modus to the most recent 100 items — keeps the
+            // dashboard snappy. New articles slide in on reload.
+            $limit = 100;
         }
         $sql =
             'SELECT url, paper, title, published_at, status, paywall, thumbnail, category, rating, read_at, vote FROM articles' .
@@ -4195,10 +4206,12 @@ final class Extrablatt
             if (count(value: $prerenderTargets) < $prerenderLimit) {
                 $prerenderTargets[] = $target;
             }
-            // Always open the article in a new tab; keep noopener for
-            // external links so window.opener cannot be hijacked.
+            // Same-tab navigation: Chrome's speculation-rules prerender
+            // only activates a prerendered page when the click navigates
+            // the current browsing context. target="_blank" would force a
+            // fresh fetch in a new tab and waste the prerender.
             $rel = $isArchived ? ' rel="noopener"' : ' rel="noreferrer noopener"';
-            $linkAttrs = $rel . ' target="_blank"';
+            $linkAttrs = $rel;
             $badgeClass = $isArchived ? 'badge badge--archived' : 'badge badge--original';
             $badgeLabel = $isArchived ? 'archive.today' : 'original';
             $paywallBadge = '';
@@ -4416,7 +4429,7 @@ final class Extrablatt
                 <header class="top">
                     <h1><a href="/">extrablatt!</a></h1>
                     <span class="count" id="count" data-suffix=" Artikel">{$countLabel}</span>
-                    <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
+                    <a class="scrape-link" href="/?scrape=1" rel="noopener">Scrape ▶</a>
                     <form method="post" action="/" onsubmit="return confirm('Alle ungelesenen Artikel als gelesen markieren?');" style="margin:0">
                         <input type="hidden" name="mark_all_read" value="1">
                         <button type="submit" class="markall-btn">All read</button>
