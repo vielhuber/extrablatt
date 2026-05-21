@@ -2576,8 +2576,60 @@ final class Extrablatt
         }
         $emit('');
 
+        $emit('Cache-Cleanup');
+        $this->cleanupCache(db: $db, emit: $emit);
+        $emit('');
+
         $totalMs = (int) round(num: (microtime(as_float: true) - $startedAt) * 1000);
         $emit(sprintf('=== Scrape beendet in %d.%03ds ===', intdiv($totalMs, 1000), $totalMs % 1000));
+    }
+
+    /**
+     * Trim the persistent cache table. Two big wins:
+     *  - `snapshot:*` / `snapshotmeta:*`: drop entries whose article either
+     *    isn't in the DB anymore OR is older than 14 days. ~1 MB per
+     *    archived PLUS page, so this is where the bulk of the DB size
+     *    comes from.
+     *  - `feed:*`: transient RSS bodies, only useful within the current
+     *    scrape — drop after every run.
+     * VACUUM at the end so SQLite actually shrinks the file.
+     */
+    private function cleanupCache(PDO $db, callable $emit): void
+    {
+        $cutoff = time() - 14 * 86400;
+        $validKeys = [];
+        $stmt = $db->prepare(query: '
+            SELECT url FROM articles
+            WHERE status = "archive" AND published_at > :cutoff
+        ');
+        $stmt->execute(params: [':cutoff' => $cutoff]);
+        while ($row = $stmt->fetch(mode: PDO::FETCH_NUM)) {
+            $md5 = md5(string: (string) $row[0]);
+            $validKeys['snapshot:' . $md5] = true;
+            $validKeys['snapshotmeta:' . $md5] = true;
+        }
+        $deleteStmt = $db->prepare(query: 'DELETE FROM cache WHERE key = :key');
+        $scan = $db->query(query: "
+            SELECT key, LENGTH(value) FROM cache
+            WHERE key LIKE 'snapshot:%' OR key LIKE 'snapshotmeta:%'
+        ");
+        $deletedSnap = 0;
+        $bytesSnap = 0;
+        while ($row = $scan->fetch(mode: PDO::FETCH_NUM)) {
+            if (!isset($validKeys[(string) $row[0]])) {
+                $deleteStmt->execute(params: [':key' => (string) $row[0]]);
+                $deletedSnap++;
+                $bytesSnap += (int) $row[1];
+            }
+        }
+        $emit(sprintf('  → %d Snapshots gelöscht (%d MB frei)', $deletedSnap, intdiv($bytesSnap, 1048576)));
+
+        $feedBytes = (int) $db->query(query: "SELECT COALESCE(SUM(LENGTH(value)),0) FROM cache WHERE key LIKE 'feed:%'")->fetchColumn();
+        $feedDeleted = $db->exec(statement: "DELETE FROM cache WHERE key LIKE 'feed:%'");
+        $emit(sprintf('  → %d Feed-Cache-Einträge gelöscht (%d MB frei)', (int) $feedDeleted, intdiv($feedBytes, 1048576)));
+
+        $db->exec(statement: 'VACUUM');
+        $emit('  → VACUUM fertig');
     }
 
     private function setupStreamingOutput(): void
