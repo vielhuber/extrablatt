@@ -2521,10 +2521,21 @@ final class Extrablatt
         $db->exec(statement: 'UPDATE articles SET magic_rank = NULL');
 
         $aff = $this->magicComputeAffinity(db: $db);
+        // Recency cutoff: only articles published after the user's last
+        // read action are eligible. Keeps the magic bucket fresh — items
+        // that pre-date the last "scrolled through and clicked something"
+        // moment are considered "already triaged" and don't surface.
+        $lastReadAt = (int) $db->query(query: 'SELECT COALESCE(MAX(read_at), 0) FROM articles')->fetchColumn();
+        $cutoffSql = $lastReadAt > 0
+            ? ' AND published_at > ' . $lastReadAt
+            : '';
         $unread = (array) $db->query(query: '
             SELECT url, paper, title, published_at, rating, vote, category
-            FROM articles WHERE read_at IS NULL AND duplicate_of IS NULL
-        ')->fetchAll(mode: PDO::FETCH_ASSOC);
+            FROM articles WHERE read_at IS NULL AND duplicate_of IS NULL' . $cutoffSql
+        )->fetchAll(mode: PDO::FETCH_ASSOC);
+        if ($lastReadAt > 0) {
+            $emit(sprintf('  → Recency-Schnitt: nur Artikel nach %s', date(format: 'd.m. H:i', timestamp: $lastReadAt)));
+        }
 
         if (empty($unread)) {
             $emit('  → keine ungelesenen Artikel im Topf');
