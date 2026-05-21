@@ -2525,11 +2525,12 @@ final class Extrablatt
             }
             unset($row);
             usort(array: $unread, callback: fn(array $a, array $b): int => $b['_score'] <=> $a['_score']);
-            // Diversity cap on the candidate pool — max 6 from one paper in
-            // the top 30 going to the LLM. Prevents the user's preferred
-            // source (typically reddit) from drowning out smaller papers.
-            $top30 = $this->magicDiversitySelect(sorted: $unread, count: 30, maxPerPaper: 6);
-            $emit(sprintf('  → %d ungelesene gescort, Top 30 (≤6/Quelle) als AI-Kandidaten', count(value: $unread)));
+            // Variance over volume: take the top 2 per paper across the
+            // whole unread pool — bucket size is then ~2× active sources
+            // instead of a fixed top-10. Ensures every source the user
+            // follows surfaces, not just the loudest 3.
+            $candidates = $this->magicDiversitySelect(sorted: $unread, count: PHP_INT_MAX, maxPerPaper: 2);
+            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 2/Quelle)', count(value: $unread), count(value: $candidates)));
 
             $env = $this->loadEnv();
             $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
@@ -2540,7 +2541,7 @@ final class Extrablatt
             $final = null;
             if ($aiProvider !== '' && $aiModel !== '') {
                 $final = $this->magicAiRerank(
-                    candidates: $top30,
+                    candidates: $candidates,
                     aff: $aff,
                     aiConfig: $aiConfig,
                     apiKey: $apiKey,
@@ -2551,16 +2552,8 @@ final class Extrablatt
                 }
             }
             if ($final === null) {
-                $final = array_slice(array: $top30, offset: 0, length: 10);
-                $emit('  → Fallback: Top 10 nach Regel-Score');
-            }
-            // Hard cap on the final bucket: max 3 per paper. Catches both
-            // the AI-rerank case (AI may still over-pick the favourite
-            // source) and the rule-score fallback. Order is preserved.
-            $before = $final;
-            $final = $this->magicDiversitySelect(sorted: $final, count: 10, maxPerPaper: 3);
-            if ($final !== $before) {
-                $emit('  → Quellen-Quote angewendet (≤3/Quelle)');
+                $final = $candidates;
+                $emit('  → Fallback: Reihenfolge nach Regel-Score');
             }
 
             $rankStmt = $db->prepare(query: 'UPDATE articles SET magic_rank = :rank WHERE url = :url');
@@ -3961,6 +3954,7 @@ final class Extrablatt
                 . mb_substr(string: (string) ($c['title'] ?? ''), start: 0, length: 140);
         }
 
+        $total = count(value: $candidates);
         $prompt =
             "Du sortierst Nachrichten-Artikel nach Relevanz für einen Nutzer und dessen erkannte Präferenzen.\n\n" .
             "Lieblings-Quellen: " . implode(separator: ', ', array: $likedPapers) . "\n" .
@@ -3968,11 +3962,10 @@ final class Extrablatt
             "Ungeliebte Quellen: " . implode(separator: ', ', array: $dislikedPapers) . "\n" .
             "Ungeliebte Kategorien: " . implode(separator: ', ', array: $dislikedCats) . "\n\n" .
             "Kandidaten:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
-            "Wähle GENAU die 10 spannendsten und relevantesten Artikel für diesen Nutzer aus. " .
-            "Achte auf eine gewisse Quellen-Breite: höchstens 3 Artikel aus derselben Quelle, " .
-            "auch wenn der Nutzer diese Quelle bevorzugt. " .
-            "Antworte AUSSCHLIESSLICH mit einer komma-separierten Liste von 10 Nummern aus der Liste oben, " .
-            "in Reihenfolge der Relevanz (beste zuerst). Beispiel: 7,3,12,1,18,4,22,9,15,2";
+            "Ordne ALLE {$total} Artikel nach Relevanz für diesen Nutzer (beste zuerst). " .
+            "Keine auslassen, keine duplizieren. " .
+            "Antworte AUSSCHLIESSLICH mit einer komma-separierten Liste aller {$total} Nummern aus der Liste oben " .
+            "in der neuen Reihenfolge. Beispiel: 7,3,12,1,18,4,22,9,15,2,...";
 
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
@@ -4000,13 +3993,19 @@ final class Extrablatt
             if ($idx >= 0 && $idx < count(value: $candidates) && !in_array(needle: $idx, haystack: $indices, strict: true)) {
                 $indices[] = $idx;
             }
-            if (count(value: $indices) >= 10) {
-                break;
-            }
         }
-        if (count(value: $indices) < 5) {
-            $emit('  ⚠️  AI-Antwort unbrauchbar (' . count(value: $indices) . ' valide Indizes)');
+        // Require at least half the candidates as a sanity check; if the
+        // LLM truncated heavily the rerank is unreliable and we fall back.
+        if (count(value: $indices) < (int) (count(value: $candidates) / 2)) {
+            $emit('  ⚠️  AI-Antwort unbrauchbar (' . count(value: $indices) . ' valide Indizes von ' . count(value: $candidates) . ')');
             return null;
+        }
+        // Append any candidate the LLM forgot at the end so nothing drops.
+        $seen = array_flip(array: $indices);
+        for ($i = 0, $n = count(value: $candidates); $i < $n; $i++) {
+            if (!isset($seen[$i])) {
+                $indices[] = $i;
+            }
         }
         $reordered = [];
         foreach ($indices as $i) {
@@ -4175,10 +4174,18 @@ final class Extrablatt
         }
 
         $rows = '';
+        // Collect the first N article targets for Chrome speculation-rules
+        // prerender hints (rendered into <head> further down). Limited to
+        // keep RAM / bandwidth overhead inside Chrome bounded.
+        $prerenderTargets = [];
+        $prerenderLimit = 10;
         foreach ($articles as $row) {
             $isArchived = $row['status'] === 'archive';
             $url = (string) $row['url'];
             $target = $isArchived ? $this->proxyUrl(originalUrl: $url) : $url;
+            if (count(value: $prerenderTargets) < $prerenderLimit) {
+                $prerenderTargets[] = $target;
+            }
             // Always open the article in a new tab; keep noopener for
             // external links so window.opener cannot be hijacked.
             $rel = $isArchived ? ' rel="noopener"' : ' rel="noreferrer noopener"';
@@ -4293,6 +4300,23 @@ final class Extrablatt
         $count = count(value: $articles);
         $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
 
+        // Chrome speculation-rules: prerender the top N article targets so
+        // a click opens instantly. `eagerness: moderate` lets the browser
+        // sequence the prerenders without saturating the network. Targets
+        // include the archive.ph proxy (same-origin) and direct external
+        // URLs (Reddit/X) which Chrome will fetch cross-origin under the
+        // standard prerender rules.
+        $prerenderTag = '';
+        if ($prerenderTargets !== []) {
+            $rules = json_encode(
+                value: ['prerender' => [['urls' => $prerenderTargets, 'eagerness' => 'moderate']]],
+                flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            );
+            if (is_string(value: $rules)) {
+                $prerenderTag = '<script type="speculationrules">' . $rules . '</script>';
+            }
+        }
+
         return <<<HTML
         <!doctype html>
         <html lang="de">
@@ -4301,6 +4325,7 @@ final class Extrablatt
             <meta name="viewport" content="width=device-width, initial-scale=1,viewport-fit=cover">
             <title>extrablatt!</title>
             {$pwa}
+            {$prerenderTag}
             <style>
                 :root { color-scheme: light; }
                 * { box-sizing: border-box; }
