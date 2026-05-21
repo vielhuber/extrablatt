@@ -2489,21 +2489,32 @@ final class Extrablatt
         $db->exec(statement: 'UPDATE articles SET magic_rank = NULL');
 
         $aff = $this->magicComputeAffinity(db: $db);
-        // Recency cutoff: only articles published after the user's last
-        // read action are eligible. Keeps the magic bucket fresh — items
-        // that pre-date the last "scrolled through and clicked something"
-        // moment are considered "already triaged" and don't surface.
-        $lastReadAt = (int) $db->query(query: 'SELECT COALESCE(MAX(read_at), 0) FROM articles')->fetchColumn();
-        $cutoffSql = $lastReadAt > 0
-            ? ' AND published_at > ' . $lastReadAt
-            : '';
+        // Per-paper recency cutoff: only show articles published after the
+        // user's last read action FOR THAT SOURCE. A global cutoff would
+        // hide low-frequency sources (e.g. weekly css-tricks) once any
+        // higher-frequency news article gets clicked.
+        $readPerPaper = [];
+        $rows = (array) $db->query(query: '
+            SELECT paper, MAX(read_at) FROM articles
+            WHERE read_at IS NOT NULL GROUP BY paper
+        ')->fetchAll(mode: PDO::FETCH_NUM);
+        foreach ($rows as $row) {
+            $readPerPaper[(string) $row[0]] = (int) $row[1];
+        }
         $unread = (array) $db->query(query: '
             SELECT url, paper, title, published_at, rating, vote, category
-            FROM articles WHERE read_at IS NULL AND duplicate_of IS NULL' . $cutoffSql
-        )->fetchAll(mode: PDO::FETCH_ASSOC);
-        if ($lastReadAt > 0) {
-            $emit(sprintf('  → Recency-Schnitt: nur Artikel nach %s', date(format: 'd.m. H:i', timestamp: $lastReadAt)));
-        }
+            FROM articles WHERE read_at IS NULL AND duplicate_of IS NULL
+        ')->fetchAll(mode: PDO::FETCH_ASSOC);
+        $unread = array_values(array: array_filter(
+            array: $unread,
+            callback: function (array $row) use ($readPerPaper): bool {
+                $cutoff = $readPerPaper[(string) ($row['paper'] ?? '')] ?? 0;
+                if ($cutoff === 0) {
+                    return true;
+                }
+                return ((int) ($row['published_at'] ?? 0)) > $cutoff;
+            }
+        ));
 
         if (empty($unread)) {
             $emit('  → keine ungelesenen Artikel im Topf');
