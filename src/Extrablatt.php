@@ -4322,21 +4322,52 @@ final class Extrablatt
         $count = count(value: $articles);
         $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
 
-        // Chrome speculation-rules: eagerly prerender the top N article
-        // targets so a click opens instantly. `eagerness: eager` kicks off
-        // the prerenders immediately on page load (vs. moderate which
-        // waits for hover/touchstart). Targets include the archive.ph
-        // proxy (same-origin) and direct external URLs (Reddit/X) which
-        // Chrome will fetch cross-origin under the standard prerender
-        // rules.
+        // Chrome speculation-rules: prerender same-origin targets (the
+        // archive.ph proxy URLs that go through our domain) and prefetch
+        // cross-origin URLs. Cross-site prerender is not yet supported by
+        // Chrome (crbug.com/1176054), so prefetch is the best we can do
+        // for direct Reddit/X/wiwo.de links — Chrome warms DNS + TLS +
+        // HTTP cache so navigation still feels instant.
         $prerenderTag = '';
         if ($prerenderTargets !== []) {
-            $rules = json_encode(
-                value: ['prerender' => [['urls' => $prerenderTargets, 'eagerness' => 'eager']]],
-                flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-            );
-            if (is_string(value: $rules)) {
-                $prerenderTag = '<script type="speculationrules">' . $rules . '</script>';
+            $selfHost = (string) parse_url(url: $this->currentOrigin(), component: PHP_URL_HOST);
+            $sameOrigin = [];
+            $crossOrigin = [];
+            foreach ($prerenderTargets as $u) {
+                $host = (string) parse_url(url: $u, component: PHP_URL_HOST);
+                if ($host === '' || strcasecmp(string1: $host, string2: $selfHost) === 0) {
+                    $sameOrigin[] = $u;
+                } else {
+                    $crossOrigin[] = $u;
+                }
+            }
+            $blocks = [];
+            if ($sameOrigin !== []) {
+                $blocks['prerender'] = [['urls' => $sameOrigin, 'eagerness' => 'eager']];
+            }
+            if ($crossOrigin !== []) {
+                $blocks['prefetch'] = [['urls' => $crossOrigin, 'eagerness' => 'eager']];
+            }
+            if ($blocks !== []) {
+                $rules = json_encode(value: $blocks, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                if (is_string(value: $rules)) {
+                    $prerenderTag = '<script type="speculationrules">' . $rules . '</script>';
+                }
+            }
+            // preconnect for every distinct cross-origin host so DNS + TLS
+            // are already warm by the time the user clicks. Cheap (one
+            // socket per host) and saves ~100-300 ms on first-click.
+            $seenHosts = [];
+            foreach ($crossOrigin as $u) {
+                $scheme = (string) parse_url(url: $u, component: PHP_URL_SCHEME);
+                $host = (string) parse_url(url: $u, component: PHP_URL_HOST);
+                if ($host === '' || isset($seenHosts[$host])) {
+                    continue;
+                }
+                $seenHosts[$host] = true;
+                $origin = ($scheme !== '' ? $scheme : 'https') . '://' . $host;
+                $prerenderTag .= '<link rel="preconnect" href="'
+                    . htmlspecialchars(string: $origin, flags: ENT_QUOTES) . '" crossorigin>';
             }
         }
 
