@@ -551,6 +551,24 @@ final class Extrablatt
         echo $content;
     }
 
+    /**
+     * Unwrap a snapshot blob. New snapshots are gzipped (zlib magic bytes
+     * 0x78 0x9c / 0x78 0xda); pre-gzip cached entries stay readable as
+     * plain HTML so we don't have to flush the cache to migrate.
+     */
+    private function decompressSnapshot(string $blob): string
+    {
+        if (strlen(string: $blob) < 2) {
+            return $blob;
+        }
+        $magic = ord($blob[0]);
+        if ($magic !== 0x78) {
+            return $blob;
+        }
+        $decompressed = @gzuncompress(data: $blob);
+        return $decompressed !== false ? $decompressed : $blob;
+    }
+
     private function fetchWithCache(string $originalUrl, bool $forceRefresh = false): FetchResult
     {
         // Cache key is the original URL — independent of which mirror serves it.
@@ -560,7 +578,7 @@ final class Extrablatt
 
         $cachedBody = $forceRefresh ? null : $this->cacheGet(key: $snapKey);
         if ($cachedBody !== null && $cachedBody !== '' && $this->isCachedSnapshotValid(metaKey: $metaKey)) {
-            return FetchResult::fresh(content: $cachedBody);
+            return FetchResult::fresh(content: $this->decompressSnapshot(blob: $cachedBody));
         }
 
         $attemptLog = [];
@@ -579,7 +597,8 @@ final class Extrablatt
             $attemptLog[] = sprintf('archive.%s → %s (%d ms)', $tld, $outcome, $result->durationMilliseconds);
 
             if ($isUsable) {
-                $this->cacheSet(key: $snapKey, value: $result->body);
+                $compressed = gzcompress(data: $result->body, level: 6);
+                $this->cacheSet(key: $snapKey, value: $compressed !== false ? $compressed : $result->body);
                 $this->cacheSet(
                     key: $metaKey,
                     value: (string) json_encode(
@@ -603,7 +622,7 @@ final class Extrablatt
 
         $stale = $this->cacheGet(key: $snapKey);
         if ($stale !== null && $stale !== '' && $this->isCachedSnapshotValid(metaKey: $metaKey)) {
-            return FetchResult::stale(content: $stale, errorMessage: $errorMessage, debug: $debug);
+            return FetchResult::stale(content: $this->decompressSnapshot(blob: $stale), errorMessage: $errorMessage, debug: $debug);
         }
 
         return FetchResult::failed(errorMessage: $errorMessage, debug: $debug);
@@ -2152,6 +2171,17 @@ final class Extrablatt
             if ($img === null || $img === '') {
                 $img = (string) ($papersConfig[$entry['paper']]['default_image'] ?? '');
             }
+            if ($img === '') {
+                // Last-resort fallback: Google favicon service for the paper
+                // domain. Always reachable, returns a sane 128px icon for
+                // every site we configure — turns "no thumbnail" into "at
+                // least the source logo".
+                $paperUrl = (string) ($papersConfig[$entry['paper']]['url'] ?? '');
+                $host = (string) parse_url(url: $paperUrl, component: PHP_URL_HOST);
+                if ($host !== '') {
+                    $img = 'https://www.google.com/s2/favicons?domain=' . rawurlencode(string: $host) . '&sz=128';
+                }
+            }
             if ($img !== null && $img !== '') {
                 $effectiveImages[$url] = $img;
             }
@@ -2601,7 +2631,7 @@ final class Extrablatt
      */
     private function cleanupCache(PDO $db, callable $emit): void
     {
-        $cutoff = time() - 14 * 86400;
+        $cutoff = time() - 7 * 86400;
         $validKeys = [];
         $stmt = $db->prepare(query: '
             SELECT url FROM articles
@@ -2710,7 +2740,13 @@ final class Extrablatt
             return;
         }
         $cacheKey = md5(string: $originalUrl);
-        $this->cacheSet(key: 'snapshot:' . $cacheKey, value: $body);
+        // gzip the snapshot — typical archive.ph HTML compresses ~10×, so
+        // the cache table drops from ~1.3 MB to ~120 KB per article.
+        $compressed = gzcompress(data: $body, level: 6);
+        $this->cacheSet(
+            key: 'snapshot:' . $cacheKey,
+            value: $compressed !== false ? $compressed : $body
+        );
 
         $tld = null;
         if (preg_match(pattern: '#archive\.([a-z]+)/\d{14}/#', subject: $finalUrl, matches: $m) === 1) {
