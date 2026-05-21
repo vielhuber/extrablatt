@@ -4322,16 +4322,17 @@ final class Extrablatt
         $count = count(value: $articles);
         $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
 
-        // Chrome speculation-rules: prerender the top N article targets so
-        // a click opens instantly. `eagerness: moderate` lets the browser
-        // sequence the prerenders without saturating the network. Targets
-        // include the archive.ph proxy (same-origin) and direct external
-        // URLs (Reddit/X) which Chrome will fetch cross-origin under the
-        // standard prerender rules.
+        // Chrome speculation-rules: eagerly prerender the top N article
+        // targets so a click opens instantly. `eagerness: eager` kicks off
+        // the prerenders immediately on page load (vs. moderate which
+        // waits for hover/touchstart). Targets include the archive.ph
+        // proxy (same-origin) and direct external URLs (Reddit/X) which
+        // Chrome will fetch cross-origin under the standard prerender
+        // rules.
         $prerenderTag = '';
         if ($prerenderTargets !== []) {
             $rules = json_encode(
-                value: ['prerender' => [['urls' => $prerenderTargets, 'eagerness' => 'moderate']]],
+                value: ['prerender' => [['urls' => $prerenderTargets, 'eagerness' => 'eager']]],
                 flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
             );
             if (is_string(value: $rules)) {
