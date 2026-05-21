@@ -1383,6 +1383,15 @@ final class Extrablatt
                 if ($description !== '' && preg_match(pattern: '~Points:\s*(\d+)~', subject: $description, matches: $pm) === 1) {
                     $rating = (int) $pm[1];
                 }
+                // For Hacker News we want the discussion thread instead of
+                // the external article URL — the comments are the actual
+                // content from the user's perspective.
+                if ($paper === 'hackernews') {
+                    $commentsUrl = trim(string: (string) $entry->comments);
+                    if ($commentsUrl !== '') {
+                        $link = $commentsUrl;
+                    }
+                }
                 $items[] = new FeedItem(
                     title: $title,
                     link: $link,
