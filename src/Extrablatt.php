@@ -4206,12 +4206,11 @@ final class Extrablatt
             if (count(value: $prerenderTargets) < $prerenderLimit) {
                 $prerenderTargets[] = $target;
             }
-            // Same-tab navigation: Chrome's speculation-rules prerender
-            // only activates a prerendered page when the click navigates
-            // the current browsing context. target="_blank" would force a
-            // fresh fetch in a new tab and waste the prerender.
+            // Open in a new tab so the dashboard stays visible after the
+            // click. preconnect + speculation-rules prefetch keep the
+            // navigation fast across tabs.
             $rel = $isArchived ? ' rel="noopener"' : ' rel="noreferrer noopener"';
-            $linkAttrs = $rel;
+            $linkAttrs = $rel . ' target="_blank"';
             $badgeClass = $isArchived ? 'badge badge--archived' : 'badge badge--original';
             $badgeLabel = $isArchived ? 'archive.today' : 'original';
             $paywallBadge = '';
@@ -4322,46 +4321,30 @@ final class Extrablatt
         $count = count(value: $articles);
         $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
 
-        // Chrome speculation-rules: prerender same-origin targets (the
-        // archive.ph proxy URLs that go through our domain) and prefetch
-        // cross-origin URLs. Cross-site prerender is not yet supported by
-        // Chrome (crbug.com/1176054), so prefetch is the best we can do
-        // for direct Reddit/X/wiwo.de links — Chrome warms DNS + TLS +
-        // HTTP cache so navigation still feels instant.
+        // All links open via target="_blank", which kills the same-origin
+        // prerender activation (prerender is tab-bound). So we drop
+        // prerender entirely and warm the click destination with
+        // speculation-rules `prefetch` (HTML bytes in HTTP cache, works
+        // cross-tab) plus a `preconnect` for every cross-origin host
+        // (DNS + TLS handshake done before the user clicks).
         $prerenderTag = '';
         if ($prerenderTargets !== []) {
+            $rules = json_encode(
+                value: ['prefetch' => [['urls' => $prerenderTargets, 'eagerness' => 'eager']]],
+                flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            );
+            if (is_string(value: $rules)) {
+                $prerenderTag = '<script type="speculationrules">' . $rules . '</script>';
+            }
             $selfHost = (string) parse_url(url: $this->currentOrigin(), component: PHP_URL_HOST);
-            $sameOrigin = [];
-            $crossOrigin = [];
-            foreach ($prerenderTargets as $u) {
-                $host = (string) parse_url(url: $u, component: PHP_URL_HOST);
-                if ($host === '' || strcasecmp(string1: $host, string2: $selfHost) === 0) {
-                    $sameOrigin[] = $u;
-                } else {
-                    $crossOrigin[] = $u;
-                }
-            }
-            $blocks = [];
-            if ($sameOrigin !== []) {
-                $blocks['prerender'] = [['urls' => $sameOrigin, 'eagerness' => 'eager']];
-            }
-            if ($crossOrigin !== []) {
-                $blocks['prefetch'] = [['urls' => $crossOrigin, 'eagerness' => 'eager']];
-            }
-            if ($blocks !== []) {
-                $rules = json_encode(value: $blocks, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-                if (is_string(value: $rules)) {
-                    $prerenderTag = '<script type="speculationrules">' . $rules . '</script>';
-                }
-            }
-            // preconnect for every distinct cross-origin host so DNS + TLS
-            // are already warm by the time the user clicks. Cheap (one
-            // socket per host) and saves ~100-300 ms on first-click.
             $seenHosts = [];
-            foreach ($crossOrigin as $u) {
+            foreach ($prerenderTargets as $u) {
                 $scheme = (string) parse_url(url: $u, component: PHP_URL_SCHEME);
                 $host = (string) parse_url(url: $u, component: PHP_URL_HOST);
-                if ($host === '' || isset($seenHosts[$host])) {
+                if ($host === '' || strcasecmp(string1: $host, string2: $selfHost) === 0) {
+                    continue;
+                }
+                if (isset($seenHosts[$host])) {
                     continue;
                 }
                 $seenHosts[$host] = true;
@@ -4461,7 +4444,7 @@ final class Extrablatt
                 <header class="top">
                     <h1><a href="/">extrablatt!</a></h1>
                     <span class="count" id="count" data-suffix=" Artikel">{$countLabel}</span>
-                    <a class="scrape-link" href="/?scrape=1" rel="noopener">Scrape ▶</a>
+                    <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
                     <form method="post" action="/" onsubmit="return confirm('Alle ungelesenen Artikel als gelesen markieren?');" style="margin:0">
                         <input type="hidden" name="mark_all_read" value="1">
                         <button type="submit" class="markall-btn">All read</button>
