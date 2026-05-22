@@ -2447,7 +2447,12 @@ final class Extrablatt
             $failBump = $db->prepare(query: 'UPDATE articles SET thumbnail_fail_count = COALESCE(thumbnail_fail_count, 0) + 1 WHERE url = :url');
             $genWritten = 0;
             $genFailed = 0;
-            foreach ($genThumbs as $url => $thumb) {
+            // Iterate over every candidate the pipeline was asked about, not
+            // over the returned results — silent pipeline drops (no output
+            // line at all) would otherwise leave the counter untouched and
+            // the URL would re-enter the backfill on every run.
+            foreach ($byUrl as $url => $_entry) {
+                $thumb = $genThumbs[$url] ?? null;
                 if ($thumb !== null) {
                     $genUpdate->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
                     $genWritten++;
