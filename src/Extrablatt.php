@@ -2221,6 +2221,47 @@ final class Extrablatt
         ));
         $phaseStart = microtime(as_float: true);
         $thumbnails = $this->downloadThumbnailsStreaming(items: $thumbCandidates, imageUrls: $effectiveImages, emit: $emit);
+
+        // Second pass for fresh feed items: failed downloads that weren't
+        // already using the favicon get one retry with the Google Favicon
+        // URL. Without this, fresh items have to wait a full scrape cycle
+        // before Generic-Backfill picks them up.
+        $byUrl = [];
+        foreach ($thumbCandidates as $entry) {
+            $byUrl[$entry['item']->link] = $entry;
+        }
+        $retryCandidates = [];
+        $retryImages = [];
+        foreach ($thumbnails as $url => $thumb) {
+            if ($thumb !== null) {
+                continue;
+            }
+            $primary = (string) ($effectiveImages[$url] ?? '');
+            if (str_contains(haystack: $primary, needle: 'google.com/s2/favicons')) {
+                continue;
+            }
+            $entry = $byUrl[$url] ?? null;
+            if ($entry === null) {
+                continue;
+            }
+            $host = (string) parse_url(
+                url: (string) ($papersConfig[$entry['paper']]['url'] ?? ''),
+                component: PHP_URL_HOST
+            );
+            if ($host === '') {
+                continue;
+            }
+            $retryImages[$url] = 'https://www.google.com/s2/favicons?domain=' . rawurlencode(string: $host) . '&sz=128';
+            $retryCandidates[] = $entry;
+        }
+        if ($retryCandidates !== []) {
+            $emit(sprintf('  Phase-5 Retry: %d Items mit Favicon-Fallback', count(value: $retryCandidates)));
+            $retryThumbs = $this->downloadThumbnailsStreaming(items: $retryCandidates, imageUrls: $retryImages, emit: $emit);
+            foreach ($retryThumbs as $url => $thumb) {
+                $thumbnails[$url] = $thumb;
+            }
+        }
+
         $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
         $okThumbs = count(value: array_filter(array: $thumbnails));
         $emit(sprintf('  → %d Thumbnails generiert (%d ms)', $okThumbs, $ms));
