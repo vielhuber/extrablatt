@@ -1803,6 +1803,9 @@ final class Extrablatt
         if (!in_array(needle: 'embedding', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN embedding BLOB DEFAULT NULL');
         }
+        if (!in_array(needle: 'thumbnail_fail_count', haystack: $columns, strict: true)) {
+            $db->exec(statement: 'ALTER TABLE articles ADD COLUMN thumbnail_fail_count INTEGER NOT NULL DEFAULT 0');
+        }
         // 768-dim float32 vector = 3072 bytes. Anything bigger (early
         // 3072-dim runs) is incompatible with the current similarity loop
         // and gets reset so the next run re-embeds with the right size.
@@ -2318,6 +2321,7 @@ final class Extrablatt
             SELECT url, paper, title, image_url
             FROM articles
             WHERE thumbnail IS NULL
+              AND COALESCE(thumbnail_fail_count, 0) < 3
               AND (COALESCE(paywall, 0) != 1 OR status = 'archive')
             ORDER BY published_at ASC
             LIMIT 500
@@ -2357,16 +2361,62 @@ final class Extrablatt
             $emit(sprintf('  Generic-Backfill: %d ältere Artikel ohne Thumbnail', count(value: $genBfCandidates)));
             $genStart = microtime(as_float: true);
             $genThumbs = $this->downloadThumbnailsStreaming(items: $genBfCandidates, imageUrls: $genBfImages, emit: $emit);
-            $genUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+
+            // Second pass: items that failed and weren't already using the
+            // favicon get one retry with the Google Favicon URL — a broken
+            // image_url shouldn't leave an article thumb-less when we can
+            // always fall back to the source logo.
+            $byUrl = [];
+            foreach ($genBfCandidates as $entry) {
+                $byUrl[$entry['item']->link] = $entry;
+            }
+            $retryCandidates = [];
+            $retryImages = [];
+            foreach ($genThumbs as $url => $thumb) {
+                if ($thumb !== null) {
+                    continue;
+                }
+                $primary = (string) ($genBfImages[$url] ?? '');
+                if (str_contains(haystack: $primary, needle: 'google.com/s2/favicons')) {
+                    continue;
+                }
+                $entry = $byUrl[$url] ?? null;
+                if ($entry === null) {
+                    continue;
+                }
+                $host = (string) parse_url(
+                    url: (string) ($papersConfig[$entry['paper']]['url'] ?? ''),
+                    component: PHP_URL_HOST
+                );
+                if ($host === '') {
+                    continue;
+                }
+                $retryImages[$url] = 'https://www.google.com/s2/favicons?domain=' . rawurlencode(string: $host) . '&sz=128';
+                $retryCandidates[] = $entry;
+            }
+            if ($retryCandidates !== []) {
+                $emit(sprintf('  Generic-Backfill Retry: %d Items mit Favicon-Fallback', count(value: $retryCandidates)));
+                $retryThumbs = $this->downloadThumbnailsStreaming(items: $retryCandidates, imageUrls: $retryImages, emit: $emit);
+                foreach ($retryThumbs as $url => $thumb) {
+                    $genThumbs[$url] = $thumb;
+                }
+            }
+
+            $genUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb, thumbnail_fail_count = 0 WHERE url = :url');
+            $failBump = $db->prepare(query: 'UPDATE articles SET thumbnail_fail_count = COALESCE(thumbnail_fail_count, 0) + 1 WHERE url = :url');
             $genWritten = 0;
+            $genFailed = 0;
             foreach ($genThumbs as $url => $thumb) {
                 if ($thumb !== null) {
                     $genUpdate->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
                     $genWritten++;
+                } else {
+                    $failBump->execute(params: [':url' => (string) $url]);
+                    $genFailed++;
                 }
             }
             $genMs = (int) round(num: (microtime(as_float: true) - $genStart) * 1000);
-            $emit(sprintf('  → Generic-Backfill: %d Thumbnails in DB geschrieben (%d ms)', $genWritten, $genMs));
+            $emit(sprintf('  → Generic-Backfill: %d geschrieben, %d Fail-Counter erhöht (%d ms)', $genWritten, $genFailed, $genMs));
         }
         $emit('');
 
