@@ -1430,8 +1430,15 @@ final class Extrablatt
         // Atom.
         if (isset($xml->entry)) {
             foreach ($xml->entry as $entry) {
+                // Article URL = link without rel or rel="alternate". Skip
+                // rel="enclosure"/"self"/etc. which would otherwise be picked
+                // up when they appear before the alternate link.
                 $href = '';
                 foreach ($entry->link as $linkNode) {
+                    $rel = (string) $linkNode['rel'];
+                    if ($rel !== '' && $rel !== 'alternate') {
+                        continue;
+                    }
                     $candidate = (string) $linkNode['href'];
                     if ($candidate !== '') {
                         $href = $candidate;
@@ -1512,6 +1519,26 @@ final class Extrablatt
                 $type = (string) $enclosure['type'];
                 $url = trim(string: (string) $enclosure['url']);
                 if ($url !== '' && ($type === '' || str_starts_with(haystack: $type, needle: 'image/'))) {
+                    return $url;
+                }
+            }
+        }
+
+        // Atom-style enclosure: <link rel="enclosure" type="image/..." href="...">.
+        // DW and others embed the article image this way instead of via
+        // <media:content> or <enclosure>.
+        if (isset($entry->link)) {
+            foreach ($entry->link as $linkNode) {
+                $rel = (string) $linkNode['rel'];
+                if ($rel !== 'enclosure') {
+                    continue;
+                }
+                $type = (string) $linkNode['type'];
+                if ($type !== '' && !str_starts_with(haystack: $type, needle: 'image/')) {
+                    continue;
+                }
+                $url = trim(string: (string) $linkNode['href']);
+                if ($url !== '') {
                     return $url;
                 }
             }
