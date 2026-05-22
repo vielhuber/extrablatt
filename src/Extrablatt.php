@@ -142,13 +142,21 @@ final class Extrablatt
         }
         $mime = match (true) {
             str_ends_with(haystack: $file, needle: '.css') => 'text/css',
+            str_ends_with(haystack: $file, needle: '.js') => 'text/javascript',
             str_ends_with(haystack: $file, needle: '.json') => 'application/json',
             str_ends_with(haystack: $file, needle: '.svg') => 'image/svg+xml',
             str_ends_with(haystack: $file, needle: '.png') => 'image/png',
             default => 'application/octet-stream'
         };
         header(header: 'Content-Type: ' . $mime);
-        header(header: 'Cache-Control: public, max-age=86400');
+        // The service worker must not be cached aggressively, otherwise
+        // updates would never reach installed clients.
+        if (str_ends_with(haystack: $file, needle: 'sw.js')) {
+            header(header: 'Cache-Control: no-cache');
+            header(header: 'Service-Worker-Allowed: /');
+        } else {
+            header(header: 'Cache-Control: public, max-age=86400');
+        }
         header(header: 'Content-Length: ' . filesize(filename: $absolute));
         readfile(filename: $absolute);
     }
@@ -985,7 +993,14 @@ final class Extrablatt
             '<meta name="apple-mobile-web-app-capable" content="yes">' .
             '<meta name="mobile-web-app-capable" content="yes">' .
             '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' .
-            '<meta name="apple-mobile-web-app-title" content="Extrablatt">';
+            '<meta name="apple-mobile-web-app-title" content="Extrablatt">' .
+            '<script>' .
+            'if("serviceWorker" in navigator){' .
+            'window.addEventListener("load",()=>{' .
+            'navigator.serviceWorker.register("/?asset=pwa/sw.js",{scope:"/"});' .
+            '});' .
+            '}' .
+            '</script>';
     }
 
     private function renderBackLink(): string
