@@ -1241,6 +1241,10 @@ final class Extrablatt
                 replacement: '',
                 subject: $text
             ));
+            // Collapse embedded newlines/tabs into single spaces — otherwise
+            // multi-line tweets break the per-item log formatting and look
+            // like subprocess output leaking into stdout.
+            $titleText = (string) preg_replace(pattern: '~\s+~u', replacement: ' ', subject: $titleText);
             $title = '@' . $screen . ': ' . mb_substr(string: $titleText !== '' ? $titleText : $text, start: 0, length: 220);
             $link = 'https://x.com/' . $screen . '/status/' . $idStr;
             $imageUrl = null;
@@ -1561,11 +1565,19 @@ final class Extrablatt
 
         $contentEncoded = (string) ($entry->children(namespaceOrPrefix: $contentNs)->encoded ?? '');
         $description = (string) $entry->description;
-        $haystack = $contentEncoded !== '' ? $contentEncoded : $description;
-        if ($haystack !== '' && preg_match(pattern: '~<img[^>]+src=["\']([^"\']+)~i', subject: $haystack, matches: $m)) {
-            $candidate = trim(string: $m[1]);
-            if ($candidate !== '' && !str_ends_with(haystack: $candidate, needle: '/')) {
-                return $candidate;
+        // Atom: <content type="html"> / <summary type="html"> with CDATA
+        // wrapping an <img> tag (heise et al.). Falls back to RSS content/desc.
+        $atomContent = (string) ($entry->content ?? '');
+        $atomSummary = (string) ($entry->summary ?? '');
+        foreach ([$contentEncoded, $atomContent, $description, $atomSummary] as $haystack) {
+            if ($haystack === '') {
+                continue;
+            }
+            if (preg_match(pattern: '~<img[^>]+src=["\']([^"\']+)~i', subject: $haystack, matches: $m)) {
+                $candidate = trim(string: $m[1]);
+                if ($candidate !== '' && !str_ends_with(haystack: $candidate, needle: '/')) {
+                    return $candidate;
+                }
             }
         }
 
