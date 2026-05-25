@@ -1675,7 +1675,9 @@ final class Extrablatt
             }
             return $result;
         }
-        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $toProbe));
+        // Trailing newline so bash `while read` in buildParallelPipeline()
+        // does not drop the last entry (read returns non-zero at EOF).
+        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $toProbe) . "\n");
 
         $innerCmd =
             escapeshellarg(arg: $this->curlImpersonateBin) .
@@ -3215,7 +3217,9 @@ final class Extrablatt
             $key = md5(string: $entry['item']->link);
             $lines[] = $entry['item']->link . "\t" . $tmpDir . '/' . $key . '.html';
         }
-        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $lines));
+        // Trailing newline so bash `while read` in buildParallelPipeline()
+        // does not drop the last entry (read returns non-zero at EOF).
+        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $lines) . "\n");
 
         $cookieHeader = $this->buildCookieHeader(targetUrl: 'https://archive.ph/');
 
@@ -3417,7 +3421,9 @@ final class Extrablatt
             @unlink(filename: $tmpIn);
             return [];
         }
-        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $lines));
+        // Trailing newline so bash `while read` in buildParallelPipeline()
+        // does not drop the last entry (read returns non-zero at EOF).
+        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $lines) . "\n");
 
         $innerCmd =
             'src=$(echo "$1" | cut -f1); ' .
@@ -3715,7 +3721,9 @@ final class Extrablatt
         if ($tmpIn === false) {
             return [];
         }
-        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $urls));
+        // Trailing newline so bash `while read` in buildParallelPipeline()
+        // does not drop the last entry (read returns non-zero at EOF).
+        file_put_contents(filename: $tmpIn, data: implode(separator: "\n", array: $urls) . "\n");
 
         $paywallPattern = '"isAccessibleForFree"[[:space:]:,]+"?[fF]alse|article:content_tier"[[:space:]]+content="locked';
         // og:image first, twitter:image as fallback (Mozilla blogs and some
