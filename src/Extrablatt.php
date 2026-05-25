@@ -4662,6 +4662,20 @@ final class Extrablatt
         $count = count(value: $articles);
         $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
 
+        // Last scrape timestamp via mtime of scrape.log (truncated at scrape
+        // start, appended throughout — mtime tracks the most recent emit).
+        $scrapeLogFile = $this->logDir . '/scrape.log';
+        $lastScrapeLabel = '';
+        if (is_file(filename: $scrapeLogFile)) {
+            $ts = (int) @filemtime(filename: $scrapeLogFile);
+            if ($ts > 0) {
+                $lastScrapeLabel = htmlspecialchars(
+                    string: date(format: 'd.m.Y H:i', timestamp: $ts),
+                    flags: ENT_QUOTES
+                );
+            }
+        }
+
         // All links open via target="_blank", which kills the same-origin
         // prerender activation (prerender is tab-bound). So we drop
         // prerender entirely and warm the click destination with
@@ -4715,6 +4729,7 @@ final class Extrablatt
                 header.top h1 a { color: inherit; text-decoration: none; }
                 header.top h1 a:hover { text-decoration: underline; }
                 header.top .count { font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #71717a; }
+                header.top .last-scrape { font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #a1a1aa; }
                 header.top .scrape-link { margin-left: auto; font: 600 12px/1 system-ui, sans-serif; text-decoration: none; background: #18181b; color: #fff; padding: 8px 12px; border-radius: 6px; }
                 header.top .scrape-link:hover { background: #3f3f46; }
                 header.top .reset-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #991b1b; padding: 8px 12px; border-radius: 6px; border: 1px solid #fecaca; cursor: pointer; }
@@ -4785,6 +4800,7 @@ final class Extrablatt
                 <header class="top">
                     <h1><a href="/">extrablatt!</a></h1>
                     <span class="count" id="count" data-suffix=" Artikel">{$countLabel}</span>
+                    <span class="last-scrape" title="Letzter Scrape">{$lastScrapeLabel}</span>
                     <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
                     <form method="post" action="/" onsubmit="return confirm('Alle ungelesenen Artikel als gelesen markieren?');" style="margin:0">
                         <input type="hidden" name="mark_all_read" value="1">
