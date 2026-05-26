@@ -29,15 +29,15 @@ after install, edit:
 
 ```json
 {
-  "papers": {
-    "<paper-key>": {
-      "url":           "https://example.com",
-      "label":         "Display Name",
-      "rss":           "https://example.com/feed.xml",
-      "default_image": "https://example.com/fallback.png",
-      "stub_markers":  ["Subscribe to read", "Premium content"]
+    "papers": {
+        "<paper-key>": {
+            "url": "https://example.com",
+            "label": "Display Name",
+            "rss": "https://example.com/feed.xml",
+            "default_image": "https://example.com/fallback.png",
+            "stub_markers": ["Subscribe to read", "Premium content"]
+        }
     }
-  }
 }
 ```
 
@@ -57,4 +57,10 @@ php -S 127.0.0.1:8080 -t .
 
 ```cron
 0 6,18 * * * curl -s 'https://your-host/?scrape=1&key=<AUTH_PASSWORD>' >/dev/null
+```
+
+## backup
+
+```bash
+zip -r backup.zip .data
 ```
