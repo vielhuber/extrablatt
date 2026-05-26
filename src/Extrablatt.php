@@ -2735,7 +2735,10 @@ final class Extrablatt
                     $perPaper[$paper]++;
                 }
             }
-            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 1/Quelle)', count(value: $unread), count(value: $candidates)));
+            // Cap candidates to 30 before LLM rerank: anything beyond that is
+            // long-tail noise from low-affinity sources and inflates token cost.
+            $candidates = array_slice(array: $candidates, offset: 0, length: 30);
+            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 1/Quelle, max. 30)', count(value: $unread), count(value: $candidates)));
 
             $env = $this->loadEnv();
             $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
@@ -2767,6 +2770,9 @@ final class Extrablatt
             // takes on the same story (different sources, different
             // framing) don't both surface. Greedy by current rerank order.
             $final = $this->dedupMagicBucket(rows: $final, db: $db, emit: $emit);
+
+            // Final cap: only the top 10 land in the frozen bucket.
+            $final = array_slice(array: $final, offset: 0, length: 10);
 
             $rankStmt = $db->prepare(query: 'UPDATE articles SET magic_rank = :rank WHERE url = :url');
             foreach ($final as $i => $row) {
