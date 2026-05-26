@@ -2859,6 +2859,28 @@ final class Extrablatt
         $feedDeleted = $db->exec(statement: "DELETE FROM cache WHERE key LIKE 'feed:%'");
         $emit(sprintf('  → %d Feed-Cache-Einträge gelöscht (%d MB frei)', (int) $feedDeleted, intdiv($feedBytes, 1048576)));
 
+        // Drop display-only payload from old, untouched articles. Keeps the
+        // ML signals (embedding, category, paywall, rating, duplicate_of)
+        // and personal signals (vote, read_at) so future categorisation,
+        // dedup and affinity scoring stay accurate. Articles the user
+        // interacted with (read or voted) are preserved in full.
+        $articleCutoff = time() - 30 * 86400;
+        $bytesBefore = (int) $db->query(query: "
+            SELECT COALESCE(SUM(LENGTH(thumbnail)) + SUM(LENGTH(image_url)), 0)
+            FROM articles
+            WHERE published_at < {$articleCutoff}
+              AND read_at IS NULL AND vote = 0
+              AND (thumbnail IS NOT NULL OR image_url IS NOT NULL)
+        ")->fetchColumn();
+        $prunedRows = $db->exec(statement: "
+            UPDATE articles
+            SET thumbnail = NULL, image_url = NULL
+            WHERE published_at < {$articleCutoff}
+              AND read_at IS NULL AND vote = 0
+              AND (thumbnail IS NOT NULL OR image_url IS NOT NULL)
+        ");
+        $emit(sprintf('  → %d alte Artikel ausgedünnt (%d MB frei, Embeddings/Kategorien bleiben)', (int) $prunedRows, intdiv($bytesBefore, 1048576)));
+
         $db->exec(statement: 'VACUUM');
         $emit('  → VACUUM fertig');
     }
