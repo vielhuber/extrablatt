@@ -424,6 +424,23 @@ final class Extrablatt
             return;
         }
 
+        // External-link redirect: keeps the tap on our domain so iOS Universal
+        // Links / Android App Links don't hand the click off to the X /
+        // Reddit / YouTube app. The 302 itself isn't a "tap" and stays in the
+        // browser. Only http(s) targets are honoured to block open-redirect
+        // abuse via javascript: / data: schemes.
+        $goUrl = (string) ($_GET['go'] ?? '');
+        if ($goUrl !== '') {
+            $scheme = strtolower(string: (string) parse_url(url: $goUrl, component: PHP_URL_SCHEME));
+            if ($scheme === 'http' || $scheme === 'https') {
+                header(header: 'Referrer-Policy: no-referrer');
+                header(header: 'Location: ' . $goUrl);
+                return;
+            }
+            http_response_code(response_code: 400);
+            return;
+        }
+
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
         $statusFilter = (string) ($_GET['status'] ?? '');
@@ -4579,7 +4596,11 @@ final class Extrablatt
         foreach ($articles as $row) {
             $isArchived = $row['status'] === 'archive';
             $url = (string) $row['url'];
-            $target = $isArchived ? $this->proxyUrl(originalUrl: $url) : $url;
+            // Original links go through /?go= so the tap happens on our own
+            // domain and iOS / Android can't hand it off to a native app.
+            $target = $isArchived
+                ? $this->proxyUrl(originalUrl: $url)
+                : $this->currentOrigin() . '/?go=' . rawurlencode(string: $url);
             if (count(value: $prerenderTargets) < $prerenderLimit) {
                 $prerenderTargets[] = $target;
             }
@@ -4754,6 +4775,11 @@ final class Extrablatt
             <title>extrablatt!</title>
             {$pwa}
             {$prerenderTag}
+            <script>
+                // Pre-paint theme switch: read localStorage and apply before
+                // <body> renders to avoid a light-to-dark flash on dark users.
+                try { if (localStorage.getItem('theme') === 'dark') { document.documentElement.setAttribute('data-theme', 'dark'); } } catch (e) {}
+            </script>
             <style>
                 :root { color-scheme: light; }
                 * { box-sizing: border-box; }
@@ -4829,6 +4855,31 @@ final class Extrablatt
                 .top-btn { position: fixed; bottom: 20px; right: max(12px, calc((100vw - 760px) / 2 - 70px)); background: rgba(0,0,0,.78); color: #fff; text-decoration: none; font: 700 12px/1 system-ui, sans-serif; padding: 11px 14px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 2147483647; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
                 .top-btn.visible { opacity: 1; pointer-events: auto; }
                 .top-btn:hover { background: #000; }
+                .theme-toggle { background: transparent; border: 0; padding: 4px 6px; cursor: pointer; line-height: 0; color: #71717a; opacity: 0.8; display: inline-flex; align-items: center; transform: translateY(3px); }
+                .theme-toggle:hover { opacity: 1; color: #18181b; }
+                html[data-theme="dark"] .theme-toggle { color: #a1a1aa; }
+                html[data-theme="dark"] .theme-toggle:hover { color: #e4e4e7; }
+                html[data-theme="dark"] { color-scheme: dark; }
+                html[data-theme="dark"] body { background: #18181b; color: #e4e4e7; }
+                html[data-theme="dark"] .item { border-color: #3f3f46; }
+                html[data-theme="dark"] .item__swipe { background: #27272a; }
+                html[data-theme="dark"] .item__link { color: #e4e4e7; }
+                html[data-theme="dark"] .item__thumb { background: #3f3f46; }
+                html[data-theme="dark"] .item__thumb--empty { background: linear-gradient(135deg,#3f3f46,#52525b); }
+                html[data-theme="dark"] .item--empty { background: #27272a; color: #a1a1aa; }
+                html[data-theme="dark"] .item--empty a { color: #e4e4e7; }
+                html[data-theme="dark"] header.top h1 a { color: #e4e4e7; }
+                html[data-theme="dark"] header.top .markall-btn { background: #27272a; color: #93c5fd; border-color: #1e3a8a; }
+                html[data-theme="dark"] header.top .markall-btn:hover { background: #1e3a8a; border-color: #3b82f6; }
+                html[data-theme="dark"] header.top .reset-btn { background: #27272a; color: #fca5a5; border-color: #7f1d1d; }
+                html[data-theme="dark"] header.top .reset-btn:hover { background: #7f1d1d; border-color: #ef4444; }
+                html[data-theme="dark"] form.filters select { background-color: #27272a; color: #e4e4e7; border-color: #3f3f46; }
+                html[data-theme="dark"] form.filters select:hover { border-color: #71717a; }
+                html[data-theme="dark"] form.filters select:focus { border-color: #a1a1aa; }
+                html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
+                html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
+                html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
+                html[data-theme="dark"] .vote__btn:hover { background: #3f3f46; color: #e4e4e7; border-color: #71717a; }
             </style>
         </head>
         <body>
@@ -4837,6 +4888,7 @@ final class Extrablatt
                     <h1><a href="/">extrablatt!</a></h1>
                     <span class="count" id="count" data-suffix=" Artikel">{$countLabel}</span>
                     <span class="last-scrape" title="Letzter Scrape">{$lastScrapeLabel}</span>
+                    <button type="button" class="theme-toggle" id="themeToggle" title="Theme umschalten" aria-label="Theme umschalten"></button>
                     <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
                     <form method="post" action="/" onsubmit="return confirm('Alle ungelesenen Artikel als gelesen markieren?');" style="margin:0">
                         <input type="hidden" name="mark_all_read" value="1">
@@ -5064,6 +5116,28 @@ final class Extrablatt
                             }
                         } catch (err) { /* swallow */ }
                     }, true);
+                })();
+
+                (function () {
+                    var \$btn = document.getElementById('themeToggle');
+                    if (!\$btn) { return; }
+                    var SUN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/></svg>';
+                    var MOON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+                    var apply = function (mode) {
+                        if (mode === 'dark') {
+                            document.documentElement.setAttribute('data-theme', 'dark');
+                            \$btn.innerHTML = SUN;
+                        } else {
+                            document.documentElement.removeAttribute('data-theme');
+                            \$btn.innerHTML = MOON;
+                        }
+                    };
+                    try { apply(localStorage.getItem('theme') === 'dark' ? 'dark' : 'light'); } catch (e) {}
+                    \$btn.addEventListener('click', function () {
+                        var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+                        try { localStorage.setItem('theme', next); } catch (e) {}
+                        apply(next);
+                    });
                 })();
             </script>
         </body>
