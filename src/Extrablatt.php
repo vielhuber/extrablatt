@@ -424,23 +424,6 @@ final class Extrablatt
             return;
         }
 
-        // External-link redirect: keeps the tap on our domain so iOS Universal
-        // Links / Android App Links don't hand the click off to the X /
-        // Reddit / YouTube app. The 302 itself isn't a "tap" and stays in the
-        // browser. Only http(s) targets are honoured to block open-redirect
-        // abuse via javascript: / data: schemes.
-        $goUrl = (string) ($_GET['go'] ?? '');
-        if ($goUrl !== '') {
-            $scheme = strtolower(string: (string) parse_url(url: $goUrl, component: PHP_URL_SCHEME));
-            if ($scheme === 'http' || $scheme === 'https') {
-                header(header: 'Referrer-Policy: no-referrer');
-                header(header: 'Location: ' . $goUrl);
-                return;
-            }
-            http_response_code(response_code: 400);
-            return;
-        }
-
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
         $statusFilter = (string) ($_GET['status'] ?? '');
@@ -4596,11 +4579,7 @@ final class Extrablatt
         foreach ($articles as $row) {
             $isArchived = $row['status'] === 'archive';
             $url = (string) $row['url'];
-            // Original links go through /?go= so the tap happens on our own
-            // domain and iOS / Android can't hand it off to a native app.
-            $target = $isArchived
-                ? $this->proxyUrl(originalUrl: $url)
-                : $this->currentOrigin() . '/?go=' . rawurlencode(string: $url);
+            $target = $isArchived ? $this->proxyUrl(originalUrl: $url) : $url;
             if (count(value: $prerenderTargets) < $prerenderLimit) {
                 $prerenderTargets[] = $target;
             }
@@ -5138,6 +5117,30 @@ final class Extrablatt
                         try { localStorage.setItem('theme', next); } catch (e) {}
                         apply(next);
                     });
+                })();
+
+                // Android only: rewrite cross-origin taps to intent:// URIs
+                // pinned to Chrome's package. The explicit package= bypasses
+                // App Links so the Reddit / X / YouTube app can't intercept;
+                // browser_fallback_url covers devices without Chrome.
+                (function () {
+                    if (!/android/i.test(navigator.userAgent)) { return; }
+                    document.addEventListener('click', function (e) {
+                        var \$a = e.target.closest ? e.target.closest('a') : null;
+                        if (!\$a) { return; }
+                        var href = \$a.getAttribute('href');
+                        if (!href) { return; }
+                        var m = /^(https?):\/\/([^/?#]+)(.*)\$/i.exec(href);
+                        if (!m) { return; }
+                        if (m[2].toLowerCase() === location.host.toLowerCase()) { return; }
+                        e.preventDefault();
+                        var intent = 'intent://' + m[2] + m[3]
+                            + '#Intent;scheme=' + m[1]
+                            + ';package=com.android.chrome'
+                            + ';S.browser_fallback_url=' + encodeURIComponent(href)
+                            + ';end';
+                        location.href = intent;
+                    }, true);
                 })();
             </script>
         </body>
