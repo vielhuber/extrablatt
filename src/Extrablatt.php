@@ -2037,7 +2037,7 @@ final class Extrablatt
         $aiConfig = [] + ['provider' => $aiProvider, 'model' => $aiModel];
 
         if ($phase === 8) {
-            $emit('Phase 8/9: Duplikat-Erkennung per Embedding-Vergleich');
+            $emit('Phase 8/10: Duplikat-Erkennung per Embedding-Vergleich');
             if ($aiProvider === '' || $aiModel === '') {
                 $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
             } else {
@@ -2069,7 +2069,7 @@ final class Extrablatt
         $this->cacheClear(prefix: 'feed:');
 
         // Phase 1: feeds.
-        $emit('Phase 1/9: RSS-Feeds einlesen');
+        $emit('Phase 1/10: RSS-Feeds einlesen');
         $allItems = [];
         foreach (array_keys(array: $this->papers()) as $paper) {
             $paperKey = (string) $paper;
@@ -2093,7 +2093,7 @@ final class Extrablatt
         $urls = array_map(callback: fn(array $entry): string => $entry['item']->link, array: $allItems);
 
         // Phase 2: paywall.
-        $emit('Phase 2/9: Paywall-Status prüfen (HTML-Probe der Originalseiten)');
+        $emit('Phase 2/10: Paywall-Status prüfen (HTML-Probe der Originalseiten)');
         $knownPaywall = $this->readKnownPaywallStatus(db: $db, urls: $urls);
         $toProbe = array_values(array: array_filter(
             array: $allItems,
@@ -2112,7 +2112,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 3: archive availability — only for PLUS articles.
-        $emit('Phase 3/9: Archive-Verfügbarkeit prüfen (nur PLUS, parallel)');
+        $emit('Phase 3/10: Archive-Verfügbarkeit prüfen (nur PLUS, parallel)');
         $plusUrls = array_values(array: array_filter(
             array: $urls,
             callback: fn(string $u): bool => ($paywallStatus[$u] ?? null) === true
@@ -2126,7 +2126,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 4: archive-fulltext check.
-        $emit('Phase 4/9: Volltext-Check der archivierten PLUS-Artikel');
+        $emit('Phase 4/10: Volltext-Check der archivierten PLUS-Artikel');
         $knownFulltext = $this->readKnownArchiveFulltext(urls: $urls);
         $fulltextCandidates = array_values(array: array_filter(
             array: $allItems,
@@ -2154,7 +2154,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 5: thumbnails.
-        $emit('Phase 5/9: Thumbnails herunterladen + skalieren');
+        $emit('Phase 5/10: Thumbnails herunterladen + skalieren');
 
         $redditItems = array_values(array_filter(
             array: $allItems,
@@ -2523,7 +2523,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 6: AI categorisation.
-        $emit('Phase 6/9: AI-Kategorisierung');
+        $emit('Phase 6/10: AI-Kategorisierung');
         $env = $this->loadEnv();
         $aiProvider = $env['AI_PROVIDER'] ?? '';
         $aiModel = $env['AI_MODEL'] ?? '';
@@ -2583,7 +2583,7 @@ final class Extrablatt
         $emit('');
 
         // Phase 7: upsert.
-        $emit('Phase 7/9: In Datenbank schreiben');
+        $emit('Phase 7/10: In Datenbank schreiben');
         $stmt = $db->prepare(
             query:
             'INSERT INTO articles
@@ -2660,7 +2660,7 @@ final class Extrablatt
         // Phase 8: AI duplicate clustering. Same story across multiple
         // sources gets collapsed to one canonical entry — must run BEFORE
         // magic bucket so the bucket doesn't pick duplicates.
-        $emit('Phase 8/9: Duplikat-Erkennung per Embedding-Vergleich');
+        $emit('Phase 8/10: Duplikat-Erkennung per Embedding-Vergleich');
         $phaseStart = microtime(as_float: true);
         $envDup = $this->loadEnv();
         $aiProviderDup = (string) ($envDup['AI_PROVIDER'] ?? '');
@@ -2685,7 +2685,7 @@ final class Extrablatt
         //       and categories as context
         // The bucket is frozen — readers drain it, no slide-in. Only the
         // next scrape repopulates.
-        $emit('Phase 9/9: Magic-Bucket berechnen (Affinität + AI-Rerank)');
+        $emit('Phase 9/10: Magic-Bucket berechnen (Affinität + AI-Rerank)');
         $phaseStart = microtime(as_float: true);
         $db->exec(statement: 'UPDATE articles SET magic_rank = NULL');
 
@@ -2781,6 +2781,26 @@ final class Extrablatt
             $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
             $emit(sprintf('  → %d Artikel im Bucket (%d ms)', count(value: $final), $ms));
         }
+        $emit('');
+
+        // Phase 10: tagesübersicht. LLM fasst alle heutigen Schlagzeilen
+        // (egal ob gelesen oder im Magic-Bucket) zu einer plakativen
+        // Fließtext-Tagesschau zusammen, die der Dashboard-Render oberhalb
+        // der Filter einblendet.
+        $emit('Phase 10/10: Tagesübersicht generieren');
+        $phaseStart = microtime(as_float: true);
+        $env = $this->loadEnv();
+        $this->generateDailyDigest(
+            db: $db,
+            aiConfig: [
+                'provider' => (string) ($env['AI_PROVIDER'] ?? ''),
+                'model' => (string) ($env['AI_MODEL'] ?? ''),
+            ],
+            apiKey: (string) ($env['AI_API_KEY'] ?? ''),
+            emit: $emit
+        );
+        $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
+        $emit(sprintf('  → Phase 10 fertig (%d ms)', $ms));
         $emit('');
 
         $emit('Cache-Cleanup');
@@ -4396,6 +4416,194 @@ final class Extrablatt
     }
 
     /**
+     * Build the daily digest: take every article published since today's
+     * midnight (read or unread, magic bucket or not), feed the headline
+     * list to the LLM, persist the JSON result under cache key
+     * `daily_digest`. The renderer only surfaces a digest whose `date`
+     * matches today, so an old digest from a stale scrape silently drops
+     * out without an explicit cleanup pass.
+     */
+    private function generateDailyDigest(PDO $db, array $aiConfig, string $apiKey, callable $emit): void
+    {
+        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
+            $emit('  → kein AI-Helper verfügbar, überspringe');
+            return;
+        }
+        $provider = (string) ($aiConfig['provider'] ?? '');
+        $model = (string) ($aiConfig['model'] ?? '');
+        if ($provider === '' || $model === '' || $apiKey === '') {
+            $emit('  → kein AI-Provider konfiguriert, überspringe');
+            return;
+        }
+
+        $todayMidnight = strtotime(datetime: 'today');
+        $stmt = $db->prepare(query: '
+            SELECT url, paper, title, category, published_at
+            FROM articles
+            WHERE published_at >= :since
+              AND duplicate_of IS NULL
+              AND title IS NOT NULL AND title <> ""
+            ORDER BY published_at DESC
+            LIMIT 250
+        ');
+        $stmt->execute(params: [':since' => $todayMidnight]);
+        $articles = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
+        if ($articles === []) {
+            $emit('  → keine Artikel mit heutigem Datum, überspringe');
+            return;
+        }
+
+        $lines = [];
+        foreach ($articles as $i => $a) {
+            $lines[] = ($i + 1) . '. [' . ((string) ($a['paper'] ?? '?')) . ' | ' . ((string) ($a['category'] ?? '-')) . '] '
+                . mb_substr(string: (string) ($a['title'] ?? ''), start: 0, length: 180);
+        }
+
+        $prompt =
+            "Du bist ein Nachrichten-Redakteur und schreibst eine kompakte Tagesübersicht für einen Privatleser.\n\n" .
+            "Hier alle Artikel-Schlagzeilen des heutigen Tages aus diversen Quellen:\n\n" .
+            implode(separator: "\n", array: $lines) . "\n\n" .
+            "Erstelle eine plakative, leicht verständliche Tagesübersicht der 5 bis 8 wichtigsten Geschichten. " .
+            "Pro Geschichte ein Absatz Fließtext (2 bis 4 Sätze): worum geht es, warum ist es relevant, was ist die Konsequenz. " .
+            "Sprache: nüchtern, klar, ohne Floskeln, ohne Marketing. Mehrfach-Berichterstattung zur gleichen Story " .
+            "in einem Absatz bündeln und alle dazugehörigen Quellen-Indizes referenzieren.\n\n" .
+            "Antworte AUSSCHLIESSLICH mit gültigem JSON, keine Erklärung davor oder dahinter, kein Markdown-Codeblock:\n" .
+            "{\"items\":[{\"paragraph\":\"...\",\"sources\":[1,4,12]},{\"paragraph\":\"...\",\"sources\":[7]}]}\n" .
+            "Die Zahlen in \"sources\" sind die Indizes der Artikel aus der Liste oben.";
+
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $ai = $aiClass::create(
+                provider: $provider,
+                model: $model,
+                temperature: (float) ($aiConfig['temperature'] ?? 0.3),
+                api_key: $apiKey,
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 120)
+            );
+            $response = $ai->ask(prompt: $prompt);
+            $raw = trim(string: (string) ($response['response'] ?? ''));
+        } catch (\Throwable $e) {
+            $emit('  ⚠️  Tagesübersicht fehlgeschlagen: ' . $e->getMessage());
+            return;
+        }
+
+        // Strip an optional markdown code fence around the JSON.
+        $raw = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $raw);
+        $parsed = json_decode(json: $raw, associative: true);
+        if (!is_array(value: $parsed) || !isset($parsed['items']) || !is_array(value: $parsed['items'])) {
+            $emit('  ⚠️  Tagesübersicht: AI-Antwort kein gültiges JSON');
+            return;
+        }
+
+        $items = [];
+        foreach ($parsed['items'] as $item) {
+            if (!is_array(value: $item)) {
+                continue;
+            }
+            $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
+            if ($paragraph === '') {
+                continue;
+            }
+            $sources = [];
+            $seen = [];
+            foreach ((array) ($item['sources'] ?? []) as $src) {
+                $idx = (int) $src - 1;
+                if ($idx < 0 || $idx >= count(value: $articles)) {
+                    continue;
+                }
+                if (isset($seen[$idx])) {
+                    continue;
+                }
+                $seen[$idx] = true;
+                $a = $articles[$idx];
+                $sources[] = [
+                    'url' => (string) ($a['url'] ?? ''),
+                    'paper' => (string) ($a['paper'] ?? ''),
+                ];
+            }
+            if ($sources === []) {
+                continue;
+            }
+            $items[] = ['paragraph' => $paragraph, 'sources' => $sources];
+        }
+
+        if ($items === []) {
+            $emit('  ⚠️  Tagesübersicht: keine validen Items extrahiert');
+            return;
+        }
+
+        $payload = [
+            'generated_at' => time(),
+            'date' => date(format: 'Y-m-d'),
+            'items' => $items,
+        ];
+        $this->cacheSet(
+            key: 'daily_digest',
+            value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+        );
+        $emit(sprintf('  → %d Story-Absätze aus %d Artikeln', count(value: $items), count(value: $articles)));
+    }
+
+    /**
+     * Render the persisted daily digest as an HTML <section>, or '' if
+     * no digest exists for today.
+     */
+    private function renderDigestHtml(): string
+    {
+        $raw = $this->cacheGet(key: 'daily_digest');
+        if ($raw === null) {
+            return '';
+        }
+        $data = json_decode(json: $raw, associative: true);
+        if (!is_array(value: $data) || ((string) ($data['date'] ?? '')) !== date(format: 'Y-m-d')) {
+            return '';
+        }
+        $items = (array) ($data['items'] ?? []);
+        if ($items === []) {
+            return '';
+        }
+        $paragraphs = '';
+        foreach ($items as $item) {
+            if (!is_array(value: $item)) {
+                continue;
+            }
+            $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
+            if ($paragraph === '') {
+                continue;
+            }
+            $sourceHtml = '';
+            foreach ((array) ($item['sources'] ?? []) as $src) {
+                if (!is_array(value: $src)) {
+                    continue;
+                }
+                $url = (string) ($src['url'] ?? '');
+                if ($url === '') {
+                    continue;
+                }
+                $paper = (string) ($src['paper'] ?? '');
+                $label = $paper !== '' ? $paper : (string) parse_url(url: $url, component: PHP_URL_HOST);
+                $sourceHtml .= '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES)
+                    . '" target="_blank" rel="noreferrer noopener">'
+                    . htmlspecialchars(string: $label, flags: ENT_QUOTES)
+                    . '</a>';
+            }
+            $paragraphs .= '<p>'
+                . htmlspecialchars(string: $paragraph, flags: ENT_QUOTES)
+                . ($sourceHtml !== '' ? ' <span class="digest__sources">[' . $sourceHtml . ']</span>' : '')
+                . '</p>';
+        }
+        if ($paragraphs === '') {
+            return '';
+        }
+        $dateLabel = (string) date(format: 'd.m.Y');
+        return '<section class="digest">'
+            . '<h2 class="digest__title">Tagesübersicht <span class="digest__date">' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . '</span></h2>'
+            . $paragraphs
+            . '</section>';
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     private function fetchArticlesForDashboard(
@@ -4698,6 +4906,8 @@ final class Extrablatt
         $count = count(value: $articles);
         $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
 
+        $digestHtml = $this->renderDigestHtml();
+
         // Last scrape timestamp via mtime of scrape.log (truncated at scrape
         // start, appended throughout — mtime tracks the most recent emit).
         $scrapeLogFile = $this->logDir . '/scrape.log';
@@ -4781,6 +4991,15 @@ final class Extrablatt
                 form.filters select { min-width: 0; width: 100%; font: 600 12px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 8px 22px 8px 8px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 7px center; background-size: 8px 5px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
                 form.filters select:focus { outline: none; border-color: #18181b; }
+                .digest { font-family: "Times New Roman", "Liberation Serif", Times, serif; font-size: 17px; line-height: 1.55; color: #18181b; margin: 0 0 1.2rem; padding: 1rem 1.2rem; background: #fafaf9; border-left: 3px solid #18181b; border-radius: 4px; }
+                .digest__title { font-family: "Times New Roman", "Liberation Serif", Times, serif; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #71717a; margin: 0 0 0.7rem; }
+                .digest__date { font-weight: 400; color: #a1a1aa; }
+                .digest p { margin: 0 0 0.7rem; text-align: justify; hyphens: auto; }
+                .digest p:last-child { margin-bottom: 0; }
+                .digest__sources { font-family: system-ui, sans-serif; font-size: 11px; color: #71717a; white-space: nowrap; }
+                .digest__sources a { color: #71717a; text-decoration: none; margin: 0 4px 0 0; }
+                .digest__sources a:last-child { margin-right: 0; }
+                .digest__sources a:hover { color: #18181b; text-decoration: underline; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
                 .item { position: relative; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; margin: 0 0 10px; transition: opacity 0.18s ease, max-height 0.18s ease, margin 0.18s ease, border-width 0.18s ease; contain: layout paint style; content-visibility: auto; contain-intrinsic-size: 0 92px; }
                 .item__swipe { position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: #fff; touch-action: pan-y; transition: transform 0.18s ease; will-change: transform; }
@@ -4855,6 +5074,12 @@ final class Extrablatt
                 html[data-theme="dark"] form.filters select { background-color: #27272a; color: #e4e4e7; border-color: #3f3f46; }
                 html[data-theme="dark"] form.filters select:hover { border-color: #71717a; }
                 html[data-theme="dark"] form.filters select:focus { border-color: #a1a1aa; }
+                html[data-theme="dark"] .digest { background: #27272a; color: #e4e4e7; border-left-color: #a1a1aa; }
+                html[data-theme="dark"] .digest__title { color: #a1a1aa; }
+                html[data-theme="dark"] .digest__date { color: #71717a; }
+                html[data-theme="dark"] .digest__sources { color: #a1a1aa; }
+                html[data-theme="dark"] .digest__sources a { color: #a1a1aa; }
+                html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
@@ -4878,6 +5103,7 @@ final class Extrablatt
                         <button type="submit" class="reset-btn">Reset</button>
                     </form>
                 </header>
+                {$digestHtml}
                 <form class="filters" method="get" action="/">
                     <select name="paper" onchange="this.form.submit()">{$paperOptions}</select>
                     <select name="status" onchange="this.form.submit()">{$statusOptions}</select>
