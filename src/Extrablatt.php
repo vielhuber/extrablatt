@@ -4453,23 +4453,35 @@ final class Extrablatt
             return;
         }
 
+        $todayMidnight = strtotime(datetime: 'today');
+        $todayCount = 0;
         $lines = [];
         foreach ($articles as $i => $a) {
-            $lines[] = ($i + 1) . '. [' . ((string) ($a['paper'] ?? '?')) . ' | ' . ((string) ($a['category'] ?? '-')) . '] '
+            $isToday = ((int) ($a['published_at'] ?? 0)) >= $todayMidnight;
+            if ($isToday) {
+                $todayCount++;
+            }
+            $marker = $isToday ? ' (heute)' : '';
+            $lines[] = ($i + 1) . '. [' . ((string) ($a['paper'] ?? '?')) . ' | ' . ((string) ($a['category'] ?? '-')) . ']' . $marker . ' '
                 . mb_substr(string: (string) ($a['title'] ?? ''), start: 0, length: 180);
         }
 
         $prompt =
-            "Du bist ein Zeitungs-Chefredakteur und schreibst eine knappe Wochenübersicht für einen Privatleser, " .
-            "der nicht jeden Tag liest und nur das Allerwichtigste der vergangenen 7 Tage braucht.\n\n" .
-            "Hier alle Artikel-Schlagzeilen der letzten 7 Tage aus diversen Quellen:\n\n" .
+            "Du bist ein Zeitungs-Chefredakteur und schreibst ZWEI Texte für einen Privatleser, " .
+            "der nicht jeden Tag liest:\n" .
+            "  1. EINE \"Meldung des Tages\" — die wichtigste Story von HEUTE.\n" .
+            "  2. Eine Wochenübersicht mit 5 bis 8 Geschichten der letzten 7 Tage, absteigend nach Brisanz.\n\n" .
+            "Hier alle Artikel-Schlagzeilen. Artikel von HEUTE sind mit '(heute)' markiert:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
-            "Wähle die 5 bis 8 wichtigsten Geschichten der Woche. " .
-            "Pro Geschichte EIN kurzer Absatz von 1 bis 2 Sätzen: das Wesentliche prägnant auf den Punkt. " .
-            "Sprache: klar, nüchtern, plakativ, ohne Floskeln. Mehrfach-Berichterstattung zur gleichen Story " .
-            "über mehrere Tage in einem Absatz bündeln.\n\n" .
-            "WICHTIG: Sortiere die Geschichten ABSTEIGEND nach Brisanz und Tragweite — die wichtigste und " .
-            "brisanteste Story der Woche steht ganz oben, danach absteigend nach Bedeutung.\n\n" .
+            "MELDUNG DES TAGES (top_today): EIN Absatz von 1 bis 2 Sätzen zur wichtigsten Story von heute. " .
+            "Wähle ausschliesslich aus den mit '(heute)' markierten Artikeln. Falls KEIN Artikel mit " .
+            "'(heute)' markiert ist, setze \"top_today\" auf null.\n\n" .
+            "WOCHENÜBERSICHT (items): 5 bis 8 Absätze zu je 1 bis 2 Sätzen, ABSTEIGEND nach Brisanz und " .
+            "Tragweite — die wichtigste Story der Woche zuerst, danach absteigend nach Bedeutung. " .
+            "Mehrfach-Berichterstattung zur gleichen Story (auch über mehrere Tage) in einem Absatz bündeln. " .
+            "Die Story aus \"Meldung des Tages\" darf hier nochmal vorkommen, wenn sie auch über die " .
+            "Woche eine der wichtigsten ist.\n\n" .
+            "Sprache: klar, nüchtern, plakativ, ohne Floskeln.\n\n" .
             "WICHTIG: Die Artikel-Nummern gehören AUSSCHLIESSLICH in das \"sources\"-Feld des JSON. " .
             "Schreibe KEINE Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den \"paragraph\"-Text — der Fließtext " .
             "darf keinerlei Verweise auf Index-Nummern enthalten.\n\n" .
@@ -4477,8 +4489,8 @@ final class Extrablatt
             "mit doppelten Sternchen als Markdown-Bold hervor — sparsam, maximal 2 bis 4 Stellen pro Absatz, " .
             "Beispiel: **Olaf Scholz** kündigte den Rücktritt aus dem **NATO-Bündnis** an.\n\n" .
             "Antworte AUSSCHLIESSLICH mit gültigem JSON, keine Erklärung davor oder dahinter, kein Markdown-Codeblock:\n" .
-            "{\"items\":[{\"paragraph\":\"...\",\"sources\":[1,4,12]},{\"paragraph\":\"...\",\"sources\":[7]}]}\n" .
-            "Die Zahlen in \"sources\" sind die Indizes der Artikel aus der Liste oben.";
+            "{\"top_today\":{\"paragraph\":\"...\",\"sources\":[1,4]},\"items\":[{\"paragraph\":\"...\",\"sources\":[1,4,12]}]}\n" .
+            "\"top_today\" darf auch null sein. Die Zahlen in \"sources\" sind die Indizes der Artikel aus der Liste oben.";
 
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
@@ -4513,50 +4525,73 @@ final class Extrablatt
 
         $items = [];
         foreach ($parsed['items'] as $item) {
-            if (!is_array(value: $item)) {
-                continue;
+            $mapped = is_array(value: $item) ? $this->mapDigestSources(rawItem: $item, articles: $articles) : null;
+            if ($mapped !== null) {
+                $items[] = $mapped;
             }
-            $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
-            if ($paragraph === '') {
-                continue;
-            }
-            $sources = [];
-            $seen = [];
-            foreach ((array) ($item['sources'] ?? []) as $src) {
-                $idx = (int) $src - 1;
-                if ($idx < 0 || $idx >= count(value: $articles)) {
-                    continue;
-                }
-                if (isset($seen[$idx])) {
-                    continue;
-                }
-                $seen[$idx] = true;
-                $a = $articles[$idx];
-                $sources[] = [
-                    'url' => (string) ($a['url'] ?? ''),
-                    'paper' => (string) ($a['paper'] ?? ''),
-                ];
-            }
-            if ($sources === []) {
-                continue;
-            }
-            $items[] = ['paragraph' => $paragraph, 'sources' => $sources];
         }
 
-        if ($items === []) {
+        $topToday = null;
+        if (isset($parsed['top_today']) && is_array(value: $parsed['top_today'])) {
+            $topToday = $this->mapDigestSources(rawItem: $parsed['top_today'], articles: $articles);
+        }
+
+        if ($items === [] && $topToday === null) {
             $emit('  ⚠️  Tagesübersicht: keine validen Items extrahiert');
             return;
         }
 
         $payload = [
             'generated_at' => time(),
+            'top_today' => $topToday,
             'items' => $items,
         ];
         $this->cacheSet(
             key: 'daily_digest',
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
-        $emit(sprintf('  → %d Story-Absätze aus %d Artikeln', count(value: $items), count(value: $articles)));
+        $emit(sprintf(
+            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s)',
+            count(value: $items),
+            count(value: $articles),
+            $todayCount,
+            $topToday !== null ? 'ja' : 'nein'
+        ));
+    }
+
+    /**
+     * Validate one LLM-emitted digest item: trim the paragraph, map each
+     * source index back to the corresponding article (URL + paper), drop
+     * out-of-range / duplicate indices. Returns null if the paragraph is
+     * empty or no source survives mapping.
+     */
+    private function mapDigestSources(array $rawItem, array $articles): ?array
+    {
+        $paragraph = trim(string: (string) ($rawItem['paragraph'] ?? ''));
+        if ($paragraph === '') {
+            return null;
+        }
+        $sources = [];
+        $seen = [];
+        foreach ((array) ($rawItem['sources'] ?? []) as $src) {
+            $idx = (int) $src - 1;
+            if ($idx < 0 || $idx >= count(value: $articles)) {
+                continue;
+            }
+            if (isset($seen[$idx])) {
+                continue;
+            }
+            $seen[$idx] = true;
+            $a = $articles[$idx];
+            $sources[] = [
+                'url' => (string) ($a['url'] ?? ''),
+                'paper' => (string) ($a['paper'] ?? ''),
+            ];
+        }
+        if ($sources === []) {
+            return null;
+        }
+        return ['paragraph' => $paragraph, 'sources' => $sources];
     }
 
     /**
@@ -4579,74 +4614,97 @@ final class Extrablatt
         if ($generatedAt > 0 && $generatedAt < time() - 36 * 3600) {
             return '';
         }
-        $items = (array) ($data['items'] ?? []);
-        if ($items === []) {
-            return '';
+        $stamp = $generatedAt > 0 ? $generatedAt : time();
+        $dateLabel = htmlspecialchars(string: (string) date(format: 'd.m.Y', timestamp: $stamp), flags: ENT_QUOTES);
+
+        $topToday = isset($data['top_today']) && is_array(value: $data['top_today']) ? $data['top_today'] : null;
+        $leadHtml = '';
+        if ($topToday !== null) {
+            $inner = $this->buildDigestParagraph(item: $topToday);
+            if ($inner !== '') {
+                $leadHtml = '<div class="digest__lead">'
+                    . '<h2 class="digest__title digest__title--lead">Meldung des Tages <span class="digest__date">' . $dateLabel . '</span></h2>'
+                    . $inner
+                    . '</div>';
+            }
         }
+
+        $items = (array) ($data['items'] ?? []);
         $paragraphs = '';
         foreach ($items as $item) {
             if (!is_array(value: $item)) {
                 continue;
             }
-            $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
-            // Strip trailing index lists like " (5, 12, 27)" or " [5, 12]"
-            // that some models keep appending despite the prompt.
-            $paragraph = (string) preg_replace(
-                pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u',
-                replacement: '',
-                subject: $paragraph
-            );
-            $paragraph = trim(string: $paragraph);
-            if ($paragraph === '') {
-                continue;
-            }
-            $sourceHtml = '';
-            $seenPapers = [];
-            foreach ((array) ($item['sources'] ?? []) as $src) {
-                if (!is_array(value: $src)) {
-                    continue;
-                }
-                $url = (string) ($src['url'] ?? '');
-                if ($url === '') {
-                    continue;
-                }
-                $paper = (string) ($src['paper'] ?? '');
-                $label = $paper !== '' ? $paper : (string) parse_url(url: $url, component: PHP_URL_HOST);
-                $dedupKey = strtolower(string: $label);
-                if (isset($seenPapers[$dedupKey])) {
-                    continue;
-                }
-                $seenPapers[$dedupKey] = true;
-                $sourceHtml .= '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES)
-                    . '" target="_blank" rel="noreferrer noopener">'
-                    . htmlspecialchars(string: $label, flags: ENT_QUOTES)
-                    . '</a>';
-            }
-            // Escape first, then upgrade markdown **bold** to <strong>. Doing
-            // it in this order keeps the path XSS-safe: any HTML/script that
-            // sneaks into the LLM output is neutralised by htmlspecialchars
-            // before the regex runs, so only the literal ** markers can
-            // produce real tags.
-            $escaped = htmlspecialchars(string: $paragraph, flags: ENT_QUOTES);
-            $escaped = (string) preg_replace(
-                pattern: '/\*\*(.+?)\*\*/s',
-                replacement: '<strong>$1</strong>',
-                subject: $escaped
-            );
-            $paragraphs .= '<p>'
-                . $escaped
-                . ($sourceHtml !== '' ? '<span class="digest__sources">' . $sourceHtml . '</span>' : '')
-                . '</p>';
+            $paragraphs .= $this->buildDigestParagraph(item: $item);
         }
-        if ($paragraphs === '') {
+
+        if ($leadHtml === '' && $paragraphs === '') {
             return '';
         }
-        $stamp = $generatedAt > 0 ? $generatedAt : time();
-        $dateLabel = (string) date(format: 'd.m.Y', timestamp: $stamp);
-        return '<section class="digest">'
-            . '<h2 class="digest__title">Wochenübersicht <span class="digest__date">letzte 7 Tage · ' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . '</span></h2>'
-            . $paragraphs
-            . '</section>';
+
+        $weeklyHtml = $paragraphs !== ''
+            ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">letzte 7 Tage · ' . $dateLabel . '</span></h2>' . $paragraphs
+            : '';
+
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . '</section>';
+    }
+
+    /**
+     * Render one digest item as a <p> with **bold** → <strong> upgrade and
+     * a per-paper-deduped source link list. Returns '' if the paragraph
+     * has no content after defensive index-list stripping.
+     */
+    private function buildDigestParagraph(array $item): string
+    {
+        $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
+        // Strip trailing index lists like " (5, 12, 27)" or " [5, 12]" that
+        // some models keep appending despite the prompt.
+        $paragraph = (string) preg_replace(
+            pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u',
+            replacement: '',
+            subject: $paragraph
+        );
+        $paragraph = trim(string: $paragraph);
+        if ($paragraph === '') {
+            return '';
+        }
+        $sourceHtml = '';
+        $seenPapers = [];
+        foreach ((array) ($item['sources'] ?? []) as $src) {
+            if (!is_array(value: $src)) {
+                continue;
+            }
+            $url = (string) ($src['url'] ?? '');
+            if ($url === '') {
+                continue;
+            }
+            $paper = (string) ($src['paper'] ?? '');
+            $label = $paper !== '' ? $paper : (string) parse_url(url: $url, component: PHP_URL_HOST);
+            $dedupKey = strtolower(string: $label);
+            if (isset($seenPapers[$dedupKey])) {
+                continue;
+            }
+            $seenPapers[$dedupKey] = true;
+            $sourceHtml .= '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES)
+                . '" target="_blank" rel="noreferrer noopener">'
+                . htmlspecialchars(string: $label, flags: ENT_QUOTES)
+                . '</a>';
+        }
+        // Escape first, then upgrade markdown **bold** to <strong>. Doing
+        // it in this order keeps the path XSS-safe: any HTML/script that
+        // sneaks into the LLM output is neutralised by htmlspecialchars
+        // before the regex runs, so only the literal ** markers can
+        // produce real tags.
+        $escaped = htmlspecialchars(string: $paragraph, flags: ENT_QUOTES);
+        $escaped = (string) preg_replace(
+            pattern: '/\*\*(.+?)\*\*/s',
+            replacement: '<strong>$1</strong>',
+            subject: $escaped
+        );
+        return '<p>'
+            . $escaped
+            . ($sourceHtml !== '' ? '<span class="digest__sources">' . $sourceHtml . '</span>' : '')
+            . '</p>';
     }
 
     /**
@@ -5046,6 +5104,9 @@ final class Extrablatt
                 .digest p { margin: 0 0 0.7rem; text-align: justify; hyphens: auto; }
                 .digest p:last-child { margin-bottom: 0; }
                 .digest strong { font-weight: 700; color: #18181b; }
+                .digest__lead { margin: 0 0 1.3rem; padding-bottom: 1.2rem; border-bottom: 1px solid #d4d4d8; }
+                .digest__lead p { font-size: 18px; line-height: 1.55; color: #18181b; }
+                .digest__title--lead { color: #18181b; }
                 .digest__sources { display: block; font-family: system-ui, sans-serif; font-size: 10.5px; color: #a1a1aa; letter-spacing: 0.02em; margin-top: 0.25rem; }
                 .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 8px 0 0; display: inline-block; }
                 .digest__sources a:last-child { margin-right: 0; }
@@ -5128,6 +5189,9 @@ final class Extrablatt
                 html[data-theme="dark"] .digest__title { color: #a1a1aa; border-bottom-color: #3f3f46; }
                 html[data-theme="dark"] .digest__date { color: #71717a; }
                 html[data-theme="dark"] .digest strong { color: #fafafa; }
+                html[data-theme="dark"] .digest__lead { border-bottom-color: #3f3f46; }
+                html[data-theme="dark"] .digest__lead p { color: #fafafa; }
+                html[data-theme="dark"] .digest__title--lead { color: #e4e4e7; }
                 html[data-theme="dark"] .digest__sources { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
