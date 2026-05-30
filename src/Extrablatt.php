@@ -4466,7 +4466,10 @@ final class Extrablatt
             "Wähle die 3 bis 5 wichtigsten Geschichten des Tages. " .
             "Pro Geschichte EIN kurzer Absatz von 1 bis 2 Sätzen: das Wesentliche prägnant auf den Punkt. " .
             "Sprache: klar, nüchtern, plakativ, ohne Floskeln. Mehrfach-Berichterstattung zur gleichen Story " .
-            "in einem Absatz bündeln und alle Quellen-Indizes referenzieren.\n\n" .
+            "in einem Absatz bündeln.\n\n" .
+            "WICHTIG: Die Artikel-Nummern gehören AUSSCHLIESSLICH in das \"sources\"-Feld des JSON. " .
+            "Schreibe KEINE Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den \"paragraph\"-Text — der Fließtext " .
+            "darf keinerlei Verweise auf Index-Nummern enthalten.\n\n" .
             "Hebe in jedem Absatz die zentralen Schlüsselwörter (Eigennamen, Orte, Zahlen, Kernbegriffe) " .
             "mit doppelten Sternchen als Markdown-Bold hervor — sparsam, maximal 2 bis 4 Stellen pro Absatz, " .
             "Beispiel: **Olaf Scholz** kündigte den Rücktritt aus dem **NATO-Bündnis** an.\n\n" .
@@ -4578,10 +4581,19 @@ final class Extrablatt
                 continue;
             }
             $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
+            // Strip trailing index lists like " (5, 12, 27)" or " [5, 12]"
+            // that some models keep appending despite the prompt.
+            $paragraph = (string) preg_replace(
+                pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u',
+                replacement: '',
+                subject: $paragraph
+            );
+            $paragraph = trim(string: $paragraph);
             if ($paragraph === '') {
                 continue;
             }
             $sourceHtml = '';
+            $seenPapers = [];
             foreach ((array) ($item['sources'] ?? []) as $src) {
                 if (!is_array(value: $src)) {
                     continue;
@@ -4592,6 +4604,11 @@ final class Extrablatt
                 }
                 $paper = (string) ($src['paper'] ?? '');
                 $label = $paper !== '' ? $paper : (string) parse_url(url: $url, component: PHP_URL_HOST);
+                $dedupKey = strtolower(string: $label);
+                if (isset($seenPapers[$dedupKey])) {
+                    continue;
+                }
+                $seenPapers[$dedupKey] = true;
                 $sourceHtml .= '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES)
                     . '" target="_blank" rel="noreferrer noopener">'
                     . htmlspecialchars(string: $label, flags: ENT_QUOTES)
@@ -4610,7 +4627,7 @@ final class Extrablatt
             );
             $paragraphs .= '<p>'
                 . $escaped
-                . ($sourceHtml !== '' ? ' <span class="digest__sources">[' . $sourceHtml . ']</span>' : '')
+                . ($sourceHtml !== '' ? '<span class="digest__sources">' . $sourceHtml . '</span>' : '')
                 . '</p>';
         }
         if ($paragraphs === '') {
@@ -5020,8 +5037,8 @@ final class Extrablatt
                 .digest p { margin: 0 0 0.7rem; text-align: justify; hyphens: auto; }
                 .digest p:last-child { margin-bottom: 0; }
                 .digest strong { font-weight: 700; color: #18181b; }
-                .digest__sources { font-family: system-ui, sans-serif; font-size: 10.5px; color: #a1a1aa; white-space: nowrap; letter-spacing: 0.02em; }
-                .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 5px 0 0; }
+                .digest__sources { display: block; font-family: system-ui, sans-serif; font-size: 10.5px; color: #a1a1aa; letter-spacing: 0.02em; margin-top: 0.25rem; }
+                .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 8px 0 0; display: inline-block; }
                 .digest__sources a:last-child { margin-right: 0; }
                 .digest__sources a:hover { color: #18181b; text-decoration: underline; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
