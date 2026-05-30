@@ -2787,7 +2787,7 @@ final class Extrablatt
         // (egal ob gelesen oder im Magic-Bucket) zu einer plakativen
         // Fließtext-Tagesschau zusammen, die der Dashboard-Render oberhalb
         // der Filter einblendet.
-        $emit('Phase 10/10: Tagesübersicht generieren');
+        $emit('Phase 10/10: Wochenübersicht generieren');
         $phaseStart = microtime(as_float: true);
         $env = $this->loadEnv();
         $this->generateDailyDigest(
@@ -4436,7 +4436,7 @@ final class Extrablatt
             return;
         }
 
-        $todayMidnight = strtotime(datetime: 'today');
+        $cutoff = time() - 7 * 86400;
         $stmt = $db->prepare(query: '
             SELECT url, paper, title, category, published_at
             FROM articles
@@ -4444,12 +4444,12 @@ final class Extrablatt
               AND duplicate_of IS NULL
               AND title IS NOT NULL AND title <> ""
             ORDER BY published_at DESC
-            LIMIT 250
+            LIMIT 1000
         ');
-        $stmt->execute(params: [':since' => $todayMidnight]);
+        $stmt->execute(params: [':since' => $cutoff]);
         $articles = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
         if ($articles === []) {
-            $emit('  → keine Artikel mit heutigem Datum, überspringe');
+            $emit('  → keine Artikel in den letzten 7 Tagen, überspringe');
             return;
         }
 
@@ -4460,13 +4460,16 @@ final class Extrablatt
         }
 
         $prompt =
-            "Du bist ein Zeitungs-Chefredakteur und schreibst eine knappe Tagesübersicht für einen Privatleser.\n\n" .
-            "Hier alle Artikel-Schlagzeilen des heutigen Tages aus diversen Quellen:\n\n" .
+            "Du bist ein Zeitungs-Chefredakteur und schreibst eine knappe Wochenübersicht für einen Privatleser, " .
+            "der nicht jeden Tag liest und nur das Allerwichtigste der vergangenen 7 Tage braucht.\n\n" .
+            "Hier alle Artikel-Schlagzeilen der letzten 7 Tage aus diversen Quellen:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
-            "Wähle die 3 bis 5 wichtigsten Geschichten des Tages. " .
+            "Wähle die 5 bis 8 wichtigsten Geschichten der Woche. " .
             "Pro Geschichte EIN kurzer Absatz von 1 bis 2 Sätzen: das Wesentliche prägnant auf den Punkt. " .
             "Sprache: klar, nüchtern, plakativ, ohne Floskeln. Mehrfach-Berichterstattung zur gleichen Story " .
-            "in einem Absatz bündeln.\n\n" .
+            "über mehrere Tage in einem Absatz bündeln.\n\n" .
+            "WICHTIG: Sortiere die Geschichten ABSTEIGEND nach Brisanz und Tragweite — die wichtigste und " .
+            "brisanteste Story der Woche steht ganz oben, danach absteigend nach Bedeutung.\n\n" .
             "WICHTIG: Die Artikel-Nummern gehören AUSSCHLIESSLICH in das \"sources\"-Feld des JSON. " .
             "Schreibe KEINE Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den \"paragraph\"-Text — der Fließtext " .
             "darf keinerlei Verweise auf Index-Nummern enthalten.\n\n" .
@@ -4547,7 +4550,6 @@ final class Extrablatt
 
         $payload = [
             'generated_at' => time(),
-            'date' => date(format: 'Y-m-d'),
             'items' => $items,
         ];
         $this->cacheSet(
@@ -4568,7 +4570,13 @@ final class Extrablatt
             return '';
         }
         $data = json_decode(json: $raw, associative: true);
-        if (!is_array(value: $data) || ((string) ($data['date'] ?? '')) !== date(format: 'Y-m-d')) {
+        if (!is_array(value: $data)) {
+            return '';
+        }
+        // Window is rolling 7 days; only hide if the digest itself is older
+        // than ~36h (would lag the week meaningfully). Otherwise trust it.
+        $generatedAt = (int) ($data['generated_at'] ?? 0);
+        if ($generatedAt > 0 && $generatedAt < time() - 36 * 3600) {
             return '';
         }
         $items = (array) ($data['items'] ?? []);
@@ -4633,9 +4641,10 @@ final class Extrablatt
         if ($paragraphs === '') {
             return '';
         }
-        $dateLabel = (string) date(format: 'd.m.Y');
+        $stamp = $generatedAt > 0 ? $generatedAt : time();
+        $dateLabel = (string) date(format: 'd.m.Y', timestamp: $stamp);
         return '<section class="digest">'
-            . '<h2 class="digest__title">Tagesübersicht <span class="digest__date">' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . '</span></h2>'
+            . '<h2 class="digest__title">Wochenübersicht <span class="digest__date">letzte 7 Tage · ' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . '</span></h2>'
             . $paragraphs
             . '</section>';
     }
