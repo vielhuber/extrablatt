@@ -4460,13 +4460,16 @@ final class Extrablatt
         }
 
         $prompt =
-            "Du bist ein Nachrichten-Redakteur und schreibst eine kompakte Tagesübersicht für einen Privatleser.\n\n" .
+            "Du bist ein Zeitungs-Chefredakteur und schreibst eine knappe Tagesübersicht für einen Privatleser.\n\n" .
             "Hier alle Artikel-Schlagzeilen des heutigen Tages aus diversen Quellen:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
-            "Erstelle eine plakative, leicht verständliche Tagesübersicht der 5 bis 8 wichtigsten Geschichten. " .
-            "Pro Geschichte ein Absatz Fließtext (2 bis 4 Sätze): worum geht es, warum ist es relevant, was ist die Konsequenz. " .
-            "Sprache: nüchtern, klar, ohne Floskeln, ohne Marketing. Mehrfach-Berichterstattung zur gleichen Story " .
-            "in einem Absatz bündeln und alle dazugehörigen Quellen-Indizes referenzieren.\n\n" .
+            "Wähle die 3 bis 5 wichtigsten Geschichten des Tages. " .
+            "Pro Geschichte EIN kurzer Absatz von 1 bis 2 Sätzen: das Wesentliche prägnant auf den Punkt. " .
+            "Sprache: klar, nüchtern, plakativ, ohne Floskeln. Mehrfach-Berichterstattung zur gleichen Story " .
+            "in einem Absatz bündeln und alle Quellen-Indizes referenzieren.\n\n" .
+            "Hebe in jedem Absatz die zentralen Schlüsselwörter (Eigennamen, Orte, Zahlen, Kernbegriffe) " .
+            "mit doppelten Sternchen als Markdown-Bold hervor — sparsam, maximal 2 bis 4 Stellen pro Absatz, " .
+            "Beispiel: **Olaf Scholz** kündigte den Rücktritt aus dem **NATO-Bündnis** an.\n\n" .
             "Antworte AUSSCHLIESSLICH mit gültigem JSON, keine Erklärung davor oder dahinter, kein Markdown-Codeblock:\n" .
             "{\"items\":[{\"paragraph\":\"...\",\"sources\":[1,4,12]},{\"paragraph\":\"...\",\"sources\":[7]}]}\n" .
             "Die Zahlen in \"sources\" sind die Indizes der Artikel aus der Liste oben.";
@@ -4594,8 +4597,19 @@ final class Extrablatt
                     . htmlspecialchars(string: $label, flags: ENT_QUOTES)
                     . '</a>';
             }
+            // Escape first, then upgrade markdown **bold** to <strong>. Doing
+            // it in this order keeps the path XSS-safe: any HTML/script that
+            // sneaks into the LLM output is neutralised by htmlspecialchars
+            // before the regex runs, so only the literal ** markers can
+            // produce real tags.
+            $escaped = htmlspecialchars(string: $paragraph, flags: ENT_QUOTES);
+            $escaped = (string) preg_replace(
+                pattern: '/\*\*(.+?)\*\*/s',
+                replacement: '<strong>$1</strong>',
+                subject: $escaped
+            );
             $paragraphs .= '<p>'
-                . htmlspecialchars(string: $paragraph, flags: ENT_QUOTES)
+                . $escaped
                 . ($sourceHtml !== '' ? ' <span class="digest__sources">[' . $sourceHtml . ']</span>' : '')
                 . '</p>';
         }
@@ -4968,6 +4982,9 @@ final class Extrablatt
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1,viewport-fit=cover">
             <title>extrablatt!</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;700&display=swap">
             {$pwa}
             {$prerenderTag}
             <script>
@@ -4997,13 +5014,14 @@ final class Extrablatt
                 form.filters select { min-width: 0; width: 100%; font: 600 12px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 8px 22px 8px 8px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 7px center; background-size: 8px 5px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
                 form.filters select:focus { outline: none; border-color: #18181b; }
-                .digest { font-family: "Times New Roman", "Liberation Serif", Times, serif; font-size: 17px; line-height: 1.55; color: #18181b; margin: 0 0 1.2rem; padding: 1rem 1.2rem; background: #fafaf9; border-left: 3px solid #18181b; border-radius: 4px; }
-                .digest__title { font-family: "Times New Roman", "Liberation Serif", Times, serif; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #71717a; margin: 0 0 0.7rem; }
-                .digest__date { font-weight: 400; color: #a1a1aa; }
+                .digest { font-family: 'Lora', Georgia, 'Times New Roman', Times, serif; font-size: 16px; line-height: 1.6; color: #27272a; margin: 0 0 1.2rem; padding: 1.1rem 1.4rem 1.2rem; background: #fdfcf8; border: 1px solid #e7e5e0; border-left: 3px solid #18181b; border-radius: 4px; box-shadow: 0 1px 0 rgba(0,0,0,0.02); }
+                .digest__title { font-family: 'Lora', Georgia, serif; font-size: 11px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: #71717a; margin: 0 0 0.9rem; padding-bottom: 0.55rem; border-bottom: 1px solid #e7e5e0; }
+                .digest__date { font-weight: 400; color: #a1a1aa; letter-spacing: 0.1em; }
                 .digest p { margin: 0 0 0.7rem; text-align: justify; hyphens: auto; }
                 .digest p:last-child { margin-bottom: 0; }
-                .digest__sources { font-family: system-ui, sans-serif; font-size: 11px; color: #71717a; white-space: nowrap; }
-                .digest__sources a { color: #71717a; text-decoration: none; margin: 0 4px 0 0; }
+                .digest strong { font-weight: 700; color: #18181b; }
+                .digest__sources { font-family: system-ui, sans-serif; font-size: 10.5px; color: #a1a1aa; white-space: nowrap; letter-spacing: 0.02em; }
+                .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 5px 0 0; }
                 .digest__sources a:last-child { margin-right: 0; }
                 .digest__sources a:hover { color: #18181b; text-decoration: underline; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
@@ -5080,11 +5098,12 @@ final class Extrablatt
                 html[data-theme="dark"] form.filters select { background-color: #27272a; color: #e4e4e7; border-color: #3f3f46; }
                 html[data-theme="dark"] form.filters select:hover { border-color: #71717a; }
                 html[data-theme="dark"] form.filters select:focus { border-color: #a1a1aa; }
-                html[data-theme="dark"] .digest { background: #27272a; color: #e4e4e7; border-left-color: #a1a1aa; }
-                html[data-theme="dark"] .digest__title { color: #a1a1aa; }
+                html[data-theme="dark"] .digest { background: #1f1f22; color: #d4d4d8; border-color: #3f3f46; border-left-color: #e4e4e7; box-shadow: none; }
+                html[data-theme="dark"] .digest__title { color: #a1a1aa; border-bottom-color: #3f3f46; }
                 html[data-theme="dark"] .digest__date { color: #71717a; }
-                html[data-theme="dark"] .digest__sources { color: #a1a1aa; }
-                html[data-theme="dark"] .digest__sources a { color: #a1a1aa; }
+                html[data-theme="dark"] .digest strong { color: #fafafa; }
+                html[data-theme="dark"] .digest__sources { color: #71717a; }
+                html[data-theme="dark"] .digest__sources a { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
