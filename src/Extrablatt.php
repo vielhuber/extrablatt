@@ -4482,15 +4482,21 @@ final class Extrablatt
                 timeout: (int) ($aiConfig['timeout'] ?? 120)
             );
             $response = $ai->ask(prompt: $prompt);
-            $raw = trim(string: (string) ($response['response'] ?? ''));
+            $resp = $response['response'] ?? null;
         } catch (\Throwable $e) {
             $emit('  ⚠️  Tagesübersicht fehlgeschlagen: ' . $e->getMessage());
             return;
         }
 
-        // Strip an optional markdown code fence around the JSON.
-        $raw = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $raw);
-        $parsed = json_decode(json: $raw, associative: true);
+        // aihelper auto-decodes JSON responses to stdClass / array. For
+        // string responses, strip an optional markdown code fence first.
+        if (is_object(value: $resp) || is_array(value: $resp)) {
+            $parsed = json_decode(json: (string) json_encode(value: $resp), associative: true);
+        } else {
+            $raw = trim(string: (string) $resp);
+            $raw = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $raw);
+            $parsed = json_decode(json: $raw, associative: true);
+        }
         if (!is_array(value: $parsed) || !isset($parsed['items']) || !is_array(value: $parsed['items'])) {
             $emit('  ⚠️  Tagesübersicht: AI-Antwort kein gültiges JSON');
             return;
