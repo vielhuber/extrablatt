@@ -503,8 +503,8 @@ final class Extrablatt
             if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
                 $thumbFilter = '';
             }
-            if (!in_array(needle: $viewFilter, haystack: ['ausgabe', 'meldungen'], strict: true)) {
-                $viewFilter = 'ausgabe';
+            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen'], strict: true)) {
+                $viewFilter = 'zeitung';
             }
             header(header: 'Content-Type: text/html; charset=utf-8');
             echo $this->renderDashboard(
@@ -5313,18 +5313,31 @@ final class Extrablatt
 
         $pwa = $this->pwaHeadTags();
         $count = count(value: $articles);
-        $countLabel = htmlspecialchars(string: $count . ' Artikel', flags: ENT_QUOTES);
+        // Only show a filtered article count when the user actually narrowed
+        // the result set. Without any filter the global total (excluding
+        // dupes) is shown, so the header reflects the real archive size and
+        // not just the magic/unread default slice.
+        $isFiltered = $paperFilter !== '' || $statusFilter !== '' || $paywallFilter !== ''
+            || $categoryFilter !== '' || $readFilter !== '' || $magicFilter !== '' || $thumbFilter !== '';
+        if ($isFiltered) {
+            $displayCount = $count;
+        } else {
+            $displayCount = (int) $this->openDatabase()
+                ->query(query: 'SELECT COUNT(*) FROM articles WHERE duplicate_of IS NULL')
+                ->fetchColumn();
+        }
+        $countLabel = htmlspecialchars(string: $displayCount . ' Artikel', flags: ENT_QUOTES);
 
         $digestHtml = $this->renderDigestHtml();
 
-        // Tab toggle: "ausgabe" shows only the textual digest, "meldungen"
+        // Tab toggle: "zeitung" shows only the textual digest, "meldungen"
         // shows the classic filter form + list. Filter form carries the
         // view in a hidden input so submitting a filter preserves the tab.
-        $isAusgabe = $viewFilter === 'ausgabe';
-        $ausgabeActive = $isAusgabe ? ' viewnav__tab--active' : '';
-        $meldungenActive = $isAusgabe ? '' : ' viewnav__tab--active';
-        $ausgabeBlock = $isAusgabe ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Ausgabe verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
-        $meldungenBlock = $isAusgabe ? '' : <<<HTML
+        $isZeitung = $viewFilter === 'zeitung';
+        $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
+        $meldungenActive = $isZeitung ? '' : ' viewnav__tab--active';
+        $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
+        $meldungenBlock = $isZeitung ? '' : <<<HTML
                 <form class="filters" method="get" action="/">
                     <input type="hidden" name="view" value="meldungen">
                     <select name="paper" onchange="this.form.submit()">{$paperOptions}</select>
@@ -5560,10 +5573,10 @@ HTML;
                     </form>
                 </header>
                 <nav class="viewnav">
-                    <a class="viewnav__tab{$ausgabeActive}" href="/?view=ausgabe">Ausgabe</a>
+                    <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                     <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                 </nav>
-                {$ausgabeBlock}
+                {$zeitungBlock}
                 {$meldungenBlock}
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
