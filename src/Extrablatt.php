@@ -1880,7 +1880,8 @@ final class Extrablatt
         $raw = @file_get_contents(filename: $this->configFile);
         $parsed = $raw !== false ? json_decode(json: $raw, associative: true) : null;
         $cached = [
-            'papers' => is_array(value: $parsed['papers'] ?? null) ? $parsed['papers'] : []
+            'papers' => is_array(value: $parsed['papers'] ?? null) ? $parsed['papers'] : [],
+            'weather_location' => trim(string: (string) ($parsed['weather_location'] ?? '')),
         ];
         return $cached;
     }
@@ -4479,8 +4480,9 @@ final class Extrablatt
             "WOCHENÜBERSICHT (items): 5 bis 8 Absätze zu je 1 bis 2 Sätzen, ABSTEIGEND nach Brisanz und " .
             "Tragweite — die wichtigste Story der Woche zuerst, danach absteigend nach Bedeutung. " .
             "Mehrfach-Berichterstattung zur gleichen Story (auch über mehrere Tage) in einem Absatz bündeln. " .
-            "Die Story aus \"Meldung des Tages\" darf hier nochmal vorkommen, wenn sie auch über die " .
-            "Woche eine der wichtigsten ist.\n\n" .
+            "WICHTIG: Die Story aus \"Meldung des Tages\" DARF in der Wochenübersicht NICHT erneut " .
+            "auftauchen — wähle thematisch komplett andere Geschichten, damit es keine inhaltliche " .
+            "Doppelung gibt.\n\n" .
             "Sprache: klar, nüchtern, plakativ, ohne Floskeln.\n\n" .
             "WICHTIG: Die Artikel-Nummern gehören AUSSCHLIESSLICH in das \"sources\"-Feld des JSON. " .
             "Schreibe KEINE Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den \"paragraph\"-Text — der Fließtext " .
@@ -4541,22 +4543,158 @@ final class Extrablatt
             return;
         }
 
+        $weatherLocation = (string) ($this->loadConfig()['weather_location'] ?? '');
+        $weather = $weatherLocation !== '' ? $this->fetchWeather(location: $weatherLocation) : null;
+
         $payload = [
             'generated_at' => time(),
             'top_today' => $topToday,
             'items' => $items,
+            'weather' => $weather,
         ];
         $this->cacheSet(
             key: 'daily_digest',
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
         $emit(sprintf(
-            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s)',
+            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s)',
             count(value: $items),
             count(value: $articles),
             $todayCount,
-            $topToday !== null ? 'ja' : 'nein'
+            $topToday !== null ? 'ja' : 'nein',
+            $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein'
         ));
+    }
+
+    /**
+     * Fetch current weather + today's high/low for the given city via
+     * Open-Meteo's free, key-less APIs. Returns null on any failure so the
+     * digest still renders without a weather line.
+     *
+     * @return array{location: string, temp_current: float, temp_min: float, temp_max: float, description: string}|null
+     */
+    private function fetchWeather(string $location): ?array
+    {
+        if ($location === '') {
+            return null;
+        }
+        $geoUrl = 'https://geocoding-api.open-meteo.com/v1/search?'
+            . http_build_query(data: ['name' => $location, 'count' => 1, 'language' => 'de', 'format' => 'json']);
+        $geoRaw = $this->httpGet(url: $geoUrl, timeout: 10);
+        if ($geoRaw === null) {
+            return null;
+        }
+        $geo = json_decode(json: $geoRaw, associative: true);
+        $hit = is_array(value: $geo) && isset($geo['results'][0]) ? $geo['results'][0] : null;
+        if (!is_array(value: $hit) || !isset($hit['latitude'], $hit['longitude'])) {
+            return null;
+        }
+        $lat = (float) $hit['latitude'];
+        $lon = (float) $hit['longitude'];
+        $resolvedName = (string) ($hit['name'] ?? $location);
+
+        $forecastUrl = 'https://api.open-meteo.com/v1/forecast?' . http_build_query(data: [
+            'latitude' => $lat,
+            'longitude' => $lon,
+            'current' => 'temperature_2m,weather_code',
+            'daily' => 'temperature_2m_max,temperature_2m_min,weather_code',
+            'timezone' => 'auto',
+            'forecast_days' => 1,
+        ]);
+        $forecastRaw = $this->httpGet(url: $forecastUrl, timeout: 10);
+        if ($forecastRaw === null) {
+            return null;
+        }
+        $forecast = json_decode(json: $forecastRaw, associative: true);
+        if (!is_array(value: $forecast)) {
+            return null;
+        }
+        $current = $forecast['current'] ?? null;
+        $daily = $forecast['daily'] ?? null;
+        if (!is_array(value: $current) || !is_array(value: $daily)) {
+            return null;
+        }
+        $tempCurrent = isset($current['temperature_2m']) ? (float) $current['temperature_2m'] : null;
+        $tempMin = isset($daily['temperature_2m_min'][0]) ? (float) $daily['temperature_2m_min'][0] : null;
+        $tempMax = isset($daily['temperature_2m_max'][0]) ? (float) $daily['temperature_2m_max'][0] : null;
+        $code = isset($daily['weather_code'][0]) ? (int) $daily['weather_code'][0] : (int) ($current['weather_code'] ?? -1);
+        if ($tempCurrent === null || $tempMin === null || $tempMax === null) {
+            return null;
+        }
+        return [
+            'location' => $resolvedName,
+            'temp_current' => $tempCurrent,
+            'temp_min' => $tempMin,
+            'temp_max' => $tempMax,
+            'description' => $this->wmoWeatherDescription(code: $code),
+        ];
+    }
+
+    /**
+     * Plain HTTP GET that returns the response body or null on any non-2xx
+     * / network failure. Local helper for weather lookups — kept private
+     * because it deliberately swallows errors.
+     */
+    private function httpGet(string $url, int $timeout = 10): ?string
+    {
+        $ch = curl_init(url: $url);
+        if ($ch === false) {
+            return null;
+        }
+        curl_setopt_array(handle: $ch, options: [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_HTTPHEADER => ['Accept: application/json'],
+            CURLOPT_USERAGENT => 'extrablatt/1.0',
+        ]);
+        $raw = curl_exec(handle: $ch);
+        $http = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
+        curl_close(handle: $ch);
+        if (!is_string(value: $raw) || $http < 200 || $http >= 300) {
+            return null;
+        }
+        return $raw;
+    }
+
+    /**
+     * Map a WMO weather code (Open-Meteo daily forecast) to a short German
+     * label. Unknown codes fall back to a neutral phrase.
+     */
+    private function wmoWeatherDescription(int $code): string
+    {
+        $map = [
+            0 => 'klar',
+            1 => 'überwiegend klar',
+            2 => 'teils bewölkt',
+            3 => 'bedeckt',
+            45 => 'nebelig',
+            48 => 'gefrierender Nebel',
+            51 => 'leichter Nieselregen',
+            53 => 'Nieselregen',
+            55 => 'starker Nieselregen',
+            56 => 'leichter gefrierender Niesel',
+            57 => 'gefrierender Niesel',
+            61 => 'leichter Regen',
+            63 => 'Regen',
+            65 => 'starker Regen',
+            66 => 'leichter gefrierender Regen',
+            67 => 'gefrierender Regen',
+            71 => 'leichter Schneefall',
+            73 => 'Schneefall',
+            75 => 'starker Schneefall',
+            77 => 'Schneegriesel',
+            80 => 'leichte Regenschauer',
+            81 => 'Regenschauer',
+            82 => 'kräftige Regenschauer',
+            85 => 'leichte Schneeschauer',
+            86 => 'Schneeschauer',
+            95 => 'Gewitter',
+            96 => 'Gewitter mit leichtem Hagel',
+            99 => 'Gewitter mit Hagel',
+        ];
+        return $map[$code] ?? 'wechselhaft';
     }
 
     /**
@@ -4638,7 +4776,13 @@ final class Extrablatt
             $paragraphs .= $this->buildDigestParagraph(item: $item);
         }
 
-        if ($leadHtml === '' && $paragraphs === '') {
+        $weatherHtml = '';
+        $weather = isset($data['weather']) && is_array(value: $data['weather']) ? $data['weather'] : null;
+        if ($weather !== null) {
+            $weatherHtml = $this->buildWeatherBlock(weather: $weather);
+        }
+
+        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '') {
             return '';
         }
 
@@ -4646,7 +4790,45 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">letzte 7 Tage · ' . $dateLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $weatherHtml . '</section>';
+    }
+
+    /**
+     * Render the weather footer block from a persisted weather payload.
+     * Returns '' if essential fields are missing.
+     */
+    private function buildWeatherBlock(array $weather): string
+    {
+        $location = trim(string: (string) ($weather['location'] ?? ''));
+        if ($location === '') {
+            return '';
+        }
+        if (!isset($weather['temp_current'], $weather['temp_min'], $weather['temp_max'])) {
+            return '';
+        }
+        $current = (float) $weather['temp_current'];
+        $min = (float) $weather['temp_min'];
+        $max = (float) $weather['temp_max'];
+        $description = trim(string: (string) ($weather['description'] ?? ''));
+        $locationHtml = htmlspecialchars(string: $location, flags: ENT_QUOTES);
+        $descHtml = $description !== '' ? htmlspecialchars(string: $description, flags: ENT_QUOTES) : '';
+        $sentence = 'Aktuell <strong>' . $this->formatTemperature(value: $current) . '</strong>'
+            . ($descHtml !== '' ? ', ' . $descHtml : '')
+            . '. Tageswerte zwischen <strong>' . $this->formatTemperature(value: $min) . '</strong>'
+            . ' und <strong>' . $this->formatTemperature(value: $max) . '</strong>.';
+        return '<div class="digest__weather">'
+            . '<h2 class="digest__title">Wetter <span class="digest__date">' . $locationHtml . '</span></h2>'
+            . '<p>' . $sentence . '</p>'
+            . '</div>';
+    }
+
+    /**
+     * Format a temperature as integer °C — fractional degrees add no value
+     * in a forecast summary and look noisy in serif body text.
+     */
+    private function formatTemperature(float $value): string
+    {
+        return ((int) round(num: $value)) . ' °C';
     }
 
     /**
@@ -5111,6 +5293,8 @@ final class Extrablatt
                 .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 8px 0 0; display: inline-block; }
                 .digest__sources a:last-child { margin-right: 0; }
                 .digest__sources a:hover { color: #18181b; text-decoration: underline; }
+                .digest__weather { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
+                .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
                 .item { position: relative; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; margin: 0 0 10px; transition: opacity 0.18s ease, max-height 0.18s ease, margin 0.18s ease, border-width 0.18s ease; contain: layout paint style; content-visibility: auto; contain-intrinsic-size: 0 92px; }
                 .item__swipe { position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: #fff; touch-action: pan-y; transition: transform 0.18s ease; will-change: transform; }
@@ -5195,6 +5379,8 @@ final class Extrablatt
                 html[data-theme="dark"] .digest__sources { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
+                html[data-theme="dark"] .digest__weather { border-top-color: #3f3f46; }
+                html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
                 html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
