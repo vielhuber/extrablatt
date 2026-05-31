@@ -433,6 +433,7 @@ final class Extrablatt
         $sortFilter = (string) ($_GET['sort'] ?? '');
         $magicFilter = (string) ($_GET['magic'] ?? '');
         $thumbFilter = (string) ($_GET['thumb'] ?? '');
+        $viewFilter = (string) ($_GET['view'] ?? '');
 
         if (isset($_POST['reset']) && $_POST['reset'] === '1') {
             $db = $this->openDatabase();
@@ -502,6 +503,9 @@ final class Extrablatt
             if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
                 $thumbFilter = '';
             }
+            if (!in_array(needle: $viewFilter, haystack: ['ausgabe', 'meldungen'], strict: true)) {
+                $viewFilter = 'ausgabe';
+            }
             header(header: 'Content-Type: text/html; charset=utf-8');
             echo $this->renderDashboard(
                 paperFilter: $paperFilter,
@@ -511,7 +515,8 @@ final class Extrablatt
                 readFilter: $readFilter,
                 sortFilter: $sortFilter,
                 magicFilter: $magicFilter,
-                thumbFilter: $thumbFilter
+                thumbFilter: $thumbFilter,
+                viewFilter: $viewFilter
             );
             return;
         }
@@ -4567,11 +4572,11 @@ final class Extrablatt
     }
 
     /**
-     * Fetch current weather + today's high/low for the given city via
-     * Open-Meteo's free, key-less APIs. Returns null on any failure so the
-     * digest still renders without a weather line.
+     * Fetch current weather plus an 8-day daily forecast (today + 7) for
+     * the given city via Open-Meteo's free, key-less APIs. Returns null on
+     * any failure so the digest still renders without a weather block.
      *
-     * @return array{location: string, temp_current: float, temp_min: float, temp_max: float, description: string}|null
+     * @return array{location: string, temp_current: float, days: array<int, array{date: string, temp_min: float, temp_max: float, description: string}>}|null
      */
     private function fetchWeather(string $location): ?array
     {
@@ -4599,7 +4604,7 @@ final class Extrablatt
             'current' => 'temperature_2m,weather_code',
             'daily' => 'temperature_2m_max,temperature_2m_min,weather_code',
             'timezone' => 'auto',
-            'forecast_days' => 1,
+            'forecast_days' => 8,
         ]);
         $forecastRaw = $this->httpGet(url: $forecastUrl, timeout: 10);
         if ($forecastRaw === null) {
@@ -4615,18 +4620,32 @@ final class Extrablatt
             return null;
         }
         $tempCurrent = isset($current['temperature_2m']) ? (float) $current['temperature_2m'] : null;
-        $tempMin = isset($daily['temperature_2m_min'][0]) ? (float) $daily['temperature_2m_min'][0] : null;
-        $tempMax = isset($daily['temperature_2m_max'][0]) ? (float) $daily['temperature_2m_max'][0] : null;
-        $code = isset($daily['weather_code'][0]) ? (int) $daily['weather_code'][0] : (int) ($current['weather_code'] ?? -1);
-        if ($tempCurrent === null || $tempMin === null || $tempMax === null) {
+        if ($tempCurrent === null) {
+            return null;
+        }
+        $dates = (array) ($daily['time'] ?? []);
+        $mins = (array) ($daily['temperature_2m_min'] ?? []);
+        $maxs = (array) ($daily['temperature_2m_max'] ?? []);
+        $codes = (array) ($daily['weather_code'] ?? []);
+        $days = [];
+        foreach ($dates as $i => $date) {
+            if (!isset($mins[$i], $maxs[$i])) {
+                continue;
+            }
+            $days[] = [
+                'date' => (string) $date,
+                'temp_min' => (float) $mins[$i],
+                'temp_max' => (float) $maxs[$i],
+                'description' => $this->wmoWeatherDescription(code: (int) ($codes[$i] ?? -1)),
+            ];
+        }
+        if ($days === []) {
             return null;
         }
         return [
             'location' => $resolvedName,
             'temp_current' => $tempCurrent,
-            'temp_min' => $tempMin,
-            'temp_max' => $tempMax,
-            'description' => $this->wmoWeatherDescription(code: $code),
+            'days' => $days,
         ];
     }
 
@@ -4795,31 +4814,86 @@ final class Extrablatt
 
     /**
      * Render the weather footer block from a persisted weather payload.
-     * Returns '' if essential fields are missing.
+     * Builds one prose sentence for today plus a forecast paragraph for
+     * the following days. Returns '' if essential fields are missing.
      */
     private function buildWeatherBlock(array $weather): string
     {
         $location = trim(string: (string) ($weather['location'] ?? ''));
-        if ($location === '') {
+        if ($location === '' || !isset($weather['temp_current'])) {
             return '';
         }
-        if (!isset($weather['temp_current'], $weather['temp_min'], $weather['temp_max'])) {
+        $days = (array) ($weather['days'] ?? []);
+        if ($days === []) {
             return '';
         }
-        $current = (float) $weather['temp_current'];
-        $min = (float) $weather['temp_min'];
-        $max = (float) $weather['temp_max'];
-        $description = trim(string: (string) ($weather['description'] ?? ''));
+        $todayMidnight = strtotime(datetime: 'today');
+        $today = null;
+        $upcoming = [];
+        foreach ($days as $day) {
+            if (!is_array(value: $day) || !isset($day['date'], $day['temp_min'], $day['temp_max'])) {
+                continue;
+            }
+            $ts = strtotime(datetime: (string) $day['date']);
+            if ($ts === false) {
+                continue;
+            }
+            if ($today === null && $ts >= $todayMidnight && $ts < $todayMidnight + 86400) {
+                $today = $day;
+                continue;
+            }
+            if ($ts >= $todayMidnight + 86400) {
+                $upcoming[] = $day;
+            }
+        }
+        if ($today === null) {
+            $today = $days[0];
+        }
+
         $locationHtml = htmlspecialchars(string: $location, flags: ENT_QUOTES);
-        $descHtml = $description !== '' ? htmlspecialchars(string: $description, flags: ENT_QUOTES) : '';
-        $sentence = 'Aktuell <strong>' . $this->formatTemperature(value: $current) . '</strong>'
-            . ($descHtml !== '' ? ', ' . $descHtml : '')
-            . '. Tageswerte zwischen <strong>' . $this->formatTemperature(value: $min) . '</strong>'
-            . ' und <strong>' . $this->formatTemperature(value: $max) . '</strong>.';
+        $current = (float) $weather['temp_current'];
+        $todayDesc = htmlspecialchars(string: (string) ($today['description'] ?? ''), flags: ENT_QUOTES);
+        $todaySentence = 'Heute in <strong>' . $locationHtml . '</strong> aktuell <strong>'
+            . $this->formatTemperature(value: $current) . '</strong>'
+            . ($todayDesc !== '' ? ', ' . $todayDesc : '')
+            . ', im Tagesverlauf zwischen <strong>' . $this->formatTemperature(value: (float) $today['temp_min']) . '</strong>'
+            . ' und <strong>' . $this->formatTemperature(value: (float) $today['temp_max']) . '</strong>.';
+
+        $forecastParts = [];
+        foreach (array_slice(array: $upcoming, offset: 0, length: 7) as $day) {
+            $ts = (int) strtotime(datetime: (string) $day['date']);
+            $weekday = $this->germanWeekday(timestamp: $ts);
+            $dateLabel = date(format: 'd.m.', timestamp: $ts);
+            $desc = htmlspecialchars(string: (string) ($day['description'] ?? ''), flags: ENT_QUOTES);
+            $min = $this->formatTemperature(value: (float) $day['temp_min']);
+            $max = $this->formatTemperature(value: (float) $day['temp_max']);
+            $forecastParts[] = 'Am <strong>' . htmlspecialchars(string: $weekday, flags: ENT_QUOTES)
+                . '</strong> (' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . ') '
+                . ($desc !== '' ? $desc . ' ' : '')
+                . 'bei ' . $min . ' bis ' . $max;
+        }
+        $forecastSentence = $forecastParts !== []
+            ? implode(separator: ', ', array: $forecastParts) . '.'
+            : '';
+
+        $body = '<p>' . $todaySentence . '</p>'
+            . ($forecastSentence !== '' ? '<p>' . $forecastSentence . '</p>' : '');
+
         return '<div class="digest__weather">'
-            . '<h2 class="digest__title">Wetter <span class="digest__date">' . $locationHtml . '</span></h2>'
-            . '<p>' . $sentence . '</p>'
+            . '<h2 class="digest__title">Wetter <span class="digest__date">' . $locationHtml . ' · 7-Tage-Trend</span></h2>'
+            . $body
             . '</div>';
+    }
+
+    /**
+     * Localised long weekday name. PHP's strftime is deprecated and
+     * IntlDateFormatter requires the intl extension; a tiny lookup keeps
+     * this independent of locale config.
+     */
+    private function germanWeekday(int $timestamp): string
+    {
+        $map = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+        return $map[(int) date(format: 'w', timestamp: $timestamp)];
     }
 
     /**
@@ -4975,7 +5049,8 @@ final class Extrablatt
         string $readFilter,
         string $sortFilter,
         string $magicFilter,
-        string $thumbFilter
+        string $thumbFilter,
+        string $viewFilter
     ): string {
         $articles = $this->fetchArticlesForDashboard(
             paperFilter: $paperFilter,
@@ -5194,6 +5269,28 @@ final class Extrablatt
 
         $digestHtml = $this->renderDigestHtml();
 
+        // Tab toggle: "ausgabe" shows only the textual digest, "meldungen"
+        // shows the classic filter form + list. Filter form carries the
+        // view in a hidden input so submitting a filter preserves the tab.
+        $isAusgabe = $viewFilter === 'ausgabe';
+        $ausgabeActive = $isAusgabe ? ' viewnav__tab--active' : '';
+        $meldungenActive = $isAusgabe ? '' : ' viewnav__tab--active';
+        $ausgabeBlock = $isAusgabe ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Ausgabe verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
+        $meldungenBlock = $isAusgabe ? '' : <<<HTML
+                <form class="filters" method="get" action="/">
+                    <input type="hidden" name="view" value="meldungen">
+                    <select name="paper" onchange="this.form.submit()">{$paperOptions}</select>
+                    <select name="status" onchange="this.form.submit()">{$statusOptions}</select>
+                    <select name="paywall" onchange="this.form.submit()">{$paywallOptions}</select>
+                    <select name="thumb" onchange="this.form.submit()">{$thumbOptions}</select>
+                    <select name="category" onchange="this.form.submit()">{$categoryOptions}</select>
+                    <select name="read" onchange="this.form.submit()">{$readOptions}</select>
+                    <select name="magic" onchange="this.form.submit()">{$magicOptions}</select>
+                    <select name="sort" onchange="this.form.submit()">{$sortDropdown}</select>
+                </form>
+                <ul class="items">{$rows}</ul>
+HTML;
+
         // Last scrape timestamp via mtime of scrape.log (truncated at scrape
         // start, appended throughout — mtime tracks the most recent emit).
         $scrapeLogFile = $this->logDir . '/scrape.log';
@@ -5276,6 +5373,11 @@ final class Extrablatt
                 header.top .reset-btn:hover { background: #fef2f2; border-color: #f87171; }
                 header.top .markall-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #1e40af; padding: 8px 12px; border-radius: 6px; border: 1px solid #bfdbfe; cursor: pointer; }
                 header.top .markall-btn:hover { background: #eff6ff; border-color: #60a5fa; }
+                nav.viewnav { display: flex; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
+                nav.viewnav .viewnav__tab { font: 600 13px/1 system-ui, sans-serif; color: #71717a; text-decoration: none; padding: 10px 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
+                nav.viewnav .viewnav__tab:hover { color: #18181b; }
+                nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
+                .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
                 form.filters { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 0 0 1rem; }
                 form.filters select { min-width: 0; width: 100%; font: 600 12px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 8px 22px 8px 8px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 7px center; background-size: 8px 5px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
@@ -5366,6 +5468,11 @@ final class Extrablatt
                 html[data-theme="dark"] header.top .markall-btn:hover { background: #1e3a8a; border-color: #3b82f6; }
                 html[data-theme="dark"] header.top .reset-btn { background: #27272a; color: #fca5a5; border-color: #7f1d1d; }
                 html[data-theme="dark"] header.top .reset-btn:hover { background: #7f1d1d; border-color: #ef4444; }
+                html[data-theme="dark"] nav.viewnav { border-bottom-color: #3f3f46; }
+                html[data-theme="dark"] nav.viewnav .viewnav__tab { color: #a1a1aa; }
+                html[data-theme="dark"] nav.viewnav .viewnav__tab:hover { color: #e4e4e7; }
+                html[data-theme="dark"] nav.viewnav .viewnav__tab--active { color: #e4e4e7; border-bottom-color: #e4e4e7; }
+                html[data-theme="dark"] .viewnav__empty { color: #a1a1aa; }
                 html[data-theme="dark"] form.filters select { background-color: #27272a; color: #e4e4e7; border-color: #3f3f46; }
                 html[data-theme="dark"] form.filters select:hover { border-color: #71717a; }
                 html[data-theme="dark"] form.filters select:focus { border-color: #a1a1aa; }
@@ -5404,18 +5511,12 @@ final class Extrablatt
                         <button type="submit" class="reset-btn">Reset</button>
                     </form>
                 </header>
-                {$digestHtml}
-                <form class="filters" method="get" action="/">
-                    <select name="paper" onchange="this.form.submit()">{$paperOptions}</select>
-                    <select name="status" onchange="this.form.submit()">{$statusOptions}</select>
-                    <select name="paywall" onchange="this.form.submit()">{$paywallOptions}</select>
-                    <select name="thumb" onchange="this.form.submit()">{$thumbOptions}</select>
-                    <select name="category" onchange="this.form.submit()">{$categoryOptions}</select>
-                    <select name="read" onchange="this.form.submit()">{$readOptions}</select>
-                    <select name="magic" onchange="this.form.submit()">{$magicOptions}</select>
-                    <select name="sort" onchange="this.form.submit()">{$sortDropdown}</select>
-                </form>
-                <ul class="items">{$rows}</ul>
+                <nav class="viewnav">
+                    <a class="viewnav__tab{$ausgabeActive}" href="/?view=ausgabe">Ausgabe</a>
+                    <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
+                </nav>
+                {$ausgabeBlock}
+                {$meldungenBlock}
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
