@@ -4550,9 +4550,17 @@ final class Extrablatt
 
         $weatherLocation = (string) ($this->loadConfig()['weather_location'] ?? '');
         $weather = $weatherLocation !== '' ? $this->fetchWeather(location: $weatherLocation) : null;
+        if ($weather !== null) {
+            $weather['prose'] = $this->generateWeatherProse(
+                weather: $weather,
+                aiConfig: $aiConfig,
+                apiKey: $apiKey
+            );
+        }
 
         $payload = [
             'generated_at' => time(),
+            'window_start' => $cutoff,
             'top_today' => $topToday,
             'items' => $items,
             'weather' => $weather,
@@ -4647,6 +4655,76 @@ final class Extrablatt
             'temp_current' => $tempCurrent,
             'days' => $days,
         ];
+    }
+
+    /**
+     * Turn the raw 8-day forecast into a 2-3-sentence prose paragraph via
+     * the LLM. Returns null on any failure so the renderer can fall back
+     * to a minimal "today" line.
+     */
+    private function generateWeatherProse(array $weather, array $aiConfig, string $apiKey): ?string
+    {
+        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
+            return null;
+        }
+        $provider = (string) ($aiConfig['provider'] ?? '');
+        $model = (string) ($aiConfig['model'] ?? '');
+        if ($provider === '' || $model === '' || $apiKey === '') {
+            return null;
+        }
+        $location = (string) ($weather['location'] ?? '');
+        $days = (array) ($weather['days'] ?? []);
+        if ($location === '' || $days === []) {
+            return null;
+        }
+        $lines = [];
+        foreach ($days as $day) {
+            if (!is_array(value: $day) || !isset($day['date'], $day['temp_min'], $day['temp_max'])) {
+                continue;
+            }
+            $ts = (int) strtotime(datetime: (string) $day['date']);
+            $weekday = $this->germanWeekday(timestamp: $ts);
+            $lines[] = sprintf(
+                '%s: %.0f bis %.0f °C, %s',
+                $weekday,
+                (float) $day['temp_min'],
+                (float) $day['temp_max'],
+                (string) ($day['description'] ?? '')
+            );
+        }
+        $current = isset($weather['temp_current']) ? sprintf('%.0f °C', (float) $weather['temp_current']) : null;
+        $prompt = "Schreibe einen flüssigen, prägnanten Wetterabsatz auf Deutsch (2 bis 3 Sätze) " .
+            "für " . $location . ", basierend auf folgendem 8-Tage-Trend " .
+            ($current !== null ? "(aktuell " . $current . ")" : '') . ":\n\n" .
+            implode(separator: "\n", array: $lines) . "\n\n" .
+            "Anforderungen:\n" .
+            "- Keine Aufzählung, kein Datum für jeden Tag, keine Wochentags-Liste.\n" .
+            "- Interpretiere den Trend: warm/kühl, sonnig/regnerisch, stabil/wechselhaft, " .
+            "verbessert sich / verschlechtert sich im Laufe der Woche.\n" .
+            "- Nenne die heutige Lage als Einstieg und ordne danach den Wochenverlauf ein.\n" .
+            "- Hebe 1 bis 2 zentrale Begriffe (z. B. Höchstwerte, Wettercharakter) mit Markdown-Bold (**…**) hervor.\n" .
+            "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $ai = $aiClass::create(
+                provider: $provider,
+                model: $model,
+                temperature: (float) ($aiConfig['temperature'] ?? 0.4),
+                api_key: $apiKey,
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 60)
+            );
+            $resp = $ai->ask(prompt: $prompt)['response'] ?? null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (is_object(value: $resp) || is_array(value: $resp)) {
+            $resp = json_encode(value: $resp);
+        }
+        $text = trim(string: (string) $resp);
+        $text = (string) preg_replace(pattern: '~^\s*```(?:\w+)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
+        $text = trim(string: $text, characters: " \t\n\r\0\x0B\"'");
+        return $text !== '' ? $text : null;
     }
 
     /**
@@ -4773,6 +4851,11 @@ final class Extrablatt
         }
         $stamp = $generatedAt > 0 ? $generatedAt : time();
         $dateLabel = htmlspecialchars(string: (string) date(format: 'd.m.Y', timestamp: $stamp), flags: ENT_QUOTES);
+        $windowStart = (int) ($data['window_start'] ?? ($stamp - 7 * 86400));
+        $rangeLabel = htmlspecialchars(
+            string: date(format: 'd.m.Y', timestamp: $windowStart) . ' – ' . date(format: 'd.m.Y', timestamp: $stamp),
+            flags: ENT_QUOTES
+        );
 
         $topToday = isset($data['top_today']) && is_array(value: $data['top_today']) ? $data['top_today'] : null;
         $leadHtml = '';
@@ -4806,7 +4889,7 @@ final class Extrablatt
         }
 
         $weeklyHtml = $paragraphs !== ''
-            ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">letzte 7 Tage · ' . $dateLabel . '</span></h2>' . $paragraphs
+            ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
         return '<section class="digest">' . $leadHtml . $weeklyHtml . $weatherHtml . '</section>';
@@ -4814,71 +4897,36 @@ final class Extrablatt
 
     /**
      * Render the weather footer block from a persisted weather payload.
-     * Builds one prose sentence for today plus a forecast paragraph for
-     * the following days. Returns '' if essential fields are missing.
+     * Prefers the LLM-generated prose paragraph; falls back to a minimal
+     * "today" sentence built from the raw forecast.
      */
     private function buildWeatherBlock(array $weather): string
     {
         $location = trim(string: (string) ($weather['location'] ?? ''));
-        if ($location === '' || !isset($weather['temp_current'])) {
+        if ($location === '') {
             return '';
         }
-        $days = (array) ($weather['days'] ?? []);
-        if ($days === []) {
-            return '';
-        }
-        $todayMidnight = strtotime(datetime: 'today');
-        $today = null;
-        $upcoming = [];
-        foreach ($days as $day) {
-            if (!is_array(value: $day) || !isset($day['date'], $day['temp_min'], $day['temp_max'])) {
-                continue;
-            }
-            $ts = strtotime(datetime: (string) $day['date']);
-            if ($ts === false) {
-                continue;
-            }
-            if ($today === null && $ts >= $todayMidnight && $ts < $todayMidnight + 86400) {
-                $today = $day;
-                continue;
-            }
-            if ($ts >= $todayMidnight + 86400) {
-                $upcoming[] = $day;
-            }
-        }
-        if ($today === null) {
-            $today = $days[0];
-        }
-
         $locationHtml = htmlspecialchars(string: $location, flags: ENT_QUOTES);
-        $current = (float) $weather['temp_current'];
-        $todayDesc = htmlspecialchars(string: (string) ($today['description'] ?? ''), flags: ENT_QUOTES);
-        $todaySentence = 'Heute in <strong>' . $locationHtml . '</strong> aktuell <strong>'
-            . $this->formatTemperature(value: $current) . '</strong>'
-            . ($todayDesc !== '' ? ', ' . $todayDesc : '')
-            . ', im Tagesverlauf zwischen <strong>' . $this->formatTemperature(value: (float) $today['temp_min']) . '</strong>'
-            . ' und <strong>' . $this->formatTemperature(value: (float) $today['temp_max']) . '</strong>.';
-
-        $forecastParts = [];
-        foreach (array_slice(array: $upcoming, offset: 0, length: 7) as $day) {
-            $ts = (int) strtotime(datetime: (string) $day['date']);
-            $weekday = $this->germanWeekday(timestamp: $ts);
-            $dateLabel = date(format: 'd.m.', timestamp: $ts);
-            $desc = htmlspecialchars(string: (string) ($day['description'] ?? ''), flags: ENT_QUOTES);
-            $min = $this->formatTemperature(value: (float) $day['temp_min']);
-            $max = $this->formatTemperature(value: (float) $day['temp_max']);
-            $forecastParts[] = 'Am <strong>' . htmlspecialchars(string: $weekday, flags: ENT_QUOTES)
-                . '</strong> (' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . ') '
-                . ($desc !== '' ? $desc . ' ' : '')
-                . 'bei ' . $min . ' bis ' . $max;
+        $prose = trim(string: (string) ($weather['prose'] ?? ''));
+        if ($prose !== '') {
+            $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
+            $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
+            $body = '<p>' . $escaped . '</p>';
+        } else {
+            $days = (array) ($weather['days'] ?? []);
+            $today = is_array(value: $days[0] ?? null) ? $days[0] : null;
+            if ($today === null || !isset($today['temp_min'], $today['temp_max'])) {
+                return '';
+            }
+            $current = isset($weather['temp_current']) ? (float) $weather['temp_current'] : null;
+            $desc = htmlspecialchars(string: (string) ($today['description'] ?? ''), flags: ENT_QUOTES);
+            $sentence = 'Heute in <strong>' . $locationHtml . '</strong>'
+                . ($current !== null ? ' aktuell <strong>' . $this->formatTemperature(value: $current) . '</strong>' : '')
+                . ($desc !== '' ? ', ' . $desc : '')
+                . ', im Tagesverlauf zwischen <strong>' . $this->formatTemperature(value: (float) $today['temp_min']) . '</strong>'
+                . ' und <strong>' . $this->formatTemperature(value: (float) $today['temp_max']) . '</strong>.';
+            $body = '<p>' . $sentence . '</p>';
         }
-        $forecastSentence = $forecastParts !== []
-            ? implode(separator: ', ', array: $forecastParts) . '.'
-            : '';
-
-        $body = '<p>' . $todaySentence . '</p>'
-            . ($forecastSentence !== '' ? '<p>' . $forecastSentence . '</p>' : '');
-
         return '<div class="digest__weather">'
             . '<h2 class="digest__title">Wetter <span class="digest__date">' . $locationHtml . ' · 7-Tage-Trend</span></h2>'
             . $body
