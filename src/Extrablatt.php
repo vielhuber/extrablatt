@@ -1160,6 +1160,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'reddit://')) {
             return $this->fetchRedditHomeItems(paper: $paper);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'github://')) {
+            return $this->fetchGitHubTrendingItems(paper: $paper, feedUrl: $feedUrl);
+        }
 
         $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
@@ -1333,6 +1336,117 @@ final class Extrablatt
                 publishedAt: is_numeric(value: $created) ? (int) $created : null,
                 imageUrl: null,
                 rating: isset($post['score']) ? (int) $post['score'] : null
+            );
+            if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                break;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * Scrape the GitHub Trending HTML page (no API key required). The feed URL
+     * uses a custom scheme `github://trending-<window>` where <window> is one
+     * of daily/weekly/monthly, mapped onto GitHub's `?since=` query parameter.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchGitHubTrendingItems(string $paper, string $feedUrl): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        if ($body === null || $body === '') {
+            $window = substr(string: $feedUrl, offset: strlen(string: 'github://trending-'));
+            if (!in_array(needle: $window, haystack: ['daily', 'weekly', 'monthly'], strict: true)) {
+                $window = 'weekly';
+            }
+            $url = 'https://github.com/trending?since=' . $window;
+            $result = $this->fetchViaImpersonate(url: $url);
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseGitHubTrending(html: $body);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseGitHubTrending(string $html): array
+    {
+        $count = preg_match_all(
+            pattern: '~<article class="Box-row">(.*?)</article>~s',
+            subject: $html,
+            matches: $blocks
+        );
+        if ($count === false || $count === 0 || !isset($blocks[1])) {
+            return [];
+        }
+        $items = [];
+        $now = time();
+        foreach ($blocks[1] as $block) {
+            if (
+                preg_match(
+                    pattern: '~<h2 class="h3 lh-condensed">.*?<a [^>]*?href="(/[^"]+)"~s',
+                    subject: $block,
+                    matches: $hrefMatch
+                ) !== 1
+            ) {
+                continue;
+            }
+            $path = trim(string: $hrefMatch[1]);
+            if ($path === '' || substr_count(haystack: $path, needle: '/') !== 2) {
+                continue;
+            }
+            $repo = ltrim(string: $path, characters: '/');
+            $description = '';
+            if (
+                preg_match(
+                    pattern: '~<p[^>]*class="[^"]*col-9[^"]*"[^>]*>(.*?)</p>~s',
+                    subject: $block,
+                    matches: $descMatch
+                ) === 1
+            ) {
+                $description = trim(string: html_entity_decode(
+                    string: (string) preg_replace(pattern: '~\s+~u', replacement: ' ', subject: strip_tags(string: $descMatch[1])),
+                    flags: ENT_QUOTES | ENT_HTML5,
+                    encoding: 'UTF-8'
+                ));
+            }
+            $language = '';
+            if (
+                preg_match(
+                    pattern: '~<span itemprop="programmingLanguage">([^<]+)</span>~',
+                    subject: $block,
+                    matches: $langMatch
+                ) === 1
+            ) {
+                $language = trim(string: $langMatch[1]);
+            }
+            $starsWeek = null;
+            if (
+                preg_match(
+                    pattern: '~([0-9,]+)\s*stars\s*(?:this\s*week|today|this\s*month)~',
+                    subject: $block,
+                    matches: $weekMatch
+                ) === 1
+            ) {
+                $starsWeek = (int) str_replace(search: ',', replace: '', subject: $weekMatch[1]);
+            }
+            $titleParts = [$repo];
+            if ($language !== '') {
+                $titleParts[] = '[' . $language . ']';
+            }
+            if ($description !== '') {
+                $titleParts[] = '— ' . mb_substr(string: $description, start: 0, length: 220);
+            }
+            $items[] = new FeedItem(
+                title: implode(separator: ' ', array: $titleParts),
+                link: 'https://github.com' . $path,
+                publishedAt: $now,
+                imageUrl: 'https://opengraph.githubassets.com/1/' . $repo,
+                rating: $starsWeek
             );
             if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
                 break;
