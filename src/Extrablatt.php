@@ -1163,6 +1163,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'github://')) {
             return $this->fetchGitHubTrendingItems(paper: $paper, feedUrl: $feedUrl);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'producthunt://')) {
+            return $this->fetchProductHuntWeeklyItems(paper: $paper);
+        }
 
         $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
@@ -1447,6 +1450,97 @@ final class Extrablatt
                 publishedAt: $now,
                 imageUrl: 'https://opengraph.githubassets.com/1/' . $repo,
                 rating: $starsWeek
+            );
+            if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                break;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * Scrape the ProductHunt weekly leaderboard. Cloudflare-gated, so the
+     * impersonating curl binary is mandatory (plain curl gets the JS
+     * challenge). URL is built from the most recent COMPLETED ISO week —
+     * the current week's leaderboard is still in flux and only finalises
+     * after Sunday UTC.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchProductHuntWeeklyItems(string $paper): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        $lastWeekTs = time() - 7 * 86400;
+        $weekNumber = (int) date(format: 'W', timestamp: $lastWeekTs);
+        $weekYear = (int) date(format: 'o', timestamp: $lastWeekTs);
+        $weekStart = strtotime(datetime: $weekYear . 'W' . str_pad(string: (string) $weekNumber, length: 2, pad_string: '0', pad_type: STR_PAD_LEFT));
+        if ($body === null || $body === '') {
+            $url = 'https://www.producthunt.com/leaderboard/weekly/' . $weekYear . '/' . $weekNumber;
+            $result = $this->fetchViaImpersonate(url: $url);
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseProductHuntLeaderboard(html: $body, weekStart: $weekStart !== false ? $weekStart : $lastWeekTs);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseProductHuntLeaderboard(string $html, int $weekStart): array
+    {
+        // Each card carries a "<rank>. <title>" anchor that points to the
+        // product slug; the span with data-target="true" marks the entry
+        // point and lets us anchor the regex reliably across rebuilds.
+        $count = preg_match_all(
+            pattern: '~href="(/products/[a-z0-9-]+)"[^>]*>\s*<span[^>]*data-target="true"[^>]*></span>\s*(\d{1,2})\.\s*([^<]+)</a>~',
+            subject: $html,
+            matches: $matches,
+            flags: PREG_SET_ORDER | PREG_OFFSET_CAPTURE
+        );
+        if ($count === false || $count === 0) {
+            return [];
+        }
+        $items = [];
+        foreach ($matches as $m) {
+            $path = trim(string: $m[1][0]);
+            $rank = (int) $m[2][0];
+            $title = trim(string: html_entity_decode(string: $m[3][0], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            $matchEnd = (int) $m[0][1] + strlen(string: (string) $m[0][0]);
+            if ($path === '' || $title === '' || $rank < 1) {
+                continue;
+            }
+            // Tagline lives between the title's closing </a> and the first
+            // /topics/ link (the category list anchor). Strip SVGs first so
+            // their inline path text doesn't leak in.
+            $tail = substr(string: $html, offset: $matchEnd, length: 3000);
+            // Cut at the opening "<a" of the first /topics/ link so the
+            // preceding anchor element doesn't leave a stray "<a class=…"
+            // fragment in the tagline once tags are stripped.
+            $topicPos = false;
+            if (preg_match(pattern: '~<a [^>]*href="/topics/~', subject: $tail, matches: $topicMatch, flags: PREG_OFFSET_CAPTURE) === 1) {
+                $topicPos = (int) $topicMatch[0][1];
+            }
+            $taglineSlice = $topicPos !== false ? substr(string: $tail, offset: 0, length: $topicPos) : $tail;
+            $taglineSlice = (string) preg_replace(pattern: '~<svg[^>]*>.*?</svg>~s', replacement: ' ', subject: $taglineSlice);
+            $tagline = trim(string: (string) preg_replace(
+                pattern: '~\s+~u',
+                replacement: ' ',
+                subject: (string) preg_replace(pattern: '~<[^>]+>~', replacement: ' ', subject: $taglineSlice)
+            ));
+            $tagline = mb_substr(string: $tagline, start: 0, length: 220);
+            $titleParts = [sprintf('#%d %s', $rank, $title)];
+            if ($tagline !== '') {
+                $titleParts[] = '— ' . $tagline;
+            }
+            $items[] = new FeedItem(
+                title: implode(separator: ' ', array: $titleParts),
+                link: 'https://www.producthunt.com' . $path,
+                publishedAt: $weekStart,
+                imageUrl: null,
+                rating: max(0, 200 - $rank)
             );
             if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
                 break;
@@ -2154,7 +2248,7 @@ final class Extrablatt
         $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
         $aiModel = (string) ($env['AI_MODEL'] ?? '');
         $apiKey = (string) ($env['AI_API_KEY'] ?? '');
-        $aiConfig = [] + ['provider' => $aiProvider, 'model' => $aiModel];
+        $aiConfig = ['provider' => $aiProvider, 'model' => $aiModel, 'url' => (string) ($env['AI_BASE_URL'] ?? '')];
 
         if ($phase === 8) {
             $emit('Phase 8/10: Duplikat-Erkennung per Embedding-Vergleich');
@@ -2693,7 +2787,7 @@ final class Extrablatt
             $freshCategories = $this->categorizeArticlesStreaming(
                 items: $toCategorize,
                 categories: $this->leafCategories(),
-                aiConfig: ['provider' => $aiProvider, 'model' => $aiModel],
+                aiConfig: ['provider' => $aiProvider, 'model' => $aiModel, 'url' => (string) ($env['AI_BASE_URL'] ?? '')],
                 apiKey: $apiKey,
                 emit: $emit
             );
@@ -2786,7 +2880,7 @@ final class Extrablatt
         $aiProviderDup = (string) ($envDup['AI_PROVIDER'] ?? '');
         $aiModelDup = (string) ($envDup['AI_MODEL'] ?? '');
         $apiKeyDup = (string) ($envDup['AI_API_KEY'] ?? '');
-        $aiConfigDup = [] + ['provider' => $aiProviderDup, 'model' => $aiModelDup];
+        $aiConfigDup = ['provider' => $aiProviderDup, 'model' => $aiModelDup, 'url' => (string) ($envDup['AI_BASE_URL'] ?? '')];
         if ($aiProviderDup === '' || $aiModelDup === '') {
             $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
         } else {
@@ -2864,7 +2958,7 @@ final class Extrablatt
             $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
             $aiModel = (string) ($env['AI_MODEL'] ?? '');
             $apiKey = (string) ($env['AI_API_KEY'] ?? '');
-            $aiConfig = [] + ['provider' => $aiProvider, 'model' => $aiModel];
+            $aiConfig = ['provider' => $aiProvider, 'model' => $aiModel, 'url' => (string) ($env['AI_BASE_URL'] ?? '')];
 
             $final = null;
             if ($aiProvider !== '' && $aiModel !== '') {
@@ -2915,6 +3009,7 @@ final class Extrablatt
             aiConfig: [
                 'provider' => (string) ($env['AI_PROVIDER'] ?? ''),
                 'model' => (string) ($env['AI_MODEL'] ?? ''),
+                'url' => (string) ($env['AI_BASE_URL'] ?? ''),
             ],
             apiKey: (string) ($env['AI_API_KEY'] ?? ''),
             emit: $emit
@@ -3724,13 +3819,15 @@ final class Extrablatt
         }
 
         $aiClass = 'vielhuber\\aihelper\\aihelper';
+        $aiUrl = (string) ($aiConfig['url'] ?? '');
         $ai = $aiClass::create(
             provider: (string) ($aiConfig['provider'] ?? 'anthropic'),
             model: (string) ($aiConfig['model'] ?? 'claude-haiku-4-5-20251001'),
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
             max_tries: (int) ($aiConfig['max_tries'] ?? 2),
-            timeout: (int) ($aiConfig['timeout'] ?? 60)
+            timeout: (int) ($aiConfig['timeout'] ?? 60),
+            url: $aiUrl !== '' ? $aiUrl : null
         );
 
         $categoryList = implode(separator: ', ', array: $categories);
@@ -4141,83 +4238,23 @@ final class Extrablatt
      */
     private function clusterDuplicates(PDO $db, array $aiConfig, string $apiKey, callable $emit): void
     {
+        // Two-stage dedup without embeddings (no embeddings endpoint on the
+        // current LLM provider). Stage 1: local token-Jaccard prefilter on
+        // normalized titles, top-N suspect pairs per candidate. Stage 2:
+        // single batched LLM verification call confirms which suspect pairs
+        // really describe the same story. URL dedup via DB primary key
+        // remains the first line of defense before this even runs.
         $cutoff = time() - 7 * 86400;
-        $threshold = 0.85;
-        $embedModel = 'gemini-embedding-001';
+        $jaccardThreshold = 0.25;
+        $topNPerCandidate = 3;
 
-        // 1. Backfill embeddings for any article in the window that doesn't
-        // have one yet — both fresh imports from this scrape and existing
-        // articles from before this feature was added.
-        $missing = (array) $db->query(query: "
-            SELECT url, paper, title
-            FROM articles
-            WHERE published_at IS NOT NULL
-              AND published_at > {$cutoff}
-              AND embedding IS NULL
-            ORDER BY published_at DESC
-        ")->fetchAll(mode: PDO::FETCH_ASSOC);
-        if ($missing !== []) {
-            $emit(sprintf('  %d Artikel ohne Embedding → berechnen', count(value: $missing)));
-            $stmt = $db->prepare(query: 'UPDATE articles SET embedding = :emb WHERE url = :url');
-            $chunks = array_chunk(array: $missing, length: 100);
-            $written = 0;
-            foreach ($chunks as $chunkIdx => $chunk) {
-                $texts = [];
-                foreach ($chunk as $i => $r) {
-                    $texts[$i] = '[' . (string) $r['paper'] . '] ' .
-                        mb_substr(string: (string) $r['title'], start: 0, length: 300);
-                }
-                $batchError = null;
-                $vectors = $this->computeEmbeddingsBatch(
-                    texts: $texts,
-                    apiKey: $apiKey,
-                    model: $embedModel,
-                    error: $batchError
-                );
-                $batchOk = 0;
-                foreach ($vectors as $i => $vec) {
-                    if ($vec === null) {
-                        continue;
-                    }
-                    $stmt->execute(params: [
-                        ':emb' => pack('f*', ...$vec),
-                        ':url' => (string) $chunk[$i]['url']
-                    ]);
-                    $written++;
-                    $batchOk++;
-                }
-                $emit(sprintf('  Embedding-Batch %d/%d: %d Vektoren (gesamt %d)', $chunkIdx + 1, count(value: $chunks), $batchOk, $written));
-                if ($batchOk === 0) {
-                    // API call failed — bail rather than spam more failing
-                    // requests. The successfully embedded articles up to this
-                    // point are already in the DB; next scrape resumes from
-                    // there.
-                    if ($batchError !== null) {
-                        $emit('  ⚠️  ' . $batchError);
-                    }
-                    $emit('  ⚠️  Embedding-API liefert nichts mehr — Backfill abgebrochen, wird beim nächsten Lauf fortgesetzt');
-                    break;
-                }
-                if (count(value: $chunks) > 1) {
-                    usleep(microseconds: 100000);
-                }
-            }
-            $emit(sprintf('  → %d Embeddings gespeichert', $written));
-        }
-
-        // 2. Stream every embedding-equipped article in the window. We hold
-        // raw blobs (3 KB each at 768 dims) rather than unpacked PHP float
-        // arrays (~80 KB each) — PHP's per-element array overhead would
-        // otherwise blow past the shared-host memory limit at N=9000+.
-        // Canonicals (duplicate_of IS NULL, dedup_checked_at IS NOT NULL)
-        // form the match pool; new candidates (dedup_checked_at IS NULL)
-        // drive the loop.
         $stmt = $db->query(query: "
-            SELECT url, paper, published_at, duplicate_of, dedup_checked_at, embedding
+            SELECT url, paper, title, published_at, duplicate_of, dedup_checked_at
             FROM articles
             WHERE published_at IS NOT NULL
               AND published_at > {$cutoff}
-              AND embedding IS NOT NULL
+              AND title IS NOT NULL
+              AND title != ''
             ORDER BY published_at ASC
         ");
         $pool = [];
@@ -4226,8 +4263,8 @@ final class Extrablatt
             $row = [
                 'url' => (string) $r['url'],
                 'paper' => (string) $r['paper'],
-                'publishedAt' => (int) $r['published_at'],
-                'blob' => (string) $r['embedding']
+                'title' => (string) $r['title'],
+                'tokens' => $this->normalizeTitleTokens(title: (string) $r['title'])
             ];
             if ($r['dedup_checked_at'] === null) {
                 $candidates[] = $row;
@@ -4240,40 +4277,83 @@ final class Extrablatt
             $emit('  → keine neuen Kandidaten');
             return;
         }
-        $emit(sprintf('  %d neue Kandidaten vs. %d bestehende canonicals', count(value: $candidates), count(value: $pool)));
+        $emit(sprintf('  %d neue Kandidaten vs. %d bestehende Canonicals', count(value: $candidates), count(value: $pool)));
 
-        // 3. For each candidate find the closest canonical. Unpacks happen
-        // inline so the float arrays live only for one cosine call and get
-        // GC'd straight after. Above threshold → duplicate; otherwise the
-        // candidate becomes a canonical itself and joins the pool for the
-        // rest of this run.
+        $suspectPairs = [];
+        foreach ($candidates as $candIdx => $cand) {
+            if ($cand['tokens'] === []) {
+                continue;
+            }
+            $scored = [];
+            foreach ($pool as $poolIdx => $p) {
+                if ($p['tokens'] === []) {
+                    continue;
+                }
+                $sim = $this->jaccardSimilarity(a: $cand['tokens'], b: $p['tokens']);
+                if ($sim >= $jaccardThreshold) {
+                    $scored[] = ['poolIdx' => $poolIdx, 'sim' => $sim];
+                }
+            }
+            if ($scored === []) {
+                continue;
+            }
+            usort(array: $scored, callback: fn(array $a, array $b): int => $b['sim'] <=> $a['sim']);
+            foreach (array_slice(array: $scored, offset: 0, length: $topNPerCandidate) as $s) {
+                $suspectPairs[] = [
+                    'candIdx' => $candIdx,
+                    'poolIdx' => $s['poolIdx'],
+                    'sim' => $s['sim']
+                ];
+            }
+        }
+
         $socialPapers = ['hackernews' => 1, 'reddit' => 1, 'x' => 1];
         $update = $db->prepare(query: 'UPDATE articles SET duplicate_of = :dup WHERE url = :url');
         $checkStmt = $db->prepare(query: 'UPDATE articles SET dedup_checked_at = :ts WHERE url = :url');
         $now = time();
-        $dupsWritten = 0;
-        foreach ($candidates as $cand) {
-            $candVec = array_values(array: (array) unpack(format: 'f*', string: $cand['blob']));
-            $bestSim = 0.0;
-            $bestIdx = null;
-            foreach ($pool as $i => $p) {
-                $pVec = array_values(array: (array) unpack(format: 'f*', string: $p['blob']));
-                $sim = $this->cosineSimilarity(a: $candVec, b: $pVec);
-                if ($sim > $bestSim) {
-                    $bestSim = $sim;
-                    $bestIdx = $i;
-                }
+
+        if ($suspectPairs === []) {
+            $emit('  → keine verdächtigen Paare nach Jaccard-Vorfilter');
+            foreach ($candidates as $cand) {
+                $checkStmt->execute(params: [':ts' => $now, ':url' => $cand['url']]);
             }
-            if ($bestIdx !== null && $bestSim >= $threshold) {
-                $canonical = $pool[$bestIdx];
-                // Swap canonical if the candidate is non-social and the
-                // current canonical is social — preserves the rule that a
-                // real publication beats a Reddit/X reshare.
+            return;
+        }
+        $emit(sprintf('  → %d verdächtige Paare → LLM-Verifikation', count(value: $suspectPairs)));
+
+        $confirmedIdx = $this->llmVerifyDuplicatePairs(
+            pairs: $suspectPairs,
+            candidates: $candidates,
+            pool: $pool,
+            aiConfig: $aiConfig,
+            apiKey: $apiKey,
+            emit: $emit
+        );
+
+        // First confirmed pool match wins per candidate — duplicate links
+        // are 1:N (one canonical owns many duplicates), so a candidate that
+        // matches multiple pool entries is collapsed into the first.
+        $candToPool = [];
+        foreach ($confirmedIdx as $pairIdx) {
+            $p = $suspectPairs[$pairIdx] ?? null;
+            if ($p === null) {
+                continue;
+            }
+            if (!isset($candToPool[$p['candIdx']])) {
+                $candToPool[$p['candIdx']] = $p['poolIdx'];
+            }
+        }
+
+        $dupsWritten = 0;
+        foreach ($candidates as $candIdx => $cand) {
+            if (isset($candToPool[$candIdx])) {
+                $poolIdx = $candToPool[$candIdx];
+                $canonical = $pool[$poolIdx];
                 $candSocial = isset($socialPapers[$cand['paper']]) ? 1 : 0;
                 $canonSocial = isset($socialPapers[$canonical['paper']]) ? 1 : 0;
                 if ($candSocial === 0 && $canonSocial === 1) {
                     $update->execute(params: [':dup' => $cand['url'], ':url' => $canonical['url']]);
-                    $pool[$bestIdx] = $cand;
+                    $pool[$poolIdx] = $cand;
                 } else {
                     $update->execute(params: [':dup' => $canonical['url'], ':url' => $cand['url']]);
                 }
@@ -4283,79 +4363,153 @@ final class Extrablatt
             }
             $checkStmt->execute(params: [':ts' => $now, ':url' => $cand['url']]);
         }
-        $emit(sprintf('  → %d Duplikate per Embedding markiert (Threshold %.2f)', $dupsWritten, $threshold));
+        $emit(sprintf('  → %d Duplikate per LLM bestätigt (Jaccard≥%.2f, top%d)', $dupsWritten, $jaccardThreshold, $topNPerCandidate));
     }
 
     /**
-     * One round-trip to Google's batchEmbedContents endpoint. Returns an
-     * array keyed identically to $texts; entries that the API didn't return
-     * a vector for stay null. $error is set to a human-readable message
-     * when something went wrong (curl error, non-200 HTTP, API error body).
+     * Tokenise a title for Jaccard prefiltering: lowercase, strip non-letters,
+     * drop short tokens and a small German/English stopword list. Returns a
+     * deduplicated word set as keys (for O(1) intersection later).
      *
-     * @param array<int|string, string> $texts
-     * @return array<int|string, array<int, float>|null>
+     * @return array<string, true>
      */
-    private function computeEmbeddingsBatch(array $texts, string $apiKey, string $model, ?string &$error = null): array
+    private function normalizeTitleTokens(string $title): array
     {
-        $error = null;
-        $result = [];
-        foreach (array_keys(array: $texts) as $k) {
-            $result[$k] = null;
+        static $stopwords = [
+            'der' => 1, 'die' => 1, 'das' => 1, 'den' => 1, 'dem' => 1, 'des' => 1,
+            'ein' => 1, 'eine' => 1, 'einer' => 1, 'eines' => 1, 'einen' => 1, 'einem' => 1,
+            'und' => 1, 'oder' => 1, 'aber' => 1, 'doch' => 1, 'nicht' => 1,
+            'in' => 1, 'im' => 1, 'auf' => 1, 'an' => 1, 'am' => 1, 'mit' => 1, 'von' => 1,
+            'vom' => 1, 'zu' => 1, 'zur' => 1, 'zum' => 1, 'für' => 1, 'bei' => 1, 'nach' => 1,
+            'aus' => 1, 'um' => 1, 'als' => 1, 'wie' => 1, 'so' => 1, 'auch' => 1,
+            'ist' => 1, 'sind' => 1, 'war' => 1, 'waren' => 1, 'wird' => 1, 'werden' => 1,
+            'hat' => 1, 'haben' => 1, 'hatte' => 1, 'hatten' => 1, 'kann' => 1, 'soll' => 1,
+            'sich' => 1, 'sein' => 1, 'seine' => 1, 'ihre' => 1, 'ihr' => 1,
+            'mehr' => 1, 'sehr' => 1, 'noch' => 1, 'schon' => 1, 'nur' => 1, 'auch' => 1,
+            'the' => 1, 'a' => 1, 'an' => 1, 'and' => 1, 'or' => 1, 'but' => 1, 'not' => 1,
+            'of' => 1, 'in' => 1, 'on' => 1, 'at' => 1, 'to' => 1, 'for' => 1, 'with' => 1,
+            'by' => 1, 'from' => 1, 'as' => 1, 'is' => 1, 'are' => 1, 'was' => 1, 'were' => 1,
+            'be' => 1, 'been' => 1, 'has' => 1, 'have' => 1, 'had' => 1, 'will' => 1, 'would' => 1,
+            'this' => 1, 'that' => 1, 'these' => 1, 'those' => 1, 'it' => 1, 'its' => 1,
+            'how' => 1, 'why' => 1, 'what' => 1, 'when' => 1, 'where' => 1
+        ];
+        $lower = mb_strtolower(string: $title, encoding: 'UTF-8');
+        $cleaned = (string) preg_replace(pattern: '~[^\p{L}\p{N}\s]+~u', replacement: ' ', subject: $lower);
+        $parts = preg_split(pattern: '~\s+~', subject: $cleaned, limit: -1, flags: PREG_SPLIT_NO_EMPTY);
+        if ($parts === false) {
+            return [];
         }
-        if ($texts === []) {
-            return $result;
+        // Prefix stemming (first 5 chars) collapses German inflection
+        // ("kritisiert" / "kritik" → "kriti", "scharf" / "scharfe" → "scharf"),
+        // turning the Jaccard score into a usable signal across reword variants.
+        $tokens = [];
+        foreach ($parts as $word) {
+            if (mb_strlen(string: $word, encoding: 'UTF-8') < 3) {
+                continue;
+            }
+            if (isset($stopwords[$word])) {
+                continue;
+            }
+            $stem = mb_substr(string: $word, start: 0, length: 5, encoding: 'UTF-8');
+            $tokens[$stem] = true;
         }
-        $keys = array_keys(array: $texts);
-        // gemini-embedding-001 defaults to 3072 dims — too heavy to fit
-        // thousands of vectors in PHP memory on a shared host. 768 dims is
-        // the official Matryoshka cut-off that still gives near-3072 recall
-        // for short-text similarity.
-        $requests = [];
-        foreach ($keys as $k) {
-            $requests[] = [
-                'model' => 'models/' . $model,
-                'content' => ['parts' => [['text' => $texts[$k]]]],
-                'outputDimensionality' => 768
-            ];
+        return $tokens;
+    }
+
+    /**
+     * @param array<string, true> $a
+     * @param array<string, true> $b
+     */
+    private function jaccardSimilarity(array $a, array $b): float
+    {
+        if ($a === [] || $b === []) {
+            return 0.0;
         }
-        $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model
-            . ':batchEmbedContents?key=' . urlencode(string: $apiKey);
-        $ch = curl_init(url: $url);
-        curl_setopt_array(handle: $ch, options: [
-            CURLOPT_POST => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-            CURLOPT_POSTFIELDS => json_encode(value: ['requests' => $requests]),
-            CURLOPT_TIMEOUT => 60,
-            CURLOPT_CONNECTTIMEOUT => 10
-        ]);
-        $raw = curl_exec(handle: $ch);
-        $curlErr = curl_error(handle: $ch);
-        $http = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
-        curl_close(handle: $ch);
-        if (!is_string(value: $raw)) {
-            $error = sprintf('Embedding curl-Fehler: %s', $curlErr !== '' ? $curlErr : 'unbekannt');
-            return $result;
+        $intersect = count(value: array_intersect_key($a, $b));
+        if ($intersect === 0) {
+            return 0.0;
         }
-        if ($http !== 200) {
-            $snippet = mb_substr(string: $raw, start: 0, length: 400);
-            $error = sprintf('Embedding HTTP %d: %s', $http, $snippet);
-            return $result;
+        $union = count(value: $a) + count(value: $b) - $intersect;
+        return $intersect / $union;
+    }
+
+    /**
+     * Send all Jaccard-prefiltered suspect pairs to the LLM in one batched
+     * call. Expects a JSON array of 1-based pair indices to be returned.
+     * Returns a list of confirmed pair indices into $pairs (0-based).
+     *
+     * @param array<int, array{candIdx:int, poolIdx:int, sim:float}> $pairs
+     * @param array<int, array{url:string, paper:string, title:string, tokens:array<string,true>}> $candidates
+     * @param array<int, array{url:string, paper:string, title:string, tokens:array<string,true>}> $pool
+     * @param array<string, mixed> $aiConfig
+     * @return array<int, int>
+     */
+    private function llmVerifyDuplicatePairs(array $pairs, array $candidates, array $pool, array $aiConfig, string $apiKey, callable $emit): array
+    {
+        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
+            $emit('  ⚠️  aihelper nicht verfügbar — Dedup-LLM übersprungen');
+            return [];
         }
-        $decoded = json_decode(json: $raw, associative: true);
-        if (!is_array(value: $decoded) || !isset($decoded['embeddings'])) {
-            $snippet = mb_substr(string: $raw, start: 0, length: 400);
-            $error = sprintf('Embedding-Response ungültig: %s', $snippet);
-            return $result;
+
+        $lines = [];
+        foreach ($pairs as $i => $p) {
+            $candTitle = $candidates[$p['candIdx']]['title'] ?? '';
+            $poolTitle = $pool[$p['poolIdx']]['title'] ?? '';
+            $lines[] = sprintf(
+                '%d) A: %s | B: %s',
+                $i + 1,
+                mb_substr(string: $candTitle, start: 0, length: 240),
+                mb_substr(string: $poolTitle, start: 0, length: 240)
+            );
         }
-        $embeddings = (array) $decoded['embeddings'];
-        foreach ($keys as $i => $k) {
-            $values = $embeddings[$i]['values'] ?? null;
-            if (is_array(value: $values)) {
-                $result[$k] = array_map(callback: 'floatval', array: $values);
+
+        $prompt = "Du erhältst eine nummerierte Liste von Schlagzeilen-Paaren (A vs. B).\n"
+            . "Entscheide für jedes Paar, ob beide Schlagzeilen DIESELBE Nachrichtenstory beschreiben "
+            . "(gleiches Ereignis, gleicher Sachverhalt, evtl. nur unterschiedlich formuliert).\n"
+            . "Synonyme, Umformulierungen, andere Reihenfolge der Wörter → ja.\n"
+            . "Bloß ähnliches Thema, anderer Vorfall oder andere Personen → nein.\n\n"
+            . "Antworte AUSSCHLIESSLICH mit einem JSON-Objekt im Format {\"duplicates\":[1,3,7]} — "
+            . "Liste der Paar-Nummern (1-basiert), die Duplikate sind. Wenn keines: {\"duplicates\":[]}. "
+            . "Keine Erklärungen, kein Markdown.\n\n"
+            . "Paare:\n" . implode(separator: "\n", array: $lines);
+
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
+            $ai = $aiClass::create(
+                provider: (string) ($aiConfig['provider'] ?? ''),
+                model: (string) ($aiConfig['model'] ?? ''),
+                temperature: 0.0,
+                api_key: $apiKey,
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 120),
+                url: $aiUrl !== '' ? $aiUrl : null
+            );
+            $resp = $ai->ask(prompt: $prompt)['response'] ?? null;
+        } catch (\Throwable $e) {
+            $emit('  ⚠️  Dedup-LLM fehlgeschlagen: ' . $e->getMessage());
+            return [];
+        }
+
+        if (is_object(value: $resp) || is_array(value: $resp)) {
+            $parsed = json_decode(json: (string) json_encode(value: $resp), associative: true);
+        } else {
+            $raw = trim(string: (string) $resp);
+            $raw = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $raw);
+            $parsed = json_decode(json: $raw, associative: true);
+        }
+        if (!is_array(value: $parsed) || !isset($parsed['duplicates']) || !is_array(value: $parsed['duplicates'])) {
+            $emit('  ⚠️  Dedup-LLM Antwort kein gültiges JSON — keine Duplikate übernommen');
+            return [];
+        }
+        $confirmed = [];
+        foreach ($parsed['duplicates'] as $n) {
+            $idx = (int) $n - 1;
+            if ($idx >= 0 && isset($pairs[$idx])) {
+                $confirmed[] = $idx;
             }
         }
-        return $result;
+        return $confirmed;
     }
 
     /**
@@ -4490,13 +4644,15 @@ final class Extrablatt
 
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
             $ai = $aiClass::create(
                 provider: (string) ($aiConfig['provider'] ?? ''),
                 model: (string) ($aiConfig['model'] ?? ''),
                 temperature: (float) ($aiConfig['temperature'] ?? 0.0),
                 api_key: $apiKey,
                 max_tries: (int) ($aiConfig['max_tries'] ?? 2),
-                timeout: (int) ($aiConfig['timeout'] ?? 60)
+                timeout: (int) ($aiConfig['timeout'] ?? 60),
+                url: $aiUrl !== '' ? $aiUrl : null
             );
             $response = $ai->ask(prompt: $prompt);
             $raw = trim(string: (string) ($response['response'] ?? ''));
@@ -4615,13 +4771,15 @@ final class Extrablatt
 
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
             $ai = $aiClass::create(
                 provider: $provider,
                 model: $model,
                 temperature: (float) ($aiConfig['temperature'] ?? 0.3),
                 api_key: $apiKey,
                 max_tries: (int) ($aiConfig['max_tries'] ?? 2),
-                timeout: (int) ($aiConfig['timeout'] ?? 120)
+                timeout: (int) ($aiConfig['timeout'] ?? 120),
+                url: $aiUrl !== '' ? $aiUrl : null
             );
             $response = $ai->ask(prompt: $prompt);
             $resp = $response['response'] ?? null;
@@ -4820,13 +4978,15 @@ final class Extrablatt
             "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
             $ai = $aiClass::create(
                 provider: $provider,
                 model: $model,
                 temperature: (float) ($aiConfig['temperature'] ?? 0.4),
                 api_key: $apiKey,
                 max_tries: (int) ($aiConfig['max_tries'] ?? 2),
-                timeout: (int) ($aiConfig['timeout'] ?? 60)
+                timeout: (int) ($aiConfig['timeout'] ?? 60),
+                url: $aiUrl !== '' ? $aiUrl : null
             );
             $resp = $ai->ask(prompt: $prompt)['response'] ?? null;
         } catch (\Throwable $e) {
