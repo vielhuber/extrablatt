@@ -4774,15 +4774,16 @@ final class Extrablatt
         $prompt =
             "Du bist ein Zeitungs-Chefredakteur und schreibst ZWEI Texte für einen Privatleser, " .
             "der nicht jeden Tag liest:\n" .
-            "  1. EINE \"Meldung des Tages\" — die wichtigste Story von HEUTE.\n" .
-            "  2. Eine Wochenübersicht mit 5 bis 8 Geschichten der letzten 7 Tage, absteigend nach Brisanz.\n\n" .
+            "  1. EINE \"Meldung des Tages\" — die brisanteste Story von HEUTE, themenübergreifend gewählt.\n" .
+            "  2. Eine Wochenübersicht mit 7 bis 9 Geschichten der letzten 7 Tage, geordnet nach Themengruppen.\n\n" .
             "Hier alle Artikel-Schlagzeilen. Artikel von HEUTE sind mit '(heute)' markiert:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
-            "MELDUNG DES TAGES (top_today): EIN Absatz von 1 bis 2 Sätzen zur wichtigsten Story von heute. " .
+            "MELDUNG DES TAGES (top_today): EIN Absatz von 1 bis 2 Sätzen zur BRISANTESTEN Story von heute, " .
+            "THEMENÜBERGREIFEND. Die Story muss NICHT politisch sein — wähle aus ALLEN Themengruppen (Politik, " .
+            "Wirtschaft, Wissen & Technik, Sport, Gesellschaft, …) die Story mit der größten Tragweite. " .
             "Wähle ausschliesslich aus den mit '(heute)' markierten Artikeln. Falls KEIN Artikel mit " .
             "'(heute)' markiert ist, setze \"top_today\" auf null.\n\n" .
-            "WOCHENÜBERSICHT (items): 5 bis 8 Absätze zu je 1 bis 2 Sätzen.\n" .
-            "Sorge für THEMATISCHE VIELFALT: höchstens 3 Absätze aus derselben Themengruppe. " .
+            "WOCHENÜBERSICHT (items): 7 bis 9 Absätze zu je 1 bis 2 Sätzen.\n" .
             "Die zehn Themengruppen ergeben sich aus der Kategorie der Artikel:\n" .
             "  - Politik: Innenpolitik, Außenpolitik, Ukraine-Krieg, Nahost-Konflikt, Justiz & Verfassung\n" .
             "  - Wirtschaft & Finanzen: Konjunktur, Unternehmen, Börse & Märkte, Krypto, Arbeitsmarkt\n" .
@@ -4794,9 +4795,17 @@ final class Extrablatt
             "  - Lokal & Regional: Bayern, Berlin, Norddeutschland, NRW & Westdeutschland, Verkehr & Infrastruktur\n" .
             "  - Reise & Lifestyle: Kulinarik, Reiseziele, Wein & Getränke, Auto-Lifestyle, Haushaltstipps\n" .
             "  - Sonstiges: Auto & Verkehr, Garten & Pflanzen, Wetter & Natur, Unfälle, Verbraucher\n" .
-            "Wenn Stories aus der Gruppe \"Wissen & Technik\" im Set vorhanden sind, MUSS mindestens eine davon im Digest erscheinen. " .
-            "Innerhalb der gewählten Themengruppen absteigend nach Brisanz und Tragweite anordnen, " .
-            "über die Gruppen hinweg die wichtigste Story der Woche zuerst. " .
+            "MENGEN-VORGABEN je Themengruppe:\n" .
+            "  - Wissen & Technik: 2 bis 3 Absätze (PFLICHT, wenn Stories im Set vorhanden — das ist der Lieblingsbereich des Lesers)\n" .
+            "  - Politik: 1 bis 2 Absätze\n" .
+            "  - Wirtschaft & Finanzen: 1 bis 2 Absätze\n" .
+            "  - Alle übrigen Gruppen (Sport, Kultur, Gesundheit, Gesellschaft, Lokal, Reise, Sonstiges): zusammen 1 bis 2 Absätze\n" .
+            "REIHENFOLGE der Absätze im items-Array, STRIKT EINHALTEN:\n" .
+            "  1. zuerst alle Wissen-&-Technik-Absätze (direkt nach der Meldung des Tages)\n" .
+            "  2. dann alle Politik-Absätze\n" .
+            "  3. dann alle Wirtschaft-&-Finanzen-Absätze\n" .
+            "  4. dann Sport, Kultur & Medien, Gesundheit, Gesellschaft & Panorama, Lokal & Regional, Reise & Lifestyle, Sonstiges (in dieser Folge)\n" .
+            "Themengruppen ohne ausgewählte Story werden einfach übersprungen. Innerhalb derselben Gruppe absteigend nach Brisanz und Tragweite. " .
             "Mehrfach-Berichterstattung zur gleichen Story (auch über mehrere Tage) in einem Absatz bündeln. " .
             "WICHTIG: Die Story aus \"Meldung des Tages\" DARF in der Wochenübersicht NICHT erneut " .
             "auftauchen — wähle thematisch komplett andere Geschichten, damit es keine inhaltliche " .
