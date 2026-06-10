@@ -4739,6 +4739,10 @@ final class Extrablatt
         }
 
         $cutoff = time() - 7 * 86400;
+        // No LIMIT: the duplicate_of filter already keeps the volume in
+        // check (~2-3k items for a 7-day window) and feeding the full pool
+        // lets the LLM pick across all themes instead of biasing toward the
+        // most recent 1000 headlines.
         $stmt = $db->prepare(query: '
             SELECT url, paper, title, category, published_at
             FROM articles
@@ -4746,7 +4750,6 @@ final class Extrablatt
               AND duplicate_of IS NULL
               AND title IS NOT NULL AND title <> ""
             ORDER BY published_at DESC
-            LIMIT 1000
         ');
         $stmt->execute(params: [':since' => $cutoff]);
         $articles = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
@@ -4778,8 +4781,22 @@ final class Extrablatt
             "MELDUNG DES TAGES (top_today): EIN Absatz von 1 bis 2 Sätzen zur wichtigsten Story von heute. " .
             "Wähle ausschliesslich aus den mit '(heute)' markierten Artikeln. Falls KEIN Artikel mit " .
             "'(heute)' markiert ist, setze \"top_today\" auf null.\n\n" .
-            "WOCHENÜBERSICHT (items): 5 bis 8 Absätze zu je 1 bis 2 Sätzen, ABSTEIGEND nach Brisanz und " .
-            "Tragweite — die wichtigste Story der Woche zuerst, danach absteigend nach Bedeutung. " .
+            "WOCHENÜBERSICHT (items): 5 bis 8 Absätze zu je 1 bis 2 Sätzen.\n" .
+            "Sorge für THEMATISCHE VIELFALT: höchstens 3 Absätze aus derselben Themengruppe. " .
+            "Die zehn Themengruppen ergeben sich aus der Kategorie der Artikel:\n" .
+            "  - Politik: Innenpolitik, Außenpolitik, Ukraine-Krieg, Nahost-Konflikt, Justiz & Verfassung\n" .
+            "  - Wirtschaft & Finanzen: Konjunktur, Unternehmen, Börse & Märkte, Krypto, Arbeitsmarkt\n" .
+            "  - Sport: Fußball, Motorsport, Tennis, Wintersport, Sportbusiness\n" .
+            "  - Kultur & Medien: Musik, Film & TV, Kunst & Ausstellungen, Reality-TV, Kulturbetrieb\n" .
+            "  - Wissen & Technik: AI, CSS, Programmierung, Open Source, Web & Internet, DevOps & Cloud, Hardware, Mobilgeräte, Wearables, GPUs & Chips, Gaming, Cybersecurity, Datenschutz, Wissenschaft, Klima & Umwelt, Tiere & Natur, Weltraum, Energie, Robotik, Militärtechnik\n" .
+            "  - Gesundheit: Ernährung, Mentale Gesundheit, Krankheiten & Epidemien, Medizin & Pharma, Fitness & Longevity\n" .
+            "  - Gesellschaft & Panorama: Kriminalität, Religion & Kirche, Brauchtum & Tradition, Familie & Beziehungen, Bildung\n" .
+            "  - Lokal & Regional: Bayern, Berlin, Norddeutschland, NRW & Westdeutschland, Verkehr & Infrastruktur\n" .
+            "  - Reise & Lifestyle: Kulinarik, Reiseziele, Wein & Getränke, Auto-Lifestyle, Haushaltstipps\n" .
+            "  - Sonstiges: Auto & Verkehr, Garten & Pflanzen, Wetter & Natur, Unfälle, Verbraucher\n" .
+            "Wenn Stories aus der Gruppe \"Wissen & Technik\" im Set vorhanden sind, MUSS mindestens eine davon im Digest erscheinen. " .
+            "Innerhalb der gewählten Themengruppen absteigend nach Brisanz und Tragweite anordnen, " .
+            "über die Gruppen hinweg die wichtigste Story der Woche zuerst. " .
             "Mehrfach-Berichterstattung zur gleichen Story (auch über mehrere Tage) in einem Absatz bündeln. " .
             "WICHTIG: Die Story aus \"Meldung des Tages\" DARF in der Wochenübersicht NICHT erneut " .
             "auftauchen — wähle thematisch komplett andere Geschichten, damit es keine inhaltliche " .
