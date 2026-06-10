@@ -3826,73 +3826,132 @@ final class Extrablatt
             temperature: (float) ($aiConfig['temperature'] ?? 0.0),
             api_key: $apiKey,
             max_tries: (int) ($aiConfig['max_tries'] ?? 2),
-            timeout: (int) ($aiConfig['timeout'] ?? 60),
+            timeout: (int) ($aiConfig['timeout'] ?? 120),
             url: $aiUrl !== '' ? $aiUrl : null
         );
 
         $categoryList = implode(separator: ', ', array: $categories);
+        $batchSize = 30;
+
+        // Pass 1: split into cache hits vs. distinct pending titles. Identical
+        // titles across papers share the title-based cache key, so we ask the
+        // LLM only once per distinct title.
+        $cacheHits = [];
+        $pendingTitles = [];
+        foreach ($items as $entry) {
+            $title = $entry['item']->title;
+            if (array_key_exists(key: $title, array: $cacheHits) || isset($pendingTitles[$title])) {
+                continue;
+            }
+            if ($this->categoryCacheExists(title: $title)) {
+                $cacheHits[$title] = $this->readCategoryCache(title: $title);
+            } else {
+                $pendingTitles[$title] = true;
+            }
+        }
+
+        // Pass 2: batch the pending titles into one LLM call per chunk.
+        $aiResults = [];
+        $pendingList = array_keys(array: $pendingTitles);
+        $batchCount = $pendingList === [] ? 0 : (int) ceil(num: count(value: $pendingList) / $batchSize);
+        foreach (array_chunk(array: $pendingList, length: $batchSize) as $batchIdx => $titles) {
+            $batchStart = microtime(as_float: true);
+
+            $numbered = [];
+            foreach ($titles as $i => $t) {
+                $numbered[] = ($i + 1) . '. ' . $t;
+            }
+            $prompt =
+                "Ordne JEDEM der folgenden nummerierten Nachrichtenartikel-Titel GENAU EINE der genannten Kategorien zu.\n\n" .
+                "Verfügbare Kategorien: " . $categoryList . "\n\n" .
+                "Antworte AUSSCHLIESSLICH mit einem JSON-Objekt im Format {\"1\":\"Kategorie\",\"2\":\"Kategorie\",...}.\n" .
+                "Verwende für jeden Eintrag exakt einen Kategorienamen aus der Liste, kein Markdown, keine Erklärungen.\n\n" .
+                "Titel:\n" . implode(separator: "\n", array: $numbered);
+
+            try {
+                $resp = $ai->ask(prompt: $prompt)['response'] ?? null;
+            } catch (\Throwable $e) {
+                $resp = null;
+            }
+
+            if (is_object(value: $resp) || is_array(value: $resp)) {
+                $parsed = json_decode(json: (string) json_encode(value: $resp), associative: true);
+            } else {
+                $raw = trim(string: (string) $resp);
+                $raw = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $raw);
+                $parsed = json_decode(json: $raw, associative: true);
+            }
+            if (!is_array(value: $parsed)) {
+                $parsed = [];
+            }
+
+            $mapping = [];
+            foreach ($parsed as $key => $value) {
+                $idx = (int) $key;
+                if ($idx < 1 || $idx > count(value: $titles)) {
+                    continue;
+                }
+                $cat = $this->matchCategory(raw: (string) $value, categories: $categories);
+                if ($cat !== null) {
+                    $mapping[$idx] = $cat;
+                }
+            }
+
+            foreach ($titles as $i => $t) {
+                $cat = $mapping[$i + 1] ?? null;
+                $this->writeCategoryCache(title: $t, category: $cat);
+                $aiResults[$t] = $cat;
+            }
+
+            $ms = (int) round(num: (microtime(as_float: true) - $batchStart) * 1000);
+            $hits = count(value: $mapping);
+            $emit(sprintf(
+                '  Batch %d/%d: %d/%d Titel kategorisiert (%d ms)',
+                $batchIdx + 1,
+                $batchCount,
+                $hits,
+                count(value: $titles),
+                $ms
+            ));
+        }
+
+        // Pass 3: emit per item in original order, build url => category result.
         $result = [];
         $total = count(value: $items);
         $checked = 0;
         $fromCache = 0;
         $fromAi = 0;
-
         foreach ($items as $entry) {
             $item = $entry['item'];
             $checked++;
+            $title = $item->title;
 
-            if ($this->categoryCacheExists(title: $item->title)) {
-                $category = $this->readCategoryCache(title: $item->title);
+            if (array_key_exists(key: $title, array: $cacheHits)) {
+                $category = $cacheHits[$title];
                 $fromCache++;
-                if ($category !== null) {
-                    $result[$item->link] = $category;
-                }
-                $titleShort = mb_substr(string: $item->title, start: 0, length: 50);
-                $emit(sprintf(
-                    '  [%3d/%d] %-14s %-22s %s',
-                    $checked,
-                    $total,
-                    $entry['paper'],
-                    ($category ?? '?unkategorisiert') . ' (cache)',
-                    $titleShort
-                ));
-                continue;
+                $label = ($category ?? '?unkategorisiert') . ' (cache)';
+            } else {
+                $category = $aiResults[$title] ?? null;
+                $fromAi++;
+                $label = $category ?? '?unkategorisiert';
             }
-
-            $prompt =
-                "Ordne den folgenden Nachrichtenartikel-Titel **einer** der genannten Kategorien zu.\n\n" .
-                "Verfügbare Kategorien: " . $categoryList . "\n\n" .
-                "Zeitung: " . $entry['paper'] . "\n" .
-                "Titel: " . $item->title . "\n\n" .
-                "Antworte ausschließlich mit dem exakten Kategorie-Namen aus der Liste, ohne weiteren Text.";
-
-            try {
-                $response = $ai->ask(prompt: $prompt);
-                $raw = trim(string: (string) ($response['response'] ?? ''));
-                $category = $this->matchCategory(raw: $raw, categories: $categories);
-            } catch (\Throwable $e) {
-                $category = null;
-            }
-
-            $this->writeCategoryCache(title: $item->title, category: $category);
-            $fromAi++;
 
             if ($category !== null) {
                 $result[$item->link] = $category;
             }
 
-            $titleShort = mb_substr(string: $item->title, start: 0, length: 50);
+            $titleShort = mb_substr(string: $title, start: 0, length: 50);
             $emit(sprintf(
                 '  [%3d/%d] %-14s %-22s %s',
                 $checked,
                 $total,
                 $entry['paper'],
-                $category ?? '?unkategorisiert',
+                $label,
                 $titleShort
             ));
         }
 
-        $emit(sprintf('  → AI-Calls: %d, Cache-Hits: %d', $fromAi, $fromCache));
+        $emit(sprintf('  → AI-Calls: %d in %d Batches, Cache-Hits: %d', $fromAi, $batchCount, $fromCache));
         return $result;
     }
 
