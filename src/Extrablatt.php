@@ -2203,6 +2203,65 @@ final class Extrablatt
     }
 
     /**
+     * Bail-out gate for any entry point that depends on the AI provider.
+     * Verifies provider/model/base URL are configured and that the host
+     * answers any HTTP response within a short timeout. Emits a clear
+     * warning on failure and returns false so the caller can `return;`
+     * without touching the DB or caches.
+     */
+    private function preflightAi(callable $emit): bool
+    {
+        $env = $this->loadEnv();
+        $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
+        $aiModel = (string) ($env['AI_MODEL'] ?? '');
+        $aiBaseUrl = (string) ($env['AI_BASE_URL'] ?? '');
+        if ($aiProvider === '' || $aiModel === '' || $aiBaseUrl === '') {
+            $emit('⚠️  AI nicht vollständig konfiguriert (AI_PROVIDER / AI_MODEL / AI_BASE_URL in .env) — Scrape abgebrochen.');
+            return false;
+        }
+        $reach = $this->checkAiHostReachable(baseUrl: $aiBaseUrl);
+        if (!$reach['ok']) {
+            $emit(sprintf('⚠️  AI-Host nicht erreichbar (%s): %s — Scrape abgebrochen.', $aiBaseUrl, $reach['reason']));
+            return false;
+        }
+        $emit(sprintf('AI-Host erreichbar: %s (%s)', $aiBaseUrl, $reach['reason']));
+        $emit('');
+        return true;
+    }
+
+    /**
+     * Preflight check for the configured AI base URL. Probes /models with a
+     * short connect+read timeout. Any HTTP response (even 401/404) means the
+     * host is alive — only network failures and 5xx count as unreachable.
+     *
+     * @return array{ok: bool, reason: string}
+     */
+    private function checkAiHostReachable(string $baseUrl): array
+    {
+        $probeUrl = rtrim(string: $baseUrl, characters: '/') . '/models';
+        $ch = curl_init();
+        curl_setopt_array(handle: $ch, options: [
+            CURLOPT_URL => $probeUrl,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_NOBODY => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        curl_exec(handle: $ch);
+        $code = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
+        $err = (string) curl_error(handle: $ch);
+        curl_close(handle: $ch);
+        if ($code === 0) {
+            return ['ok' => false, 'reason' => $err !== '' ? $err : 'kein HTTP-Response'];
+        }
+        if ($code >= 500) {
+            return ['ok' => false, 'reason' => 'HTTP ' . $code];
+        }
+        return ['ok' => true, 'reason' => 'HTTP ' . $code];
+    }
+
+    /**
      * Builds the streaming `emit` closure used by every long-running phase.
      * Truncates the persistent scrape.log at start, sets up output buffering
      * defaults and returns a closure that echoes + flushes + tees to disk.
@@ -2235,21 +2294,23 @@ final class Extrablatt
         $startedAt = microtime(as_float: true);
         $emit('=== extrablatt single-phase run — Phase ' . $phase . ' — ' . date(format: 'Y-m-d H:i:s') . ' ===');
         $emit('');
-        $db = $this->openDatabase();
 
+        if (!$this->preflightAi(emit: $emit)) {
+            return;
+        }
+
+        $db = $this->openDatabase();
         $env = $this->loadEnv();
-        $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
-        $aiModel = (string) ($env['AI_MODEL'] ?? '');
+        $aiConfig = [
+            'provider' => (string) ($env['AI_PROVIDER'] ?? ''),
+            'model' => (string) ($env['AI_MODEL'] ?? ''),
+            'url' => (string) ($env['AI_BASE_URL'] ?? '')
+        ];
         $apiKey = (string) ($env['AI_API_KEY'] ?? '');
-        $aiConfig = ['provider' => $aiProvider, 'model' => $aiModel, 'url' => (string) ($env['AI_BASE_URL'] ?? '')];
 
         if ($phase === 8) {
             $emit('Phase 8/10: Duplikat-Erkennung (Jaccard + LLM-Verifikation)');
-            if ($aiProvider === '' || $aiModel === '') {
-                $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
-            } else {
-                $this->clusterDuplicates(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, emit: $emit);
-            }
+            $this->clusterDuplicates(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, emit: $emit);
         } else {
             $emit('⚠️  Phase ' . $phase . ' kann nicht standalone laufen (braucht Upstream-State).');
         }
@@ -2268,6 +2329,14 @@ final class Extrablatt
         $startedAt = microtime(as_float: true);
         $emit('=== extrablatt scrape — ' . date(format: 'Y-m-d H:i:s') . ' ===');
         $emit('');
+
+        // Preflight: AI host must be configured and reachable. Phases 6, 8, 9
+        // and 10 all rely on it; running without AI would pollute the title
+        // cache with NULLs and mark candidates dedup_checked without checking.
+        // Bail before any DB or feed work happens.
+        if (!$this->preflightAi(emit: $emit)) {
+            return;
+        }
 
         $db = $this->openDatabase();
 
