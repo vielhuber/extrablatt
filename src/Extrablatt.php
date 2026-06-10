@@ -2069,16 +2069,9 @@ final class Extrablatt
         if (!in_array(needle: 'dedup_checked_at', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN dedup_checked_at INTEGER DEFAULT NULL');
         }
-        if (!in_array(needle: 'embedding', haystack: $columns, strict: true)) {
-            $db->exec(statement: 'ALTER TABLE articles ADD COLUMN embedding BLOB DEFAULT NULL');
-        }
         if (!in_array(needle: 'thumbnail_fail_count', haystack: $columns, strict: true)) {
             $db->exec(statement: 'ALTER TABLE articles ADD COLUMN thumbnail_fail_count INTEGER NOT NULL DEFAULT 0');
         }
-        // 768-dim float32 vector = 3072 bytes. Anything bigger (early
-        // 3072-dim runs) is incompatible with the current similarity loop
-        // and gets reset so the next run re-embeds with the right size.
-        $db->exec(statement: 'UPDATE articles SET embedding = NULL WHERE LENGTH(embedding) > 3072');
     }
 
     /**
@@ -2251,7 +2244,7 @@ final class Extrablatt
         $aiConfig = ['provider' => $aiProvider, 'model' => $aiModel, 'url' => (string) ($env['AI_BASE_URL'] ?? '')];
 
         if ($phase === 8) {
-            $emit('Phase 8/10: Duplikat-Erkennung per Embedding-Vergleich');
+            $emit('Phase 8/10: Duplikat-Erkennung (Jaccard + LLM-Verifikation)');
             if ($aiProvider === '' || $aiModel === '') {
                 $emit('  ⚠️  AI nicht konfiguriert, Phase übersprungen');
             } else {
@@ -2461,7 +2454,7 @@ final class Extrablatt
         }
         // Skip items Phase 7 would drop (PLUS without usable archive).
         // Title-duplicate filter intentionally absent: Phase 8 dedups
-        // semantically via embeddings and keeps both rows.
+        // via Jaccard + LLM and keeps both rows.
         $thumbCandidates = array_values(array: array_filter(
             array: $allItems,
             callback: function (array $entry) use ($effectiveImages, $knownThumbs, $paywallStatus, $availability, $archiveFull): bool {
@@ -2757,7 +2750,7 @@ final class Extrablatt
         }
         // Skip items Phase 7 would drop (PLUS without usable archive).
         // Title-duplicate filter intentionally absent: Phase 8 dedups
-        // semantically via embeddings and keeps both rows.
+        // via Jaccard + LLM and keeps both rows.
         $toCategorize = array_values(array: array_filter(
             array: $allItems,
             callback: function (array $entry) use ($knownCategories, $paywallStatus, $availability, $archiveFull): bool {
@@ -2874,7 +2867,7 @@ final class Extrablatt
         // Phase 8: AI duplicate clustering. Same story across multiple
         // sources gets collapsed to one canonical entry — must run BEFORE
         // magic bucket so the bucket doesn't pick duplicates.
-        $emit('Phase 8/10: Duplikat-Erkennung per Embedding-Vergleich');
+        $emit('Phase 8/10: Duplikat-Erkennung (Jaccard + LLM-Verifikation)');
         $phaseStart = microtime(as_float: true);
         $envDup = $this->loadEnv();
         $aiProviderDup = (string) ($envDup['AI_PROVIDER'] ?? '');
@@ -2977,13 +2970,6 @@ final class Extrablatt
                 $final = $candidates;
                 $emit('  → Fallback: Reihenfolge nach Regel-Score');
             }
-
-            // Topic-level dedup within the bucket: Phase 8 catches obvious
-            // duplicates at threshold 0.85 across all 7 days; here we apply
-            // a softer 0.70 just to the magic candidates so two near-twin
-            // takes on the same story (different sources, different
-            // framing) don't both surface. Greedy by current rerank order.
-            $final = $this->dedupMagicBucket(rows: $final, db: $db, emit: $emit);
 
             // Final cap: only the top 10 land in the frozen bucket.
             $final = array_slice(array: $final, offset: 0, length: 10);
@@ -3095,10 +3081,10 @@ final class Extrablatt
         $emit(sprintf('  → %d Feed-Cache-Einträge gelöscht (%d MB frei)', (int) $feedDeleted, intdiv($feedBytes, 1048576)));
 
         // Drop display-only payload from old, untouched articles. Keeps the
-        // ML signals (embedding, category, paywall, rating, duplicate_of)
-        // and personal signals (vote, read_at) so future categorisation,
-        // dedup and affinity scoring stay accurate. Articles the user
-        // interacted with (read or voted) are preserved in full.
+        // ML signals (category, paywall, rating, duplicate_of) and personal
+        // signals (vote, read_at) so future categorisation, dedup and
+        // affinity scoring stay accurate. Articles the user interacted with
+        // (read or voted) are preserved in full.
         $articleCutoff = time() - 30 * 86400;
         $bytesBefore = (int) $db->query(query: "
             SELECT COALESCE(SUM(LENGTH(thumbnail)) + SUM(LENGTH(image_url)), 0)
@@ -3114,7 +3100,7 @@ final class Extrablatt
               AND read_at IS NULL AND vote = 0
               AND (thumbnail IS NOT NULL OR image_url IS NOT NULL)
         ");
-        $emit(sprintf('  → %d alte Artikel ausgedünnt (%d MB frei, Embeddings/Kategorien bleiben)', (int) $prunedRows, intdiv($bytesBefore, 1048576)));
+        $emit(sprintf('  → %d alte Artikel ausgedünnt (%d MB frei, Kategorien bleiben)', (int) $prunedRows, intdiv($bytesBefore, 1048576)));
 
         $db->exec(statement: 'VACUUM');
         $emit('  → VACUUM fertig');
@@ -4282,24 +4268,20 @@ final class Extrablatt
     }
 
     /**
-     * Duplicate detection via title embeddings (Google text-embedding-004).
-     * Each article gets a 768-dim vector computed once and stored as BLOB.
-     * For every new (= not-yet-checked) article we run a cosine similarity
-     * sweep over the existing canonicals in the 7-day window; on a hit above
-     * the threshold the new article gets duplicate_of set to that canonical
-     * (chain followed to the root). Articles that don't match end up as new
-     * canonicals themselves and become matchable for subsequent candidates.
-     *
-     * Wall-time: dominated by the embed-API call (~30-50 ms per request when
-     * batched), cosine pass over 7k vectors is ~50 ms in pure PHP.
+     * Duplicate detection via local title-token Jaccard + LLM verification.
+     * Stage 1: tokenise titles, prefilter against existing canonicals in the
+     * 7-day window, keep top-N suspect pairs per candidate at Jaccard ≥ 0.25.
+     * Stage 2: ship all suspects in one batched LLM call, model returns the
+     * subset of pairs that describe the same story. Confirmed candidates get
+     * duplicate_of set to their canonical; unmatched candidates become new
+     * canonicals matchable for subsequent runs.
      *
      * @param array<string, mixed> $aiConfig
      */
     private function clusterDuplicates(PDO $db, array $aiConfig, string $apiKey, callable $emit): void
     {
-        // Two-stage dedup without embeddings (no embeddings endpoint on the
-        // current LLM provider). Stage 1: local token-Jaccard prefilter on
-        // normalized titles, top-N suspect pairs per candidate. Stage 2:
+        // Stage 1: local token-Jaccard prefilter on normalized titles,
+        // top-N suspect pairs per candidate. Stage 2:
         // single batched LLM verification call confirms which suspect pairs
         // really describe the same story. URL dedup via DB primary key
         // remains the first line of defense before this even runs.
@@ -4569,90 +4551,6 @@ final class Extrablatt
             }
         }
         return $confirmed;
-    }
-
-    /**
-     * Cosine similarity between two equal-length float vectors. Returns 0.0
-     * if either side is a zero vector to keep the caller's threshold logic
-     * monotone.
-     *
-     * @param array<int, float> $a
-     * @param array<int, float> $b
-     */
-    /**
-     * Drop near-duplicate stories from a ranked magic bucket. Loads each
-     * candidate's stored embedding, then greedily keeps a row only when it
-     * isn't too close to anything already kept. Threshold 0.70 is softer
-     * than Phase 8's 0.85 — catches semantic siblings that the
-     * cross-source dedup didn't merge.
-     *
-     * @param array<int, array<string, mixed>> $rows
-     * @return array<int, array<string, mixed>>
-     */
-    private function dedupMagicBucket(array $rows, PDO $db, callable $emit): array
-    {
-        if (count(value: $rows) < 2) {
-            return $rows;
-        }
-        $urls = array_values(array: array_map(callback: fn(array $r): string => (string) $r['url'], array: $rows));
-        $placeholders = implode(separator: ',', array: array_fill(start_index: 0, count: count(value: $urls), value: '?'));
-        $stmt = $db->prepare(query: 'SELECT url, embedding FROM articles WHERE url IN (' . $placeholders . ')');
-        $stmt->execute(params: $urls);
-        $blobs = [];
-        while ($row = $stmt->fetch(mode: PDO::FETCH_ASSOC)) {
-            if ($row['embedding'] !== null) {
-                $blobs[(string) $row['url']] = (string) $row['embedding'];
-            }
-        }
-        $threshold = 0.70;
-        $kept = [];
-        $keptVectors = [];
-        $dropped = 0;
-        foreach ($rows as $row) {
-            $url = (string) $row['url'];
-            if (!isset($blobs[$url])) {
-                $kept[] = $row;
-                continue;
-            }
-            $vec = array_values(array: (array) unpack(format: 'f*', string: $blobs[$url]));
-            $isDup = false;
-            foreach ($keptVectors as $other) {
-                if ($this->cosineSimilarity(a: $vec, b: $other) >= $threshold) {
-                    $isDup = true;
-                    break;
-                }
-            }
-            if ($isDup) {
-                $dropped++;
-                continue;
-            }
-            $kept[] = $row;
-            $keptVectors[] = $vec;
-        }
-        if ($dropped > 0) {
-            $emit(sprintf('  → %d themenähnliche Artikel aus Bucket entfernt (Threshold %.2f)', $dropped, $threshold));
-        }
-        return $kept;
-    }
-
-    private function cosineSimilarity(array $a, array $b): float
-    {
-        $n = min(count(value: $a), count(value: $b));
-        if ($n === 0) {
-            return 0.0;
-        }
-        $dot = 0.0;
-        $magA = 0.0;
-        $magB = 0.0;
-        for ($i = 0; $i < $n; $i++) {
-            $dot += $a[$i] * $b[$i];
-            $magA += $a[$i] * $a[$i];
-            $magB += $b[$i] * $b[$i];
-        }
-        if ($magA <= 0.0 || $magB <= 0.0) {
-            return 0.0;
-        }
-        return $dot / (sqrt(num: $magA) * sqrt(num: $magB));
     }
 
     /**
