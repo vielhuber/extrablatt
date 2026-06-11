@@ -4775,7 +4775,7 @@ final class Extrablatt
             "Du bist ein Zeitungs-Chefredakteur und schreibst ZWEI Texte für einen Privatleser, " .
             "der nicht jeden Tag liest:\n" .
             "  1. EINE \"Meldung des Tages\" — die brisanteste Story von HEUTE, themenübergreifend gewählt.\n" .
-            "  2. Eine Wochenübersicht mit 7 bis 9 Geschichten der letzten 7 Tage, geordnet nach Themengruppen.\n\n" .
+            "  2. Eine Wochenübersicht mit 5 bis 7 Geschichten der letzten 7 Tage, geordnet nach Themengruppen.\n\n" .
             "Hier alle Artikel-Schlagzeilen. Artikel von HEUTE sind mit '(heute)' markiert:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
             "MELDUNG DES TAGES (top_today): EIN Absatz von 1 bis 2 Sätzen zur BRISANTESTEN Story von heute, " .
@@ -4783,7 +4783,7 @@ final class Extrablatt
             "Wirtschaft, Wissen & Technik, Sport, Gesellschaft, …) die Story mit der größten Tragweite. " .
             "Wähle ausschliesslich aus den mit '(heute)' markierten Artikeln. Falls KEIN Artikel mit " .
             "'(heute)' markiert ist, setze \"top_today\" auf null.\n\n" .
-            "WOCHENÜBERSICHT (items): 7 bis 9 Absätze zu je 1 bis 2 Sätzen.\n" .
+            "WOCHENÜBERSICHT (items): 5 bis 7 Absätze zu je 1 bis 2 Sätzen.\n" .
             "Die zehn Themengruppen ergeben sich aus der Kategorie der Artikel:\n" .
             "  - Politik: Innenpolitik, Außenpolitik, Ukraine-Krieg, Nahost-Konflikt, Justiz & Verfassung\n" .
             "  - Wirtschaft & Finanzen: Konjunktur, Unternehmen, Börse & Märkte, Krypto, Arbeitsmarkt\n" .
@@ -4795,11 +4795,11 @@ final class Extrablatt
             "  - Lokal & Regional: Bayern, Berlin, Norddeutschland, NRW & Westdeutschland, Verkehr & Infrastruktur\n" .
             "  - Reise & Lifestyle: Kulinarik, Reiseziele, Wein & Getränke, Auto-Lifestyle, Haushaltstipps\n" .
             "  - Sonstiges: Auto & Verkehr, Garten & Pflanzen, Wetter & Natur, Unfälle, Verbraucher\n" .
-            "MENGEN-VORGABEN je Themengruppe:\n" .
-            "  - Wissen & Technik: 2 bis 3 Absätze (PFLICHT, wenn Stories im Set vorhanden — das ist der Lieblingsbereich des Lesers)\n" .
+            "MENGEN-VORGABEN je Themengruppe (Gesamtsumme MUSS zwischen 5 und 7 liegen):\n" .
+            "  - Wissen & Technik: GENAU 2 Absätze (PFLICHT, wenn Stories im Set vorhanden — das ist der Lieblingsbereich des Lesers)\n" .
             "  - Politik: 1 bis 2 Absätze\n" .
-            "  - Wirtschaft & Finanzen: 1 bis 2 Absätze\n" .
-            "  - Alle übrigen Gruppen (Sport, Kultur, Gesundheit, Gesellschaft, Lokal, Reise, Sonstiges): zusammen 1 bis 2 Absätze\n" .
+            "  - Wirtschaft & Finanzen: 1 Absatz\n" .
+            "  - Alle übrigen Gruppen (Sport, Kultur, Gesundheit, Gesellschaft, Lokal, Reise, Sonstiges): zusammen 0 bis 2 Absätze, nur wenn wirklich bedeutsam\n" .
             "REIHENFOLGE der Absätze im items-Array, STRIKT EINHALTEN:\n" .
             "  1. zuerst alle Wissen-&-Technik-Absätze (direkt nach der Meldung des Tages)\n" .
             "  2. dann alle Politik-Absätze\n" .
