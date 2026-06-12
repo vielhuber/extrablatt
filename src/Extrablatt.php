@@ -1558,10 +1558,11 @@ final class Extrablatt
     }
 
     /**
-     * Fetch the ARD Mediathek "Sendung" landing page and parse each video
-     * tile. ARD pages list segments per topic (each carrying the guest
-     * name in its title, e.g. "Joschka Fischer über die Verteidigung…")
-     * so a single overview fetch is enough — no per-episode crawl.
+     * Fetch the ARD Mediathek "Sendung" landing page and parse it into one
+     * FeedItem per full episode. Maischberger lists both the full Sendung
+     * ("maischberger am 10.06.2026") and per-guest topic segments; we keep
+     * only the full episodes and fold each day's segment titles into a
+     * guest list. Miosga / hart aber fair only list full episodes anyway.
      *
      * @return array<int, FeedItem>
      */
@@ -1578,13 +1579,13 @@ final class Extrablatt
             $body = $result->body;
             $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
-        return $this->parseArdMediathek(html: $body);
+        return $this->parseArdMediathek(html: $body, paper: $paper);
     }
 
     /**
      * @return array<int, FeedItem>
      */
-    private function parseArdMediathek(string $html): array
+    private function parseArdMediathek(string $html, string $paper): array
     {
         // Each video tile is an <a href="/video/<show>/<slug>/<broadcaster>/<id>">
         // wrapping <h3>title</h3>, a DD.MM.YYYY metadata line and a picture
@@ -1598,7 +1599,11 @@ final class Extrablatt
         if ($count === false || $count === 0) {
             return [];
         }
-        $items = [];
+        $papers = $this->papers();
+        $label = (string) ($papers[$paper]['label'] ?? $paper);
+        $defaultImage = (string) ($papers[$paper]['default_image'] ?? '');
+
+        $entries = [];
         $seenUrls = [];
         foreach ($matches as $m) {
             $path = $m[1];
@@ -1625,9 +1630,6 @@ final class Extrablatt
                 }
             }
             $imageUrl = null;
-            // Image refs appear URL-encoded inside Next.js image-optimizer URLs
-            // (urn%3Aard%3Aimage%3A<hash>), so accept both raw and percent-
-            // encoded colons before reconstructing the canonical image URL.
             if (preg_match(pattern: '~urn(?::|%3A)ard(?::|%3A)image(?::|%3A)([a-z0-9]+)~i', subject: $inner, matches: $im) === 1) {
                 $imageUrl = 'https://api.ardmediathek.de/image-service/images/urn:ard:image:' . $im[1] . '?w=1024';
             }
@@ -1636,18 +1638,127 @@ final class Extrablatt
                 continue;
             }
             $seenUrls[$fullUrl] = true;
-            $items[] = new FeedItem(
-                title: $title,
-                link: $fullUrl,
-                publishedAt: $publishedAt,
-                imageUrl: $imageUrl,
-                rating: null
-            );
-            if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
-                break;
+            // Episode slug is the second path segment (/video/<show>/<slug>/…).
+            $episodeSlug = '';
+            $parts = explode(separator: '/', string: trim(string: $path, characters: '/'));
+            if (count(value: $parts) >= 3) {
+                $episodeSlug = $parts[2];
+            }
+            $entries[] = [
+                'title' => $title,
+                'link' => $fullUrl,
+                'publishedAt' => $publishedAt,
+                'imageUrl' => $imageUrl,
+                'slug' => $episodeSlug,
+            ];
+        }
+        if ($entries === []) {
+            return [];
+        }
+
+        // Split into "full episode" entries (slug matches <show>-am-DD-MM-YYYY)
+        // and topic segments. If any full-episode entry exists we keep only
+        // those and aggregate the same-day segment titles into a guest list.
+        $hauptsendungen = [];
+        $segments = [];
+        foreach ($entries as $e) {
+            if (preg_match(pattern: '~-am-\d{1,2}-\d{1,2}-\d{2,4}(?:$|/)~', subject: $e['slug']) === 1) {
+                $hauptsendungen[] = $e;
+            } else {
+                $segments[] = $e;
+            }
+        }
+
+        $items = [];
+        if ($hauptsendungen !== []) {
+            $segmentsByDate = [];
+            foreach ($segments as $s) {
+                $key = date(format: 'Y-m-d', timestamp: $s['publishedAt']);
+                $segmentsByDate[$key] = $segmentsByDate[$key] ?? [];
+                $segmentsByDate[$key][] = $s;
+            }
+            foreach ($hauptsendungen as $h) {
+                $dateLabel = date(format: 'd.m.Y', timestamp: $h['publishedAt']);
+                $key = date(format: 'Y-m-d', timestamp: $h['publishedAt']);
+                $guests = [];
+                foreach ($segmentsByDate[$key] ?? [] as $seg) {
+                    foreach ($this->extractArdSegmentGuests(title: $seg['title']) as $name) {
+                        if (!in_array(needle: $name, haystack: $guests, strict: true)) {
+                            $guests[] = $name;
+                        }
+                    }
+                }
+                $newTitle = $label . ' ' . $dateLabel;
+                if ($guests !== []) {
+                    $newTitle .= ': Gäste: ' . implode(separator: ', ', array: $guests);
+                }
+                $items[] = new FeedItem(
+                    title: $newTitle,
+                    link: $h['link'],
+                    publishedAt: $h['publishedAt'],
+                    imageUrl: $h['imageUrl'] ?? ($defaultImage !== '' ? $defaultImage : null),
+                    rating: null
+                );
+                if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                    break;
+                }
+            }
+        } else {
+            // No "<show>-am-…" slug pattern → all entries are full episodes
+            // already (Miosga / hart aber fair). Just normalise the title.
+            foreach ($entries as $e) {
+                $dateLabel = date(format: 'd.m.Y', timestamp: $e['publishedAt']);
+                $items[] = new FeedItem(
+                    title: $label . ' ' . $dateLabel . ': ' . $e['title'],
+                    link: $e['link'],
+                    publishedAt: $e['publishedAt'],
+                    imageUrl: $e['imageUrl'] ?? ($defaultImage !== '' ? $defaultImage : null),
+                    rating: null
+                );
+                if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                    break;
+                }
             }
         }
         return $items;
+    }
+
+    /**
+     * Extract guest names from a Maischberger topic segment title. Segment
+     * titles look like "<Names> über <Topic>" or "<Names>: <Topic>". Take
+     * everything before the boundary marker, split on " und " / "," and
+     * keep the trailing 2-3 capitalised words to strip preceding role
+     * labels ("CDU-Außenpolitiker Armin Laschet" → "Armin Laschet").
+     *
+     * @return array<int, string>
+     */
+    private function extractArdSegmentGuests(string $title): array
+    {
+        // Boundary markers used in segment titles before the topic part.
+        if (preg_match(
+            pattern: '~^(.+?)(?:\s+über\s|\s+im\s+Gespräch|\s+diskutier|\s*[:·]\s)~u',
+            subject: $title,
+            matches: $bm
+        ) !== 1) {
+            return [];
+        }
+        $head = trim(string: $bm[1]);
+        $parts = preg_split(pattern: '~\s*(?:,|\s+und\s+)\s*~u', subject: $head) ?: [];
+        $names = [];
+        foreach ($parts as $part) {
+            $part = trim(string: (string) preg_replace(pattern: '~\s*\([^)]*\)\s*$~', replacement: '', subject: $part));
+            if (preg_match(
+                pattern: '~((?:[A-ZÄÖÜ][\p{L}\.\-]+\s+){1,2}[A-ZÄÖÜ][\p{L}\.\-]+)\s*$~u',
+                subject: $part,
+                matches: $pm
+            ) === 1) {
+                $name = trim(string: $pm[1]);
+                if ($name !== '' && !in_array(needle: $name, haystack: $names, strict: true)) {
+                    $names[] = $name;
+                }
+            }
+        }
+        return $names;
     }
 
     /**
@@ -1671,13 +1782,13 @@ final class Extrablatt
             $body = $result->body;
             $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
-        return $this->parseZdfMediathek(html: $body, slug: $slug);
+        return $this->parseZdfMediathek(html: $body, slug: $slug, paper: $paper);
     }
 
     /**
      * @return array<int, FeedItem>
      */
-    private function parseZdfMediathek(string $html, string $slug): array
+    private function parseZdfMediathek(string $html, string $slug, string $paper): array
     {
         // Strip "-114" / "-128" trailing show ID so the per-episode slug
         // pattern works for any show. ZDF episode slugs always follow
@@ -1698,6 +1809,9 @@ final class Extrablatt
             'januar' => 1, 'februar' => 2, 'märz' => 3, 'april' => 4, 'mai' => 5, 'juni' => 6,
             'juli' => 7, 'august' => 8, 'september' => 9, 'oktober' => 10, 'november' => 11, 'dezember' => 12
         ];
+        $papers = $this->papers();
+        $label = (string) ($papers[$paper]['label'] ?? $paper);
+        $defaultImage = (string) ($papers[$paper]['default_image'] ?? '');
         $items = [];
         $seenCanonical = [];
         foreach ($found[0] as $canonical) {
@@ -1718,28 +1832,48 @@ final class Extrablatt
             }
             $episodeUrl = 'https://www.zdf.de/video/talk/' . $slug . '/' . $canonical;
             $meta = $this->fetchZdfEpisodeGuests(url: $episodeUrl, canonical: $canonical);
-            // Episode <title> is the actual topic; og:title is the generic
-            // "Show vom DD. Monat YYYY". Combine both for a self-explanatory
-            // headline; fall back to a humanised slug if both fetches failed.
+            // The episode <title> tag carries the actual discussion topic
+            // (e.g. "Zum Auftakt der Fußball-WM: Die amerikanische Sport-
+            // kultur"); strip the show-name-and-channel suffix that the
+            // og:title injects on some episodes.
             $topic = (string) ($meta['topic'] ?? '');
-            $airing = (string) ($meta['airing'] ?? '');
-            if ($topic === '' && $airing === '') {
-                $combinedTitle = ucfirst(string: str_replace(search: '-', replace: ' ', subject: $canonical));
-            } elseif ($topic === '') {
-                $combinedTitle = $airing;
-            } elseif ($airing === '') {
-                $combinedTitle = $topic;
-            } else {
-                $combinedTitle = $airing . ' — ' . $topic;
+            // Strip trailing "| <Show> streamen im ZDF" / "| im ZDF" decoration.
+            $topic = (string) preg_replace(
+                pattern: '~\s*[|·]\s*(?:&quot;)?(?:' . preg_quote(str: $label, delimiter: '~') . '|maybrit illner|markus lanz)(?:&quot;)?\s+(?:streamen\s+)?im\s+ZDF\s*$~iu',
+                replacement: '',
+                subject: $topic
+            );
+            // Strip leading "<show name>: " prefix — the episode <title> tag
+            // sometimes repeats the show name before the actual topic.
+            $topic = (string) preg_replace(
+                pattern: '~^\s*(?:' . preg_quote(str: $label, delimiter: '~') . '|maybrit illner|markus lanz|illner|lanz)\s*:\s*~iu',
+                replacement: '',
+                subject: $topic
+            );
+            $topic = trim(string: $topic, characters: " \t\n\r\0\x0B\"'");
+            // If the topic boils down to the bare show label, drop it —
+            // older episode pages sometimes carry only "Markus Lanz" as
+            // <title> tag and would otherwise produce "Markus Lanz DD.MM.YYYY: Markus Lanz".
+            if (mb_strtolower(string: $topic) === mb_strtolower(string: $label)) {
+                $topic = '';
+            }
+            $dateLabel = date(format: 'd.m.Y', timestamp: $publishedAt);
+            $newTitle = $label . ' ' . $dateLabel;
+            if ($topic !== '') {
+                $newTitle .= ': ' . $topic;
             }
             if (!empty($meta['guests'])) {
-                $combinedTitle .= ' — Gäste: ' . implode(separator: ', ', array: $meta['guests']);
+                $newTitle .= ' — Gäste: ' . implode(separator: ', ', array: $meta['guests']);
+            }
+            $imageUrl = $meta['image'] ?? null;
+            if ($imageUrl === null && $defaultImage !== '') {
+                $imageUrl = $defaultImage;
             }
             $items[] = new FeedItem(
-                title: $combinedTitle,
+                title: $newTitle,
                 link: $episodeUrl,
                 publishedAt: $publishedAt,
-                imageUrl: $meta['image'] ?? null,
+                imageUrl: $imageUrl,
                 rating: null
             );
             // Cap per-show crawl: most viewers only care about the last week's
