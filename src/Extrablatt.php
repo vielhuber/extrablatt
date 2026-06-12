@@ -436,6 +436,7 @@ final class Extrablatt
 
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
+        $tvFilter = (string) ($_GET['tv'] ?? '');
         $statusFilter = (string) ($_GET['status'] ?? '');
         $paywallFilter = (string) ($_GET['paywall'] ?? '');
         $categoryFilter = (string) ($_GET['category'] ?? '');
@@ -489,10 +490,15 @@ final class Extrablatt
         }
 
         if ($customUrl === '') {
-            // Accept the synthetic "tv" sentinel that the dropdown surfaces
-            // for the five talk-show papers as a single combined entry.
-            if ($paperFilter !== '' && $paperFilter !== 'tv' && !array_key_exists(key: $paperFilter, array: $this->papers())) {
+            // Quelle-Dropdown holds only news papers — TV moves into its own
+            // dropdown bound to $tvFilter / $_GET['tv'].
+            if ($paperFilter !== '' && !array_key_exists(key: $paperFilter, array: $this->papers())) {
                 $paperFilter = '';
+            }
+            // TV-Dropdown: "" (off), "all" (sentinel for all 5 shows) or one
+            // of the configured talkshow papers.
+            if ($tvFilter !== '' && $tvFilter !== 'all' && !in_array(needle: $tvFilter, haystack: $this->talkshowPapers(), strict: true)) {
+                $tvFilter = '';
             }
             if (!in_array(needle: $statusFilter, haystack: ['', 'original', 'archive'], strict: true)) {
                 $statusFilter = '';
@@ -521,6 +527,7 @@ final class Extrablatt
             header(header: 'Content-Type: text/html; charset=utf-8');
             echo $this->renderDashboard(
                 paperFilter: $paperFilter,
+                tvFilter: $tvFilter,
                 statusFilter: $statusFilter,
                 paywallFilter: $paywallFilter,
                 categoryFilter: $categoryFilter,
@@ -5991,6 +5998,7 @@ final class Extrablatt
      */
     private function fetchArticlesForDashboard(
         string $paperFilter,
+        string $tvFilter,
         string $statusFilter,
         string $paywallFilter,
         string $categoryFilter,
@@ -6002,7 +6010,10 @@ final class Extrablatt
         $db = $this->openDatabase();
         $where = [];
         $params = [];
-        if ($paperFilter === 'tv') {
+        // TV-Filter has precedence over the paper dropdown — picking "Alle
+        // TV-Sendungen" expands to paper IN (<talkshowPapers>), picking a
+        // single show narrows to that paper.
+        if ($tvFilter === 'all') {
             $tvPapers = $this->talkshowPapers();
             if ($tvPapers !== []) {
                 $list = implode(separator: ',', array: array_map(
@@ -6011,6 +6022,9 @@ final class Extrablatt
                 ));
                 $where[] = 'paper IN (' . $list . ')';
             }
+        } elseif ($tvFilter !== '') {
+            $where[] = 'paper = :paper';
+            $params[':paper'] = $tvFilter;
         } elseif ($paperFilter !== '') {
             $where[] = 'paper = :paper';
             $params[':paper'] = $paperFilter;
@@ -6075,6 +6089,7 @@ final class Extrablatt
 
     private function renderDashboard(
         string $paperFilter,
+        string $tvFilter,
         string $statusFilter,
         string $paywallFilter,
         string $categoryFilter,
@@ -6086,6 +6101,7 @@ final class Extrablatt
     ): string {
         $articles = $this->fetchArticlesForDashboard(
             paperFilter: $paperFilter,
+            tvFilter: $tvFilter,
             statusFilter: $statusFilter,
             paywallFilter: $paywallFilter,
             categoryFilter: $categoryFilter,
@@ -6100,14 +6116,15 @@ final class Extrablatt
         // shows the bare domain (e.g. spiegel.de) instead of the brand
         // label. Strip www./m. prefixes for visual consistency.
         $paperList = $this->papers();
-        // Hide the five talk-show papers from the dropdown — they all share
-        // ardmediathek.de / zdf.de domains and would otherwise show up as
-        // duplicate-looking entries. A single "tv" sentinel entry below
-        // covers all of them via the IN-list filter.
-        $tvPapers = array_flip(array: $this->talkshowPapers());
-        // array_diff_key is variadic ($array, ...$arrays) — no second named
-        // parameter, so the additional arg must be positional.
-        $paperList = array_diff_key($paperList, $tvPapers);
+        // Hide the talk-show papers from the news-source dropdown — they get
+        // their own "TV" dropdown right next to it. Talk-show papers all
+        // share ardmediathek.de / zdf.de domains and would otherwise show
+        // up here as visually identical duplicate entries.
+        $tvPaperConfig = array_intersect_key(
+            $paperList,
+            array_flip($this->talkshowPapers())
+        );
+        $paperList = array_diff_key($paperList, $tvPaperConfig);
         $paperList = array_map(
             callback: function (array $info): array {
                 $host = (string) parse_url(url: $info['url'] ?? '', component: PHP_URL_HOST);
@@ -6121,15 +6138,29 @@ final class Extrablatt
             callback: fn(array $a, array $b): int => strcasecmp(string1: $a['domain'], string2: $b['domain'])
         );
         $paperOptions = '<option value="">Quelle</option>';
-        if ($tvPapers !== []) {
-            $sel = $paperFilter === 'tv' ? ' selected' : '';
-            $paperOptions .= '<option value="tv"' . $sel . '>TV-Sendungen</option>';
-        }
         foreach ($paperList as $key => $info) {
             $escapedKey = htmlspecialchars(string: (string) $key, flags: ENT_QUOTES);
             $escapedDomain = htmlspecialchars(string: $info['domain'], flags: ENT_QUOTES);
             $sel = $paperFilter === $key ? ' selected' : '';
             $paperOptions .= '<option value="' . $escapedKey . '"' . $sel . '>' . $escapedDomain . '</option>';
+        }
+
+        // TV-Dropdown: "TV" placeholder, "Alle TV-Sendungen" (sentinel "all"),
+        // then one option per configured talkshow paper sorted by label.
+        $tvOptions = '<option value="">TV</option>';
+        if ($tvPaperConfig !== []) {
+            $allSel = $tvFilter === 'all' ? ' selected' : '';
+            $tvOptions .= '<option value="all"' . $allSel . '>Alle TV-Sendungen</option>';
+            uasort(
+                array: $tvPaperConfig,
+                callback: fn(array $a, array $b): int => strcasecmp(string1: (string) ($a['label'] ?? ''), string2: (string) ($b['label'] ?? ''))
+            );
+            foreach ($tvPaperConfig as $key => $info) {
+                $escapedKey = htmlspecialchars(string: (string) $key, flags: ENT_QUOTES);
+                $escapedLabel = htmlspecialchars(string: (string) ($info['label'] ?? $key), flags: ENT_QUOTES);
+                $sel = $tvFilter === $key ? ' selected' : '';
+                $tvOptions .= '<option value="' . $escapedKey . '"' . $sel . '>' . $escapedLabel . '</option>';
+            }
         }
 
         $statusOptions = '<option value="">Status</option>';
@@ -6313,7 +6344,7 @@ final class Extrablatt
         // the result set. Without any filter the global total (excluding
         // dupes) is shown, so the header reflects the real archive size and
         // not just the magic/unread default slice.
-        $isFiltered = $paperFilter !== '' || $statusFilter !== '' || $paywallFilter !== ''
+        $isFiltered = $paperFilter !== '' || $tvFilter !== '' || $statusFilter !== '' || $paywallFilter !== ''
             || $categoryFilter !== '' || $readFilter !== '' || $magicFilter !== '' || $thumbFilter !== '';
         if ($isFiltered) {
             $displayCount = $count;
@@ -6333,15 +6364,19 @@ final class Extrablatt
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isZeitung ? '' : ' viewnav__tab--active';
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
+        // onchange="filterChange(this)" auto-flips Magisch → "Alle" when the
+        // user picks a single filter on an otherwise empty form. See the
+        // <script> at the bottom of the template.
         $meldungenBlock = $isZeitung ? '' : <<<HTML
                 <form class="filters" method="get" action="/">
                     <input type="hidden" name="view" value="meldungen">
-                    <select name="paper" onchange="this.form.submit()">{$paperOptions}</select>
-                    <select name="status" onchange="this.form.submit()">{$statusOptions}</select>
-                    <select name="paywall" onchange="this.form.submit()">{$paywallOptions}</select>
-                    <select name="thumb" onchange="this.form.submit()">{$thumbOptions}</select>
-                    <select name="category" onchange="this.form.submit()">{$categoryOptions}</select>
-                    <select name="read" onchange="this.form.submit()">{$readOptions}</select>
+                    <select name="paper" onchange="filterChange(this)">{$paperOptions}</select>
+                    <select name="tv" onchange="filterChange(this)">{$tvOptions}</select>
+                    <select name="status" onchange="filterChange(this)">{$statusOptions}</select>
+                    <select name="paywall" onchange="filterChange(this)">{$paywallOptions}</select>
+                    <select name="thumb" onchange="filterChange(this)">{$thumbOptions}</select>
+                    <select name="category" onchange="filterChange(this)">{$categoryOptions}</select>
+                    <select name="read" onchange="filterChange(this)">{$readOptions}</select>
                     <select name="magic" onchange="this.form.submit()">{$magicOptions}</select>
                     <select name="sort" onchange="this.form.submit()">{$sortDropdown}</select>
                 </form>
@@ -6581,6 +6616,25 @@ HTML;
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
+                // Filter change handler: auto-flips Magisch → "Alle" when
+                // the picked filter ends up being the ONLY active one (i.e.
+                // every other filter dropdown is still on its default).
+                // Prevents the common 0-results case where the Magisch
+                // bucket (top-10 frozen items) misses the chosen filter.
+                window.filterChange = function (sel) {
+                    var form = sel.form;
+                    var FILTER_FIELDS = ['paper','tv','status','paywall','thumb','category','read'];
+                    var activeCount = 0;
+                    for (var i = 0; i < FILTER_FIELDS.length; i++) {
+                        var el = form.elements[FILTER_FIELDS[i]];
+                        if (el && el.value !== '') activeCount++;
+                    }
+                    if (activeCount === 1 && sel.value !== '') {
+                        var mg = form.elements['magic'];
+                        if (mg && mg.value !== 'all') mg.value = 'all';
+                    }
+                    form.submit();
+                };
                 // Recount visible articles, update the header label, and
                 // surface the "Et voilà" empty-state when the last item is
                 // swiped away (the server-rendered placeholder only fires on
