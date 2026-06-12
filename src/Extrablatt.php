@@ -479,7 +479,9 @@ final class Extrablatt
         }
 
         if ($customUrl === '') {
-            if ($paperFilter !== '' && !array_key_exists(key: $paperFilter, array: $this->papers())) {
+            // Accept the synthetic "tv" sentinel that the dropdown surfaces
+            // for the five talk-show papers as a single combined entry.
+            if ($paperFilter !== '' && $paperFilter !== 'tv' && !array_key_exists(key: $paperFilter, array: $this->papers())) {
                 $paperFilter = '';
             }
             if (!in_array(needle: $statusFilter, haystack: ['', 'original', 'archive'], strict: true)) {
@@ -5246,18 +5248,18 @@ final class Extrablatt
             $todayCount,
             $topToday !== null ? 'ja' : 'nein',
             $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein',
-            $tv !== null ? sprintf('%d Sendungen', count(value: $tv['shows'] ?? [])) : 'nein'
+            $tv !== null ? sprintf('%d Sendungen', (int) ($tv['count'] ?? 0)) : 'nein'
         ));
     }
 
     /**
-     * Pull the last 7 days of TV-tagged talk-show episodes from the DB and
-     * let the LLM summarise what was discussed in 2-3 sentences. Returns
-     * null when no episodes exist or the AI call fails so the digest still
-     * renders cleanly without the block.
+     * Pull the last 7 days of talk-show episodes, ask the LLM to verdichten
+     * the two to four brisantesten Sendungen as a single prose paragraph.
+     * Returns null when no episodes exist or no prose could be produced —
+     * the digest then simply omits the block.
      *
      * @param array<string, mixed> $aiConfig
-     * @return array{prose: string, shows: array<int, array{paper: string, title: string, url: string, published_at: int}>}|null
+     * @return array{prose: string, count: int}|null
      */
     private function buildTalkshowBlock(PDO $db, array $aiConfig, string $apiKey, int $cutoff): ?array
     {
@@ -5271,7 +5273,7 @@ final class Extrablatt
         }
         $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $talkshowPapers));
         $stmt = $db->prepare(query: "
-            SELECT paper, title, url, published_at
+            SELECT paper, title, published_at
             FROM articles
             WHERE paper IN ({$list})
               AND published_at >= :since
@@ -5286,26 +5288,19 @@ final class Extrablatt
             return null;
         }
         $papers = $this->papers();
-        $shows = [];
         $lines = [];
         foreach ($rows as $r) {
             $paperKey = (string) ($r['paper'] ?? '');
             $label = (string) ($papers[$paperKey]['label'] ?? $paperKey);
             $title = (string) ($r['title'] ?? '');
             $publishedAt = (int) ($r['published_at'] ?? 0);
-            $shows[] = [
-                'paper' => $paperKey,
-                'title' => $title,
-                'url' => (string) ($r['url'] ?? ''),
-                'published_at' => $publishedAt,
-            ];
             $lines[] = sprintf('- [%s, %s] %s', $label, date(format: 'd.m.', timestamp: $publishedAt), mb_substr(string: $title, start: 0, length: 220));
         }
         $prose = $this->generateTalkshowProse(lines: $lines, aiConfig: $aiConfig, apiKey: $apiKey);
-        if ($prose === null) {
-            $prose = '';
+        if ($prose === null || $prose === '') {
+            return null;
         }
-        return ['prose' => $prose, 'shows' => $shows];
+        return ['prose' => $prose, 'count' => count(value: $rows)];
     }
 
     /**
@@ -5324,13 +5319,17 @@ final class Extrablatt
         }
         $prompt = "Du erhältst die Schlagzeilen der letzten politischen Talkshows " .
             "(Maischberger, Markus Lanz, Caren Miosga, hart aber fair, Maybrit Illner) " .
-            "der vergangenen 7 Tage. Schreibe einen flüssigen, prägnanten Absatz auf Deutsch " .
-            "(2 bis 3 Sätze), der die wichtigsten Themen und prominentesten Gäste der Woche zusammenfasst.\n\n" .
+            "der vergangenen 7 Tage. Wähle die 2 bis 4 BRISANTESTEN Sendungen aus und " .
+            "beschreibe sie in einem flüssigen, prägnanten Fließtext-Absatz auf Deutsch " .
+            "(3 bis 5 Sätze).\n\n" .
             "Schlagzeilen:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
             "Anforderungen:\n" .
-            "- Fokus auf die DOMINIERENDEN Themen und 3-6 prominente Gäste namentlich.\n" .
-            "- Hebe 2-4 zentrale Begriffe (Themen, Personen) mit Markdown-Bold (**…**) hervor.\n" .
-            "- Keine Aufzählung, kein Datum pro Sendung, keine Sender-Liste.\n" .
+            "- Wähle die brisantesten Diskussionen — Streit, harte Konfrontation, große Tragweite — " .
+            "  NICHT die Sendungen mit den dominantesten Themen, sondern die mit der schärfsten Auseinandersetzung.\n" .
+            "- Beschreibe für jede gewählte Sendung KURZ: welche Show, welches Thema, welche Pointe (z. B. " .
+            "  'Bei Lanz prallten X und Y über Z aufeinander'); Gäste-Namen organisch einbauen, keine reine Liste.\n" .
+            "- Hebe 3-5 zentrale Begriffe (Themen, Personen, Konfliktlinien) mit Markdown-Bold (**…**) hervor.\n" .
+            "- Keine Aufzählung mit Spiegelstrichen, kein Datum, keine Sender-Übersicht.\n" .
             "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
@@ -5682,51 +5681,24 @@ final class Extrablatt
     }
 
     /**
-     * Render the Polit-Talk weekly recap. Mirrors the weather block: a
-     * single LLM-written prose paragraph, plus a compact list of the
-     * actual episodes underneath for click-through.
+     * Render the Polit-Talk weekly recap as a single LLM-written prose
+     * paragraph (analog zum Wetterblock). Die konkreten Episoden landen
+     * gefiltert in "Meldungen" — hier nur die textliche Verdichtung der
+     * brisantesten Sendungen.
      *
-     * @param array{prose?: string, shows?: array<int, array<string, mixed>>} $tv
+     * @param array{prose?: string} $tv
      */
     private function buildTalkshowSection(array $tv): string
     {
-        $shows = isset($tv['shows']) && is_array(value: $tv['shows']) ? $tv['shows'] : [];
         $prose = trim(string: (string) ($tv['prose'] ?? ''));
-        if ($shows === [] && $prose === '') {
+        if ($prose === '') {
             return '';
         }
-        $proseHtml = '';
-        if ($prose !== '') {
-            $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
-            $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
-            $proseHtml = '<p>' . $escaped . '</p>';
-        }
-        $papers = $this->papers();
-        $listItems = '';
-        foreach ($shows as $s) {
-            if (!is_array(value: $s)) {
-                continue;
-            }
-            $paperKey = (string) ($s['paper'] ?? '');
-            $label = (string) ($papers[$paperKey]['label'] ?? $paperKey);
-            $title = (string) ($s['title'] ?? '');
-            $url = (string) ($s['url'] ?? '');
-            $publishedAt = (int) ($s['published_at'] ?? 0);
-            if ($title === '' || $url === '') {
-                continue;
-            }
-            $dateLabel = $publishedAt > 0 ? date(format: 'd.m.', timestamp: $publishedAt) : '';
-            $listItems .= '<li><a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES) . '" target="_blank" rel="noopener">'
-                . '<span class="digest__tv-paper">' . htmlspecialchars(string: $label, flags: ENT_QUOTES) . '</span>'
-                . ($dateLabel !== '' ? ' <span class="digest__tv-date">' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . '</span>' : '')
-                . ' <span class="digest__tv-title">' . htmlspecialchars(string: $title, flags: ENT_QUOTES) . '</span>'
-                . '</a></li>';
-        }
-        $listHtml = $listItems !== '' ? '<ul class="digest__tv-list">' . $listItems . '</ul>' : '';
+        $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
+        $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
         return '<div class="digest__tv">'
             . '<h2 class="digest__title">TV-Talkshows <span class="digest__date">letzte 7 Tage</span></h2>'
-            . $proseHtml
-            . $listHtml
+            . '<p>' . $escaped . '</p>'
             . '</div>';
     }
 
@@ -5862,7 +5834,16 @@ final class Extrablatt
         $db = $this->openDatabase();
         $where = [];
         $params = [];
-        if ($paperFilter !== '') {
+        if ($paperFilter === 'tv') {
+            $tvPapers = $this->talkshowPapers();
+            if ($tvPapers !== []) {
+                $list = implode(separator: ',', array: array_map(
+                    callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'",
+                    array: $tvPapers
+                ));
+                $where[] = 'paper IN (' . $list . ')';
+            }
+        } elseif ($paperFilter !== '') {
             $where[] = 'paper = :paper';
             $params[':paper'] = $paperFilter;
         }
@@ -5951,6 +5932,12 @@ final class Extrablatt
         // shows the bare domain (e.g. spiegel.de) instead of the brand
         // label. Strip www./m. prefixes for visual consistency.
         $paperList = $this->papers();
+        // Hide the five talk-show papers from the dropdown — they all share
+        // ardmediathek.de / zdf.de domains and would otherwise show up as
+        // duplicate-looking entries. A single "tv" sentinel entry below
+        // covers all of them via the IN-list filter.
+        $tvPapers = array_flip(array: $this->talkshowPapers());
+        $paperList = array_diff_key(array: $paperList, array2: $tvPapers);
         $paperList = array_map(
             callback: function (array $info): array {
                 $host = (string) parse_url(url: $info['url'] ?? '', component: PHP_URL_HOST);
@@ -5964,6 +5951,10 @@ final class Extrablatt
             callback: fn(array $a, array $b): int => strcasecmp(string1: $a['domain'], string2: $b['domain'])
         );
         $paperOptions = '<option value="">Quelle</option>';
+        if ($tvPapers !== []) {
+            $sel = $paperFilter === 'tv' ? ' selected' : '';
+            $paperOptions .= '<option value="tv"' . $sel . '>TV-Sendungen</option>';
+        }
         foreach ($paperList as $key => $info) {
             $escapedKey = htmlspecialchars(string: (string) $key, flags: ENT_QUOTES);
             $escapedDomain = htmlspecialchars(string: $info['domain'], flags: ENT_QUOTES);
@@ -6294,15 +6285,7 @@ HTML;
                 .digest__weather { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
-                .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0 0 0.6rem; }
-                .digest__tv-list { list-style: none; padding: 0; margin: 0; font-family: system-ui, sans-serif; font-size: 13px; }
-                .digest__tv-list li { padding: 4px 0; border-bottom: 1px dotted #e4e4e7; }
-                .digest__tv-list li:last-child { border-bottom: 0; }
-                .digest__tv-list a { color: #18181b; text-decoration: none; display: block; }
-                .digest__tv-list a:hover { text-decoration: underline; }
-                .digest__tv-paper { font-weight: 700; color: #52525b; margin-right: 0.4em; }
-                .digest__tv-date { color: #a1a1aa; margin-right: 0.4em; font-variant-numeric: tabular-nums; }
-                .digest__tv-title { color: #18181b; }
+                .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
                 .item { position: relative; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; margin: 0 0 10px; transition: opacity 0.18s ease, max-height 0.18s ease, margin 0.18s ease, border-width 0.18s ease; contain: layout paint style; content-visibility: auto; contain-intrinsic-size: 0 92px; }
                 .item__swipe { position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: #fff; touch-action: pan-y; transition: transform 0.18s ease; will-change: transform; }
@@ -6396,11 +6379,6 @@ HTML;
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
-                html[data-theme="dark"] .digest__tv-list li { border-bottom-color: #27272a; }
-                html[data-theme="dark"] .digest__tv-list a,
-                html[data-theme="dark"] .digest__tv-title { color: #e4e4e7; }
-                html[data-theme="dark"] .digest__tv-paper { color: #a1a1aa; }
-                html[data-theme="dark"] .digest__tv-date { color: #71717a; }
                 html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
