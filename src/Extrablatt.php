@@ -168,6 +168,7 @@ final class Extrablatt
     // Only enforced for the two social sources (reddit, x) — classical RSS
     // feeds and sitemaps are ingested without any cap.
     private const SOCIAL_FEED_MAX_ITEMS = 100;
+    private const TV_MAX_AGE_DAYS = 30;
     private const DASHBOARD_MAX_ITEMS = 10000;
     private const ARCHIVE_CHECK_CONCURRENCY = 8;
     private const THUMBNAIL_SIZE = 160;
@@ -175,11 +176,20 @@ final class Extrablatt
     private const THUMBNAIL_MAX_SOURCE_BYTES = 8_000_000;
     private const FETCH_CONNECT_TIMEOUT_SECONDS = 8;
     private const FETCH_MAX_TIME_SECONDS = 20;
-    // Fixed HMAC key for signing the auth cookie. Anyone with read access to
-    // this source file can forge cookies — which is identical to having the
-    // password — so the security floor is the same as the password gate
-    // itself. Changing the constant invalidates all existing sessions.
+    // Public, non-secret salt for domain-separating the cookie-signing key.
+    // The actual signing key is derived per deployment from AUTH_PASSWORD via
+    // authCookieKey(), so a valid cookie cannot be forged without knowing the
+    // password. Changing this salt (or the password) invalidates all sessions.
     private const AUTH_COOKIE_KEY = 'extrablatt-cookie-key-v1';
+
+    /**
+     * Per-deployment HMAC key for the auth cookie, derived from AUTH_PASSWORD
+     * so the signing secret is never present in the (public) source.
+     */
+    private function authCookieKey(string $password): string
+    {
+        return hash_hmac(algo: 'sha256', data: self::AUTH_COOKIE_KEY, key: $password);
+    }
 
     /**
      * Fetch a page and extract the best representative image URL using
@@ -266,7 +276,7 @@ final class Extrablatt
         if (!ctype_digit(text: $expiry) || (int) $expiry < time()) {
             return false;
         }
-        $expected = hash_hmac(algo: 'sha256', data: $expiry, key: self::AUTH_COOKIE_KEY);
+        $expected = hash_hmac(algo: 'sha256', data: $expiry, key: $this->authCookieKey($password));
         return hash_equals(known_string: $expected, user_string: $sig);
     }
 
@@ -316,7 +326,7 @@ final class Extrablatt
         }
         // 1-year session so the PWA stays logged in.
         $expiry = time() + 365 * 86400;
-        $sig = hash_hmac(algo: 'sha256', data: (string) $expiry, key: self::AUTH_COOKIE_KEY);
+        $sig = hash_hmac(algo: 'sha256', data: (string) $expiry, key: $this->authCookieKey($expected));
         $this->setAuthCookie(expiry: $expiry, signature: $sig);
         header(header: 'Location: /');
     }
@@ -1669,6 +1679,11 @@ final class Extrablatt
             }
         }
 
+        // Skip anything older than TV_MAX_AGE_DAYS — ARD-Mediathek keeps
+        // some shows (hart aber fair, Miosga) online for half a year, but
+        // the dashboard only wants the recent episodes.
+        $ageCutoff = time() - self::TV_MAX_AGE_DAYS * 86400;
+
         $items = [];
         if ($hauptsendungen !== []) {
             $segmentsByDate = [];
@@ -1678,6 +1693,9 @@ final class Extrablatt
                 $segmentsByDate[$key][] = $s;
             }
             foreach ($hauptsendungen as $h) {
+                if ($h['publishedAt'] < $ageCutoff) {
+                    continue;
+                }
                 $dateLabel = date(format: 'd.m.Y', timestamp: $h['publishedAt']);
                 $key = date(format: 'Y-m-d', timestamp: $h['publishedAt']);
                 $guests = [];
@@ -1707,6 +1725,9 @@ final class Extrablatt
             // No "<show>-am-…" slug pattern → all entries are full episodes
             // already (Miosga / hart aber fair). Just normalise the title.
             foreach ($entries as $e) {
+                if ($e['publishedAt'] < $ageCutoff) {
+                    continue;
+                }
                 $dateLabel = date(format: 'd.m.Y', timestamp: $e['publishedAt']);
                 $items[] = new FeedItem(
                     title: $label . ' ' . $dateLabel . ': ' . $e['title'],
@@ -1805,13 +1826,15 @@ final class Extrablatt
         if ($count === false || $count === 0) {
             return [];
         }
+        // ZDF slugs transliterate "März" to "maerz" (ä → ae); accept both.
         $monthMap = [
-            'januar' => 1, 'februar' => 2, 'märz' => 3, 'april' => 4, 'mai' => 5, 'juni' => 6,
+            'januar' => 1, 'februar' => 2, 'märz' => 3, 'maerz' => 3, 'april' => 4, 'mai' => 5, 'juni' => 6,
             'juli' => 7, 'august' => 8, 'september' => 9, 'oktober' => 10, 'november' => 11, 'dezember' => 12
         ];
         $papers = $this->papers();
         $label = (string) ($papers[$paper]['label'] ?? $paper);
         $defaultImage = (string) ($papers[$paper]['default_image'] ?? '');
+        $ageCutoff = time() - self::TV_MAX_AGE_DAYS * 86400;
         $items = [];
         $seenCanonical = [];
         foreach ($found[0] as $canonical) {
@@ -1820,15 +1843,21 @@ final class Extrablatt
             }
             $seenCanonical[$canonical] = true;
 
-            $publishedAt = time();
+            // ZDF slugs always carry an explicit date — if it doesn't parse
+            // we treat the episode as undateable and skip rather than
+            // dropping it into "today" with a wrong timestamp.
+            $publishedAt = null;
             if (preg_match(pattern: '~-vom-(\d{1,2})-([a-zäöü]+)-(\d{4})-~u', subject: $canonical, matches: $dm) === 1) {
-                $mon = $monthMap[$dm[2]] ?? 0;
+                $mon = $monthMap[mb_strtolower(string: $dm[2])] ?? 0;
                 if ($mon > 0) {
                     $ts = mktime(hour: 23, minute: 15, second: 0, month: $mon, day: (int) $dm[1], year: (int) $dm[3]);
                     if ($ts !== false) {
                         $publishedAt = $ts;
                     }
                 }
+            }
+            if ($publishedAt === null || $publishedAt < $ageCutoff) {
+                continue;
             }
             $episodeUrl = 'https://www.zdf.de/video/talk/' . $slug . '/' . $canonical;
             $meta = $this->fetchZdfEpisodeGuests(url: $episodeUrl, canonical: $canonical);
@@ -3368,7 +3397,12 @@ final class Extrablatt
                 ':published_at' => $item->publishedAt,
                 ':status' => $status,
                 ':paywall' => $pw === null ? null : ($pw ? 1 : 0),
-                ':image_url' => $item->imageUrl,
+                // Defence in depth: a sporadic Phase-7 bug (seen for ARD
+                // talk-show items) drops FeedItem->imageUrl somewhere between
+                // Phase 1 and here even though the parser returned a value.
+                // Fall back to the same image we already prepared for the
+                // thumbnail download so the column always lands non-null.
+                ':image_url' => $item->imageUrl ?? ($effectiveImages[$item->link] ?? null),
                 ':thumbnail' => $thumb,
                 ':category' => $cat,
                 ':rating' => $item->rating,
