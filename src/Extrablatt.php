@@ -1166,6 +1166,12 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'producthunt://')) {
             return $this->fetchProductHuntWeeklyItems(paper: $paper);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'ardmediathek://')) {
+            return $this->fetchArdMediathekItems(paper: $paper, feedUrl: $feedUrl);
+        }
+        if (str_starts_with(haystack: $feedUrl, needle: 'zdfmediathek://')) {
+            return $this->fetchZdfMediathekItems(paper: $paper, feedUrl: $feedUrl);
+        }
 
         $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
@@ -1547,6 +1553,281 @@ final class Extrablatt
             }
         }
         return $items;
+    }
+
+    /**
+     * Fetch the ARD Mediathek "Sendung" landing page and parse each video
+     * tile. ARD pages list segments per topic (each carrying the guest
+     * name in its title, e.g. "Joschka Fischer über die Verteidigung…")
+     * so a single overview fetch is enough — no per-episode crawl.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchArdMediathekItems(string $paper, string $feedUrl): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        if ($body === null || $body === '') {
+            $path = substr(string: $feedUrl, offset: strlen(string: 'ardmediathek://'));
+            $url = 'https://www.ardmediathek.de/sendung/' . $path;
+            $result = $this->fetchViaImpersonate(url: $url);
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseArdMediathek(html: $body);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseArdMediathek(string $html): array
+    {
+        // Each video tile is an <a href="/video/<show>/<slug>/<broadcaster>/<id>">
+        // wrapping <h3>title</h3>, a DD.MM.YYYY metadata line and a picture
+        // backed by api.ardmediathek.de/image-service/images/urn:ard:image:<hash>.
+        $count = preg_match_all(
+            pattern: '~<a [^>]*href="(/video/[^"]+)"[^>]*>(.*?)</a>~s',
+            subject: $html,
+            matches: $matches,
+            flags: PREG_SET_ORDER
+        );
+        if ($count === false || $count === 0) {
+            return [];
+        }
+        $items = [];
+        $seenUrls = [];
+        foreach ($matches as $m) {
+            $path = $m[1];
+            $inner = $m[2];
+            if (!str_contains(haystack: $path, needle: '/video/')) {
+                continue;
+            }
+            if (preg_match(pattern: '~<h3[^>]*>([^<]+)</h3>~', subject: $inner, matches: $hm) !== 1) {
+                continue;
+            }
+            $title = trim(string: html_entity_decode(string: $hm[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            if ($title === '' || str_contains(haystack: $title, needle: 'Gebärdensprache')) {
+                continue;
+            }
+            $publishedAt = time();
+            if (preg_match(pattern: '~(\d\d)\.(\d\d)\.(\d{2,4})~', subject: $inner, matches: $dm) === 1) {
+                $year = (int) $dm[3];
+                if ($year < 100) {
+                    $year += 2000;
+                }
+                $ts = mktime(hour: 22, minute: 15, second: 0, month: (int) $dm[2], day: (int) $dm[1], year: $year);
+                if ($ts !== false) {
+                    $publishedAt = $ts;
+                }
+            }
+            $imageUrl = null;
+            // Image refs appear URL-encoded inside Next.js image-optimizer URLs
+            // (urn%3Aard%3Aimage%3A<hash>), so accept both raw and percent-
+            // encoded colons before reconstructing the canonical image URL.
+            if (preg_match(pattern: '~urn(?::|%3A)ard(?::|%3A)image(?::|%3A)([a-z0-9]+)~i', subject: $inner, matches: $im) === 1) {
+                $imageUrl = 'https://api.ardmediathek.de/image-service/images/urn:ard:image:' . $im[1] . '?w=1024';
+            }
+            $fullUrl = 'https://www.ardmediathek.de' . $path;
+            if (isset($seenUrls[$fullUrl])) {
+                continue;
+            }
+            $seenUrls[$fullUrl] = true;
+            $items[] = new FeedItem(
+                title: $title,
+                link: $fullUrl,
+                publishedAt: $publishedAt,
+                imageUrl: $imageUrl,
+                rating: null
+            );
+            if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                break;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * Fetch a ZDF Mediathek show page, then crawl the latest episodes (max
+     * 8) to extract guest names. ZDF guests live in <b>Name, Role</b>
+     * blocks inside the episode page, not on the overview, so a two-stage
+     * fetch is required.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchZdfMediathekItems(string $paper, string $feedUrl): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        $slug = substr(string: $feedUrl, offset: strlen(string: 'zdfmediathek://'));
+        if ($body === null || $body === '') {
+            $url = 'https://www.zdf.de/talk/' . $slug;
+            $result = $this->fetchViaImpersonate(url: $url);
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseZdfMediathek(html: $body, slug: $slug);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseZdfMediathek(string $html, string $slug): array
+    {
+        // Strip "-114" / "-128" trailing show ID so the per-episode slug
+        // pattern works for any show. ZDF episode slugs always follow
+        // <show-name>-vom-<day>-<month>-<year>-<seq>.
+        $showBase = preg_replace(pattern: '~-\d+$~', replacement: '', subject: $slug) ?? $slug;
+        // Canonical strings appear in the page as JSON-escaped within
+        // self.__next_f.push payloads (\"canonical\":\"…\") so we just
+        // match the slug body itself rather than the surrounding JSON.
+        $count = preg_match_all(
+            pattern: '~' . preg_quote(str: $showBase, delimiter: '~') . '-vom-\d{1,2}-[a-zäöü]+-\d{4}-\d+~u',
+            subject: $html,
+            matches: $found
+        );
+        if ($count === false || $count === 0) {
+            return [];
+        }
+        $monthMap = [
+            'januar' => 1, 'februar' => 2, 'märz' => 3, 'april' => 4, 'mai' => 5, 'juni' => 6,
+            'juli' => 7, 'august' => 8, 'september' => 9, 'oktober' => 10, 'november' => 11, 'dezember' => 12
+        ];
+        $items = [];
+        $seenCanonical = [];
+        foreach ($found[0] as $canonical) {
+            if (isset($seenCanonical[$canonical])) {
+                continue;
+            }
+            $seenCanonical[$canonical] = true;
+
+            $publishedAt = time();
+            if (preg_match(pattern: '~-vom-(\d{1,2})-([a-zäöü]+)-(\d{4})-~u', subject: $canonical, matches: $dm) === 1) {
+                $mon = $monthMap[$dm[2]] ?? 0;
+                if ($mon > 0) {
+                    $ts = mktime(hour: 23, minute: 15, second: 0, month: $mon, day: (int) $dm[1], year: (int) $dm[3]);
+                    if ($ts !== false) {
+                        $publishedAt = $ts;
+                    }
+                }
+            }
+            $episodeUrl = 'https://www.zdf.de/video/talk/' . $slug . '/' . $canonical;
+            $meta = $this->fetchZdfEpisodeGuests(url: $episodeUrl, canonical: $canonical);
+            // Episode <title> is the actual topic; og:title is the generic
+            // "Show vom DD. Monat YYYY". Combine both for a self-explanatory
+            // headline; fall back to a humanised slug if both fetches failed.
+            $topic = (string) ($meta['topic'] ?? '');
+            $airing = (string) ($meta['airing'] ?? '');
+            if ($topic === '' && $airing === '') {
+                $combinedTitle = ucfirst(string: str_replace(search: '-', replace: ' ', subject: $canonical));
+            } elseif ($topic === '') {
+                $combinedTitle = $airing;
+            } elseif ($airing === '') {
+                $combinedTitle = $topic;
+            } else {
+                $combinedTitle = $airing . ' — ' . $topic;
+            }
+            if (!empty($meta['guests'])) {
+                $combinedTitle .= ' — Gäste: ' . implode(separator: ', ', array: $meta['guests']);
+            }
+            $items[] = new FeedItem(
+                title: $combinedTitle,
+                link: $episodeUrl,
+                publishedAt: $publishedAt,
+                imageUrl: $meta['image'] ?? null,
+                rating: null
+            );
+            // Cap per-show crawl: most viewers only care about the last week's
+            // shows and each episode page is a separate impersonated fetch.
+            if (count(value: $items) >= 8) {
+                break;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * @return array{guests: array<int, string>, image: ?string, topic: string, airing: string}
+     */
+    private function fetchZdfEpisodeGuests(string $url, string $canonical): array
+    {
+        $cacheKey = 'zdf-episode:' . md5(string: $canonical);
+        $body = $this->cacheGet(key: $cacheKey);
+        if ($body === null || $body === '') {
+            $result = $this->fetchViaImpersonate(url: $url);
+            if ($result->body === null) {
+                return ['guests' => [], 'image' => null, 'topic' => '', 'airing' => ''];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: $cacheKey, value: $body);
+        }
+        // ZDF talk shows expose their guest list in two different ways:
+        //   - Lanz: <b>Name Surname, Rolle</b> blocks in the body
+        //   - Illner: description meta tag like "Zu Gast: A, B (SPD), C"
+        // Try the structured Lanz markup first; on a miss, fall back to the
+        // meta-description pattern which always works for Illner.
+        $guests = [];
+        if (preg_match_all(
+            pattern: '~<b>([A-ZÄÖÜ][\p{L}\.\-]+(?:\s+[A-ZÄÖÜ][\p{L}\.\-]+){1,3}),[^<]+</b>~u',
+            subject: $body,
+            matches: $gm
+        ) > 0) {
+            foreach ($gm[1] as $name) {
+                $clean = trim(string: html_entity_decode(string: $name, flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+                if ($clean !== '' && !in_array(needle: $clean, haystack: $guests, strict: true)) {
+                    $guests[] = $clean;
+                }
+                if (count(value: $guests) >= 5) {
+                    break;
+                }
+            }
+        }
+        // Description-based fallback for shows that don't use <b>…</b> guest
+        // blocks (mainly Illner). The description meta tag carries a comma-
+        // separated guest list under one of several phrasings.
+        if ($guests === []) {
+            $descGuestList = '';
+            if (preg_match(pattern: '~<meta\s+name="description"\s+content="[^"]*?Zu Gast(?:\s+bei[^:]+sind|\s+am[^:]+:|:)\s*([^"]+)"~u', subject: $body, matches: $zg) === 1) {
+                $descGuestList = $zg[1];
+            } elseif (preg_match(pattern: '~<meta\s+name="description"\s+content="[^"]*?(?:diskutiert|empfängt|spricht)\s+mit\s+([^"]+)"~u', subject: $body, matches: $dg) === 1) {
+                $descGuestList = $dg[1];
+            }
+            if ($descGuestList !== '') {
+                $list = html_entity_decode(string: $descGuestList, flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+                // Split on commas + " und " conjunction; strip trailing period
+                // and parenthesised party tags; keep the trailing 2-3
+                // capitalised words to drop any preceding role label.
+                $parts = preg_split(pattern: '~\s*(?:,|\s+und\s+)\s*~u', subject: rtrim(string: $list, characters: ' .')) ?: [];
+                foreach ($parts as $part) {
+                    $part = (string) preg_replace(pattern: '~\s*\([^)]*\)\s*$~', replacement: '', subject: $part);
+                    if (preg_match(pattern: '~((?:[A-ZÄÖÜ][\p{L}\.\-]+\s+){1,2}[A-ZÄÖÜ][\p{L}\.\-]+)\s*$~u', subject: $part, matches: $pm) === 1) {
+                        $clean = trim(string: $pm[1]);
+                        if ($clean !== '' && !in_array(needle: $clean, haystack: $guests, strict: true)) {
+                            $guests[] = $clean;
+                        }
+                    }
+                    if (count(value: $guests) >= 5) {
+                        break;
+                    }
+                }
+            }
+        }
+        $image = null;
+        if (preg_match(pattern: '~<meta property="og:image" content="([^"]+)"~', subject: $body, matches: $im) === 1) {
+            $image = html_entity_decode(string: $im[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+        }
+        $topic = '';
+        if (preg_match(pattern: '~<title>([^<]+)</title>~', subject: $body, matches: $tm) === 1) {
+            $topic = trim(string: html_entity_decode(string: $tm[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+        }
+        $airing = '';
+        if (preg_match(pattern: '~<meta property="og:title" content="([^"]+)"~', subject: $body, matches: $am) === 1) {
+            $airing = trim(string: html_entity_decode(string: $am[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+        }
+        return ['guests' => $guests, 'image' => $image, 'topic' => $topic, 'airing' => $airing];
     }
 
     private function extractCookieValue(string $cookieHeader, string $name): string
@@ -2101,7 +2382,7 @@ final class Extrablatt
             'Politik' => ['Innenpolitik', 'Außenpolitik', 'Ukraine-Krieg', 'Nahost-Konflikt', 'Justiz & Verfassung'],
             'Wirtschaft & Finanzen' => ['Konjunktur', 'Unternehmen', 'Börse & Märkte', 'Krypto', 'Arbeitsmarkt'],
             'Sport' => ['Fußball', 'Motorsport', 'Tennis', 'Wintersport', 'Sportbusiness'],
-            'Kultur & Medien' => ['Musik', 'Film & TV', 'Kunst & Ausstellungen', 'Reality-TV', 'Kulturbetrieb'],
+            'Kultur & Medien' => ['Musik', 'Film & TV', 'Kunst & Ausstellungen', 'Reality-TV', 'TV', 'Kulturbetrieb'],
             'Wissen & Technik' => [
                 'AI', 'CSS', 'Programmierung', 'Open Source', 'Web & Internet', 'DevOps & Cloud',
                 'Hardware', 'Mobilgeräte', 'Wearables', 'GPUs & Chips', 'Gaming', 'Cybersecurity',
@@ -2144,6 +2425,25 @@ final class Extrablatt
             }
         }
         return $leaves;
+    }
+
+    /**
+     * Paper keys whose RSS uses an ardmediathek:// or zdfmediathek:// scheme.
+     * One source of truth — used by the dedup exclusion (Phase 8) and the
+     * Zeitung TV digest filter (Phase 10).
+     *
+     * @return array<int, string>
+     */
+    private function talkshowPapers(): array
+    {
+        $keys = [];
+        foreach ($this->papers() as $key => $cfg) {
+            $rss = (string) ($cfg['rss'] ?? '');
+            if (str_starts_with(haystack: $rss, needle: 'ardmediathek://') || str_starts_with(haystack: $rss, needle: 'zdfmediathek://')) {
+                $keys[] = (string) $key;
+            }
+        }
+        return $keys;
     }
 
     /**
@@ -2359,6 +2659,27 @@ final class Extrablatt
             }
         }
         $emit(sprintf('  → %d Artikel insgesamt', count(value: $allItems)));
+
+        // Talk-show papers (ardmediathek:// / zdfmediathek://) are
+        // monothematic — every episode is "TV" by definition. Seed the
+        // title-keyed category cache up front so Phase 6 skips the AI call
+        // for these items and Phase 7 writes them with category=TV.
+        $papers = $this->papers();
+        $tvSeeded = 0;
+        foreach ($allItems as $entry) {
+            $rss = (string) ($papers[$entry['paper']]['rss'] ?? '');
+            if (!str_starts_with(haystack: $rss, needle: 'ardmediathek://') && !str_starts_with(haystack: $rss, needle: 'zdfmediathek://')) {
+                continue;
+            }
+            $title = $entry['item']->title;
+            if (!$this->categoryCacheExists(title: $title)) {
+                $this->writeCategoryCache(title: $title, category: 'TV');
+                $tvSeeded++;
+            }
+        }
+        if ($tvSeeded > 0) {
+            $emit(sprintf('  → %d Talkshow-Items als Kategorie "TV" vorgemerkt', $tvSeeded));
+        }
         $emit('');
 
         if (empty($allItems)) {
@@ -3148,6 +3469,17 @@ final class Extrablatt
         $feedBytes = (int) $db->query(query: "SELECT COALESCE(SUM(LENGTH(value)),0) FROM cache WHERE key LIKE 'feed:%'")->fetchColumn();
         $feedDeleted = $db->exec(statement: "DELETE FROM cache WHERE key LIKE 'feed:%'");
         $emit(sprintf('  → %d Feed-Cache-Einträge gelöscht (%d MB frei)', (int) $feedDeleted, intdiv($feedBytes, 1048576)));
+
+        // Talk-show episode bodies (zdf-episode:<md5>) accumulate one entry
+        // per crawled episode and would grow unbounded otherwise. Drop the
+        // old ones; the next scrape re-fetches whatever's still listed in
+        // the show overview, episodes that aged out simply stay dropped.
+        $tvCacheCutoff = time() - 30 * 86400;
+        $tvBytes = (int) $db->query(query: "SELECT COALESCE(SUM(LENGTH(value)),0) FROM cache WHERE key LIKE 'zdf-episode:%' AND updated_at < {$tvCacheCutoff}")->fetchColumn();
+        $tvDeleted = $db->exec(statement: "DELETE FROM cache WHERE key LIKE 'zdf-episode:%' AND updated_at < {$tvCacheCutoff}");
+        if ((int) $tvDeleted > 0) {
+            $emit(sprintf('  → %d Talkshow-Episoden-Cache-Einträge gelöscht (%d MB frei)', (int) $tvDeleted, intdiv($tvBytes, 1048576)));
+        }
 
         // Drop display-only payload from old, untouched articles. Keeps the
         // ML signals (category, paywall, rating, duplicate_of) and personal
@@ -4358,6 +4690,16 @@ final class Extrablatt
         $jaccardThreshold = 0.25;
         $topNPerCandidate = 3;
 
+        // Talk-show episodes share titles between full sendung and topic
+        // segments by design ("maischberger am 10.06.2026" + "Joschka Fischer
+        // über…") — Jaccard would happily merge them, destroying the per-
+        // guest segments. Exclude all talk-show papers from dedup.
+        $talkshowPapers = $this->talkshowPapers();
+        $excludeClause = '';
+        if ($talkshowPapers !== []) {
+            $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $talkshowPapers));
+            $excludeClause = ' AND paper NOT IN (' . $list . ')';
+        }
         $stmt = $db->query(query: "
             SELECT url, paper, title, published_at, duplicate_of, dedup_checked_at
             FROM articles
@@ -4365,6 +4707,7 @@ final class Extrablatt
               AND published_at > {$cutoff}
               AND title IS NOT NULL
               AND title != ''
+              {$excludeClause}
             ORDER BY published_at ASC
         ");
         $pool = [];
@@ -4882,25 +5225,136 @@ final class Extrablatt
             );
         }
 
+        $tv = $this->buildTalkshowBlock(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, cutoff: $cutoff);
+
         $payload = [
             'generated_at' => time(),
             'window_start' => $cutoff,
             'top_today' => $topToday,
             'items' => $items,
             'weather' => $weather,
+            'tv' => $tv,
         ];
         $this->cacheSet(
             key: 'daily_digest',
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
         $emit(sprintf(
-            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s)',
+            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s, TV: %s)',
             count(value: $items),
             count(value: $articles),
             $todayCount,
             $topToday !== null ? 'ja' : 'nein',
-            $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein'
+            $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein',
+            $tv !== null ? sprintf('%d Sendungen', count(value: $tv['shows'] ?? [])) : 'nein'
         ));
+    }
+
+    /**
+     * Pull the last 7 days of TV-tagged talk-show episodes from the DB and
+     * let the LLM summarise what was discussed in 2-3 sentences. Returns
+     * null when no episodes exist or the AI call fails so the digest still
+     * renders cleanly without the block.
+     *
+     * @param array<string, mixed> $aiConfig
+     * @return array{prose: string, shows: array<int, array{paper: string, title: string, url: string, published_at: int}>}|null
+     */
+    private function buildTalkshowBlock(PDO $db, array $aiConfig, string $apiKey, int $cutoff): ?array
+    {
+        // Restrict to the configured talk-show papers explicitly — the
+        // category 'TV' alone gets occasional false positives from articles
+        // about TV programming on news sites (LLM over-matching the new
+        // leaf during Phase 6).
+        $talkshowPapers = $this->talkshowPapers();
+        if ($talkshowPapers === []) {
+            return null;
+        }
+        $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $talkshowPapers));
+        $stmt = $db->prepare(query: "
+            SELECT paper, title, url, published_at
+            FROM articles
+            WHERE paper IN ({$list})
+              AND published_at >= :since
+              AND duplicate_of IS NULL
+              AND title IS NOT NULL AND title <> ''
+            ORDER BY published_at DESC
+            LIMIT 60
+        ");
+        $stmt->execute(params: [':since' => $cutoff]);
+        $rows = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
+        if ($rows === []) {
+            return null;
+        }
+        $papers = $this->papers();
+        $shows = [];
+        $lines = [];
+        foreach ($rows as $r) {
+            $paperKey = (string) ($r['paper'] ?? '');
+            $label = (string) ($papers[$paperKey]['label'] ?? $paperKey);
+            $title = (string) ($r['title'] ?? '');
+            $publishedAt = (int) ($r['published_at'] ?? 0);
+            $shows[] = [
+                'paper' => $paperKey,
+                'title' => $title,
+                'url' => (string) ($r['url'] ?? ''),
+                'published_at' => $publishedAt,
+            ];
+            $lines[] = sprintf('- [%s, %s] %s', $label, date(format: 'd.m.', timestamp: $publishedAt), mb_substr(string: $title, start: 0, length: 220));
+        }
+        $prose = $this->generateTalkshowProse(lines: $lines, aiConfig: $aiConfig, apiKey: $apiKey);
+        if ($prose === null) {
+            $prose = '';
+        }
+        return ['prose' => $prose, 'shows' => $shows];
+    }
+
+    /**
+     * @param array<int, string> $lines
+     * @param array<string, mixed> $aiConfig
+     */
+    private function generateTalkshowProse(array $lines, array $aiConfig, string $apiKey): ?string
+    {
+        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper') || $lines === []) {
+            return null;
+        }
+        $provider = (string) ($aiConfig['provider'] ?? '');
+        $model = (string) ($aiConfig['model'] ?? '');
+        if ($provider === '' || $model === '' || $apiKey === '') {
+            return null;
+        }
+        $prompt = "Du erhältst die Schlagzeilen der letzten politischen Talkshows " .
+            "(Maischberger, Markus Lanz, Caren Miosga, hart aber fair, Maybrit Illner) " .
+            "der vergangenen 7 Tage. Schreibe einen flüssigen, prägnanten Absatz auf Deutsch " .
+            "(2 bis 3 Sätze), der die wichtigsten Themen und prominentesten Gäste der Woche zusammenfasst.\n\n" .
+            "Schlagzeilen:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
+            "Anforderungen:\n" .
+            "- Fokus auf die DOMINIERENDEN Themen und 3-6 prominente Gäste namentlich.\n" .
+            "- Hebe 2-4 zentrale Begriffe (Themen, Personen) mit Markdown-Bold (**…**) hervor.\n" .
+            "- Keine Aufzählung, kein Datum pro Sendung, keine Sender-Liste.\n" .
+            "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
+            $ai = $aiClass::create(
+                provider: $provider,
+                model: $model,
+                temperature: (float) ($aiConfig['temperature'] ?? 0.4),
+                api_key: $apiKey,
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 60),
+                url: $aiUrl !== '' ? $aiUrl : null
+            );
+            $resp = $ai->ask(prompt: $prompt)['response'] ?? null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (is_object(value: $resp) || is_array(value: $resp)) {
+            $resp = json_encode(value: $resp);
+        }
+        $text = trim(string: (string) $resp);
+        $text = (string) preg_replace(pattern: '~^\s*```(?:\w+)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
+        $text = trim(string: $text, characters: " \t\n\r\0\x0B\"'");
+        return $text !== '' ? $text : null;
     }
 
     /**
@@ -5210,7 +5664,13 @@ final class Extrablatt
             $weatherHtml = $this->buildWeatherBlock(weather: $weather);
         }
 
-        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '') {
+        $tvHtml = '';
+        $tv = isset($data['tv']) && is_array(value: $data['tv']) ? $data['tv'] : null;
+        if ($tv !== null) {
+            $tvHtml = $this->buildTalkshowSection(tv: $tv);
+        }
+
+        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $tvHtml === '') {
             return '';
         }
 
@@ -5218,7 +5678,56 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . $weatherHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $tvHtml . $weatherHtml . '</section>';
+    }
+
+    /**
+     * Render the Polit-Talk weekly recap. Mirrors the weather block: a
+     * single LLM-written prose paragraph, plus a compact list of the
+     * actual episodes underneath for click-through.
+     *
+     * @param array{prose?: string, shows?: array<int, array<string, mixed>>} $tv
+     */
+    private function buildTalkshowSection(array $tv): string
+    {
+        $shows = isset($tv['shows']) && is_array(value: $tv['shows']) ? $tv['shows'] : [];
+        $prose = trim(string: (string) ($tv['prose'] ?? ''));
+        if ($shows === [] && $prose === '') {
+            return '';
+        }
+        $proseHtml = '';
+        if ($prose !== '') {
+            $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
+            $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
+            $proseHtml = '<p>' . $escaped . '</p>';
+        }
+        $papers = $this->papers();
+        $listItems = '';
+        foreach ($shows as $s) {
+            if (!is_array(value: $s)) {
+                continue;
+            }
+            $paperKey = (string) ($s['paper'] ?? '');
+            $label = (string) ($papers[$paperKey]['label'] ?? $paperKey);
+            $title = (string) ($s['title'] ?? '');
+            $url = (string) ($s['url'] ?? '');
+            $publishedAt = (int) ($s['published_at'] ?? 0);
+            if ($title === '' || $url === '') {
+                continue;
+            }
+            $dateLabel = $publishedAt > 0 ? date(format: 'd.m.', timestamp: $publishedAt) : '';
+            $listItems .= '<li><a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES) . '" target="_blank" rel="noopener">'
+                . '<span class="digest__tv-paper">' . htmlspecialchars(string: $label, flags: ENT_QUOTES) . '</span>'
+                . ($dateLabel !== '' ? ' <span class="digest__tv-date">' . htmlspecialchars(string: $dateLabel, flags: ENT_QUOTES) . '</span>' : '')
+                . ' <span class="digest__tv-title">' . htmlspecialchars(string: $title, flags: ENT_QUOTES) . '</span>'
+                . '</a></li>';
+        }
+        $listHtml = $listItems !== '' ? '<ul class="digest__tv-list">' . $listItems . '</ul>' : '';
+        return '<div class="digest__tv">'
+            . '<h2 class="digest__title">TV-Talkshows <span class="digest__date">letzte 7 Tage</span></h2>'
+            . $proseHtml
+            . $listHtml
+            . '</div>';
     }
 
     /**
@@ -5784,6 +6293,16 @@ HTML;
                 .digest__sources a:hover { color: #18181b; text-decoration: underline; }
                 .digest__weather { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
+                .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
+                .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0 0 0.6rem; }
+                .digest__tv-list { list-style: none; padding: 0; margin: 0; font-family: system-ui, sans-serif; font-size: 13px; }
+                .digest__tv-list li { padding: 4px 0; border-bottom: 1px dotted #e4e4e7; }
+                .digest__tv-list li:last-child { border-bottom: 0; }
+                .digest__tv-list a { color: #18181b; text-decoration: none; display: block; }
+                .digest__tv-list a:hover { text-decoration: underline; }
+                .digest__tv-paper { font-weight: 700; color: #52525b; margin-right: 0.4em; }
+                .digest__tv-date { color: #a1a1aa; margin-right: 0.4em; font-variant-numeric: tabular-nums; }
+                .digest__tv-title { color: #18181b; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
                 .item { position: relative; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; margin: 0 0 10px; transition: opacity 0.18s ease, max-height 0.18s ease, margin 0.18s ease, border-width 0.18s ease; contain: layout paint style; content-visibility: auto; contain-intrinsic-size: 0 92px; }
                 .item__swipe { position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: #fff; touch-action: pan-y; transition: transform 0.18s ease; will-change: transform; }
@@ -5875,6 +6394,13 @@ HTML;
                 html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
                 html[data-theme="dark"] .digest__weather { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
+                html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
+                html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
+                html[data-theme="dark"] .digest__tv-list li { border-bottom-color: #27272a; }
+                html[data-theme="dark"] .digest__tv-list a,
+                html[data-theme="dark"] .digest__tv-title { color: #e4e4e7; }
+                html[data-theme="dark"] .digest__tv-paper { color: #a1a1aa; }
+                html[data-theme="dark"] .digest__tv-date { color: #71717a; }
                 html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
