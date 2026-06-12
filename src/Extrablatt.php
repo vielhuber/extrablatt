@@ -5937,7 +5937,9 @@ final class Extrablatt
         // duplicate-looking entries. A single "tv" sentinel entry below
         // covers all of them via the IN-list filter.
         $tvPapers = array_flip(array: $this->talkshowPapers());
-        $paperList = array_diff_key(array: $paperList, array2: $tvPapers);
+        // array_diff_key is variadic ($array, ...$arrays) — no second named
+        // parameter, so the additional arg must be positional.
+        $paperList = array_diff_key($paperList, $tvPapers);
         $paperList = array_map(
             callback: function (array $info): array {
                 $host = (string) parse_url(url: $info['url'] ?? '', component: PHP_URL_HOST);
