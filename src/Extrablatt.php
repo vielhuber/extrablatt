@@ -521,8 +521,17 @@ final class Extrablatt
             if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
                 $thumbFilter = '';
             }
-            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen'], strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen', 'talkshows'], strict: true)) {
                 $viewFilter = 'zeitung';
+            }
+            // "talkshows" view is a Meldungen shortcut: forces tv=all and
+            // magic=all, so a fresh click lands directly on the unfiltered
+            // talk-show list.
+            if ($viewFilter === 'talkshows') {
+                $viewFilter = 'meldungen';
+                $tvFilter = 'all';
+                $magicFilter = 'all';
+                $paperFilter = '';
             }
             header(header: 'Content-Type: text/html; charset=utf-8');
             echo $this->renderDashboard(
@@ -5429,12 +5438,12 @@ final class Extrablatt
 
     /**
      * Pull the last 7 days of talk-show episodes, ask the LLM to verdichten
-     * the two to four brisantesten Sendungen as a single prose paragraph.
-     * Returns null when no episodes exist or no prose could be produced —
-     * the digest then simply omits the block.
+     * the two to three brisantesten Sendungen as a single prose paragraph
+     * plus a list of source indices. Returns null when no episodes exist
+     * or no prose could be produced — the digest then omits the block.
      *
      * @param array<string, mixed> $aiConfig
-     * @return array{prose: string, count: int}|null
+     * @return array{paragraph: string, sources: array<int, array{url: string, paper: string}>, count: int}|null
      */
     private function buildTalkshowBlock(PDO $db, array $aiConfig, string $apiKey, int $cutoff): ?array
     {
@@ -5448,7 +5457,7 @@ final class Extrablatt
         }
         $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $talkshowPapers));
         $stmt = $db->prepare(query: "
-            SELECT paper, title, published_at
+            SELECT url, paper, title, published_at
             FROM articles
             WHERE paper IN ({$list})
               AND published_at >= :since
@@ -5463,26 +5472,47 @@ final class Extrablatt
             return null;
         }
         $papers = $this->papers();
+        $numbered = [];
         $lines = [];
-        foreach ($rows as $r) {
+        foreach ($rows as $i => $r) {
             $paperKey = (string) ($r['paper'] ?? '');
             $label = (string) ($papers[$paperKey]['label'] ?? $paperKey);
             $title = (string) ($r['title'] ?? '');
             $publishedAt = (int) ($r['published_at'] ?? 0);
-            $lines[] = sprintf('- [%s, %s] %s', $label, date(format: 'd.m.', timestamp: $publishedAt), mb_substr(string: $title, start: 0, length: 220));
+            $numbered[] = [
+                'url' => (string) ($r['url'] ?? ''),
+                'paper' => $label,
+            ];
+            $lines[] = sprintf('%d. [%s, %s] %s', $i + 1, $label, date(format: 'd.m.', timestamp: $publishedAt), mb_substr(string: $title, start: 0, length: 220));
         }
-        $prose = $this->generateTalkshowProse(lines: $lines, aiConfig: $aiConfig, apiKey: $apiKey);
-        if ($prose === null || $prose === '') {
+        $generated = $this->generateTalkshowProse(lines: $lines, aiConfig: $aiConfig, apiKey: $apiKey);
+        if ($generated === null) {
             return null;
         }
-        return ['prose' => $prose, 'count' => count(value: $rows)];
+        // Resolve source indices (1-based) to {url, paper} entries; dedup
+        // and ignore out-of-range numbers the model might hallucinate.
+        $sources = [];
+        $seen = [];
+        foreach ($generated['sources'] as $idx) {
+            $i = (int) $idx - 1;
+            if (isset($numbered[$i]) && !isset($seen[$i])) {
+                $seen[$i] = true;
+                $sources[] = $numbered[$i];
+            }
+        }
+        return [
+            'paragraph' => $generated['paragraph'],
+            'sources' => $sources,
+            'count' => count(value: $rows),
+        ];
     }
 
     /**
      * @param array<int, string> $lines
      * @param array<string, mixed> $aiConfig
+     * @return array{paragraph: string, sources: array<int, int>}|null
      */
-    private function generateTalkshowProse(array $lines, array $aiConfig, string $apiKey): ?string
+    private function generateTalkshowProse(array $lines, array $aiConfig, string $apiKey): ?array
     {
         if (!class_exists(class: 'vielhuber\\aihelper\\aihelper') || $lines === []) {
             return null;
@@ -5494,18 +5524,21 @@ final class Extrablatt
         }
         $prompt = "Du erhältst die Schlagzeilen der letzten politischen Talkshows " .
             "(Maischberger, Markus Lanz, Caren Miosga, hart aber fair, Maybrit Illner) " .
-            "der vergangenen 7 Tage. Wähle die 2 bis 4 BRISANTESTEN Sendungen aus und " .
-            "beschreibe sie in einem flüssigen, prägnanten Fließtext-Absatz auf Deutsch " .
-            "(3 bis 5 Sätze).\n\n" .
+            "der vergangenen 7 Tage. Wähle die 2 bis 3 BRISANTESTEN Sendungen aus und " .
+            "verdichte sie in einem prägnanten Fließtext (2 bis 3 Sätze).\n\n" .
             "Schlagzeilen:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
             "Anforderungen:\n" .
             "- Wähle die brisantesten Diskussionen — Streit, harte Konfrontation, große Tragweite — " .
             "  NICHT die Sendungen mit den dominantesten Themen, sondern die mit der schärfsten Auseinandersetzung.\n" .
-            "- Beschreibe für jede gewählte Sendung KURZ: welche Show, welches Thema, welche Pointe (z. B. " .
-            "  'Bei Lanz prallten X und Y über Z aufeinander'); Gäste-Namen organisch einbauen, keine reine Liste.\n" .
-            "- Hebe 3-5 zentrale Begriffe (Themen, Personen, Konfliktlinien) mit Markdown-Bold (**…**) hervor.\n" .
-            "- Keine Aufzählung mit Spiegelstrichen, kein Datum, keine Sender-Übersicht.\n" .
-            "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
+            "- Pro Sendung KURZ: welche Show, welches Thema, welche Pointe; " .
+            "  Gäste-Namen organisch einbauen, keine reine Liste.\n" .
+            "- Hebe 2-4 zentrale Begriffe mit Markdown-Bold (**…**) hervor.\n" .
+            "- Keine Aufzählung, kein Datum, keine Sender-Übersicht.\n" .
+            "- WICHTIG: Die Sendungs-Nummern gehören AUSSCHLIESSLICH ins \"sources\"-Feld des JSON. " .
+            "  KEINE Zahlen oder Index-Listen im \"paragraph\"-Text.\n\n" .
+            "Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Markdown-Codeblock:\n" .
+            "{\"paragraph\":\"...\",\"sources\":[1,4]}\n" .
+            "Die Zahlen in \"sources\" sind die Indizes der gewählten Sendungen aus der Liste oben.";
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
             $aiUrl = (string) ($aiConfig['url'] ?? '');
@@ -5523,12 +5556,30 @@ final class Extrablatt
             return null;
         }
         if (is_object(value: $resp) || is_array(value: $resp)) {
-            $resp = json_encode(value: $resp);
+            $parsed = json_decode(json: (string) json_encode(value: $resp), associative: true);
+        } else {
+            $raw = trim(string: (string) $resp);
+            $raw = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $raw);
+            $parsed = json_decode(json: $raw, associative: true);
         }
-        $text = trim(string: (string) $resp);
-        $text = (string) preg_replace(pattern: '~^\s*```(?:\w+)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
-        $text = trim(string: $text, characters: " \t\n\r\0\x0B\"'");
-        return $text !== '' ? $text : null;
+        if (!is_array(value: $parsed) || !isset($parsed['paragraph']) || !is_string($parsed['paragraph'])) {
+            return null;
+        }
+        $paragraph = trim(string: $parsed['paragraph']);
+        // Strip trailing index lists "(5, 12)" the model sometimes leaks
+        // into the prose despite the prompt.
+        $paragraph = trim(string: (string) preg_replace(pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u', replacement: '', subject: $paragraph));
+        if ($paragraph === '') {
+            return null;
+        }
+        $sources = [];
+        foreach ((array) ($parsed['sources'] ?? []) as $idx) {
+            $n = (int) $idx;
+            if ($n > 0) {
+                $sources[] = $n;
+            }
+        }
+        return ['paragraph' => $paragraph, 'sources' => $sources];
     }
 
     /**
@@ -5857,23 +5908,29 @@ final class Extrablatt
 
     /**
      * Render the Polit-Talk weekly recap as a single LLM-written prose
-     * paragraph (analog zum Wetterblock). Die konkreten Episoden landen
-     * gefiltert in "Meldungen" — hier nur die textliche Verdichtung der
-     * brisantesten Sendungen.
+     * paragraph plus inline source links — same shape as a Wochenübersicht
+     * item, so we reuse buildDigestParagraph() for the body.
      *
-     * @param array{prose?: string} $tv
+     * @param array{paragraph?: string, prose?: string, sources?: array<int, array<string, mixed>>} $tv
      */
     private function buildTalkshowSection(array $tv): string
     {
-        $prose = trim(string: (string) ($tv['prose'] ?? ''));
-        if ($prose === '') {
+        // Accept the legacy "prose" key from older cached digests so a stale
+        // cache still renders during the changeover scrape.
+        $paragraph = trim(string: (string) ($tv['paragraph'] ?? $tv['prose'] ?? ''));
+        if ($paragraph === '') {
             return '';
         }
-        $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
-        $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
+        $body = $this->buildDigestParagraph(item: [
+            'paragraph' => $paragraph,
+            'sources' => $tv['sources'] ?? [],
+        ]);
+        if ($body === '') {
+            return '';
+        }
         return '<div class="digest__tv">'
             . '<h2 class="digest__title">TV-Talkshows <span class="digest__date">letzte 7 Tage</span></h2>'
-            . '<p>' . $escaped . '</p>'
+            . $body
             . '</div>';
     }
 
@@ -6176,7 +6233,7 @@ final class Extrablatt
         }
 
         $readOptions = '';
-        foreach (['' => 'Lesestatus', 'unread' => 'ungelesen', 'read' => 'gelesen'] as $value => $label) {
+        foreach (['' => 'Lesen', 'unread' => 'ungelesen', 'read' => 'gelesen'] as $value => $label) {
             $sel = $readFilter === $value ? ' selected' : '';
             $readOptions .= '<option value="' . $value . '"' . $sel . '>' . $label . '</option>';
         }
@@ -6199,7 +6256,7 @@ final class Extrablatt
             $thumbOptions .= '<option value="' . $value . '"' . $sel . '>' . $label . '</option>';
         }
 
-        $categoryOptions = '<option value="">Kategorie</option>';
+        $categoryOptions = '<option value="">Kat.</option>';
         foreach ($this->categories() as $parent => $children) {
             $parentName = (string) $parent;
             $escapedParent = htmlspecialchars(string: $parentName, flags: ENT_QUOTES);
@@ -6361,8 +6418,12 @@ final class Extrablatt
         // shows the classic filter form + list. Filter form carries the
         // view in a hidden input so submitting a filter preserves the tab.
         $isZeitung = $viewFilter === 'zeitung';
+        // "Talk-Shows" tab is active when the meldungen view is showing the
+        // tv=all preset; "Meldungen" tab covers every other meldungen state.
+        $isTalkshowView = !$isZeitung && $tvFilter === 'all';
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
-        $meldungenActive = $isZeitung ? '' : ' viewnav__tab--active';
+        $meldungenActive = (!$isZeitung && !$isTalkshowView) ? ' viewnav__tab--active' : '';
+        $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
         // onchange="filterChange(this)" auto-flips Magisch → "Alle" when the
         // user picks a single filter on an otherwise empty form. See the
@@ -6470,8 +6531,8 @@ HTML;
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
-                form.filters { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 0 0 1rem; }
-                form.filters select { min-width: 0; width: 100%; font: 600 12px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 8px 22px 8px 8px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 7px center; background-size: 8px 5px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+                form.filters { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; margin: 0 0 1rem; }
+                form.filters select { min-width: 0; width: 100%; font: 600 11px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 7px 18px 7px 7px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 5px center; background-size: 7px 4px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
                 form.filters select:focus { outline: none; border-color: #18181b; }
                 .digest { font-family: 'Lora', Georgia, 'Times New Roman', Times, serif; font-size: 16px; line-height: 1.6; color: #27272a; margin: 0 0 1.2rem; padding: 1.1rem 1.4rem 1.2rem; background: #fdfcf8; border: 1px solid #e7e5e0; border-left: 3px solid #18181b; border-radius: 4px; box-shadow: 0 1px 0 rgba(0,0,0,0.02); }
@@ -6610,6 +6671,7 @@ HTML;
                 <nav class="viewnav">
                     <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                     <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
+                    <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                 </nav>
                 {$zeitungBlock}
                 {$meldungenBlock}
