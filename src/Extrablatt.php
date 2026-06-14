@@ -521,7 +521,7 @@ final class Extrablatt
             if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
                 $thumbFilter = '';
             }
-            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen', 'talkshows'], strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen', 'talkshows', 'factcheck'], strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -532,6 +532,25 @@ final class Extrablatt
                 $tvFilter = 'all';
                 $magicFilter = 'all';
                 $paperFilter = '';
+            }
+            $factcheckStatement = '';
+            $factcheckPending = false;
+            if ($viewFilter === 'factcheck') {
+                $factcheckStatement = trim(string: (string) ($_GET['statement'] ?? ''));
+                // Fragment endpoint — synchronous LLM call, returns just the
+                // result block HTML to be swapped into the placeholder by JS.
+                // Page chrome is skipped so the response is a clean replacement.
+                if (isset($_GET['factcheck_fragment'])) {
+                    header(header: 'Content-Type: text/html; charset=utf-8');
+                    $result = $factcheckStatement !== '' ? $this->runFactCheck(statement: $factcheckStatement) : null;
+                    echo $this->buildFactCheckResult(statement: $factcheckStatement, result: $result);
+                    return;
+                }
+                // Initial page load: render immediately with a skeleton; the
+                // browser fetches the fragment once the DOM is ready, so the
+                // user sees the page in well under a second instead of waiting
+                // 30-90 seconds for the high-effort reasoning call to finish.
+                $factcheckPending = $factcheckStatement !== '';
             }
             header(header: 'Content-Type: text/html; charset=utf-8');
             echo $this->renderDashboard(
@@ -544,7 +563,9 @@ final class Extrablatt
                 sortFilter: $sortFilter,
                 magicFilter: $magicFilter,
                 thumbFilter: $thumbFilter,
-                viewFilter: $viewFilter
+                viewFilter: $viewFilter,
+                factcheckStatement: $factcheckStatement,
+                factcheckPending: $factcheckPending
             );
             return;
         }
@@ -2732,7 +2753,6 @@ final class Extrablatt
         curl_exec(handle: $ch);
         $code = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
         $err = (string) curl_error(handle: $ch);
-        curl_close(handle: $ch);
         if ($code === 0) {
             return ['ok' => false, 'reason' => $err !== '' ? $err : 'kein HTTP-Response'];
         }
@@ -5753,7 +5773,6 @@ final class Extrablatt
         ]);
         $raw = curl_exec(handle: $ch);
         $http = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
-        curl_close(handle: $ch);
         if (!is_string(value: $raw) || $http < 200 || $http >= 300) {
             return null;
         }
@@ -5931,6 +5950,147 @@ final class Extrablatt
         return '<div class="digest__tv">'
             . '<h2 class="digest__title">TV-Talkshows <span class="digest__date">letzte 7 Tage</span></h2>'
             . $body
+            . '</div>';
+    }
+
+    /**
+     * Render the Quick Fact-Check shell: input form + result placeholder.
+     * The actual LLM call happens asynchronously — the placeholder is
+     * swapped in-place once a fetch of /?view=factcheck&factcheck_fragment=1
+     * returns the result HTML. This keeps the initial page load instant
+     * (< 1 s) even though the high-effort reasoning call takes 30-90 s.
+     */
+    private function buildFactCheckBlock(string $statement, bool $pending): string
+    {
+        // Wenn der Nutzer noch nichts eingegeben hat, eine Beispiel-These
+        // direkt als value vorbelegen (per Pageload zufällig aus dem Pool).
+        // Vier Themenfelder vertreten: Verschwörung, Wissenschaftsmythos,
+        // Ernährungs-Folklore, medizinische Fehlinformation.
+        $examples = [
+            'Gibt es Reptiloide?',
+            'Hat die Mondlandung 1969 wirklich stattgefunden?',
+            'Nutzen wir nur 10 % unseres Gehirns?',
+            'Sind Bio-Lebensmittel nachweislich gesünder als konventionelle?',
+            'Verursachen Impfungen Autismus?',
+        ];
+        $inputValue = $statement !== '' ? $statement : $examples[array_rand(array: $examples)];
+        $valueEsc = htmlspecialchars(string: $inputValue, flags: ENT_QUOTES);
+        $form = '<form class="factcheck__form" method="get" action="/">'
+            . '<input type="hidden" name="view" value="factcheck">'
+            . '<input type="text" name="statement" value="' . $valueEsc . '" autocomplete="off" autofocus maxlength="1000">'
+            . '<button type="submit">Prüfen</button>'
+            . '</form>';
+        $loadingHint = 'Das stärkste verfügbare Modell auf dem Endpoint analysiert die Aussage mit dem höchsten Reasoning-Effort. '
+            . 'Es zerlegt die Behauptung in prüfbare Bestandteile, gleicht jede Komponente mit dem Trainingswissen ab und sucht '
+            . 'passende Quellen aus seriösen Medien, peer-reviewed Studien und offiziellen Stellen (Behörden, Gerichte, Statistik-Ämter). '
+            . 'Das Ergebnis ist eine prozentuale Einschätzung, eine ausführliche Begründung in mehreren Absätzen und 5–8 belastbare Quellen. '
+            . 'Die Prüfung dauert üblicherweise 30 bis 90 Sekunden — das Ergebnis erscheint hier automatisch, sobald die Analyse abgeschlossen ist.';
+        $emptyHint = 'Gib eine konkrete Tatsachenbehauptung ein – etwa eine Behauptung aus den Nachrichten, ein Statistik-Schnipsel oder eine politische Aussage, die du überprüfen willst. '
+            . 'Das stärkste verfügbare Modell prüft sie mit dem höchsten Reasoning-Effort und liefert eine prozentuale Einschätzung, '
+            . 'eine ausführliche Begründung mit historischem Kontext sowie 5–8 belastbare Quellen aus Medien, Studien und offiziellen Stellen. '
+            . 'Die Prüfung dauert in der Regel 30 bis 90 Sekunden – du musst die Seite nicht offen halten und kannst zwischendurch wegschauen, das Ergebnis lädt sich automatisch nach.';
+        $resultSlot = $pending
+            ? '<div id="factcheck-result" class="factcheck__loading">'
+                . '<div class="factcheck__spinner" aria-hidden="true"></div>'
+                . '<p class="factcheck__hint">' . $loadingHint . '</p>'
+                . '</div>'
+            : '<div id="factcheck-result">'
+                . '<p class="factcheck__hint">' . $emptyHint . '</p>'
+                . '</div>';
+        $script = '';
+        if ($pending) {
+            $statementJs = (string) json_encode(value: $statement, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+            $script = '<script>(function(){'
+                . 'var stmt = ' . $statementJs . ';'
+                . 'var url = "/?view=factcheck&factcheck_fragment=1&statement=" + encodeURIComponent(stmt);'
+                . 'fetch(url, {credentials: "same-origin"})'
+                . '.then(function(r){ if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })'
+                . '.then(function(html){'
+                . '  var slot = document.getElementById("factcheck-result");'
+                . '  if (slot) slot.outerHTML = html;'
+                . '})'
+                . '.catch(function(){'
+                . '  var slot = document.getElementById("factcheck-result");'
+                . '  if (slot) slot.innerHTML = "<p class=\"factcheck__hint\">Anfrage fehlgeschlagen – bitte erneut versuchen.</p>";'
+                . '});'
+                . '})();</script>';
+        }
+        return '<section class="factcheck">' . $form . $resultSlot . $script . '</section>';
+    }
+
+    /**
+     * Render just the inner result block (verdict bar + prose + sources) or
+     * a hint paragraph when no result is available. Used by the
+     * factcheck_fragment endpoint — the response replaces the
+     * #factcheck-result placeholder via outerHTML, so the wrapping div is
+     * what JS swaps into the DOM.
+     *
+     * @param array{verdict: string, percentage: int, confidence: int, explanation: string, sources: array<int, array{label: string, url: string}>}|null $result
+     */
+    private function buildFactCheckResult(string $statement, ?array $result): string
+    {
+        if ($result === null) {
+            $hint = $statement !== ''
+                ? 'Konnte keine Bewertung erzeugen – der Endpoint war möglicherweise nicht erreichbar, das Modell hat das Reasoning-Budget aufgebraucht oder die Antwort war kein gültiges JSON. Versuch es bitte erneut.'
+                : 'Gib eine konkrete Tatsachenbehauptung ein – etwa eine Behauptung aus den Nachrichten, ein Statistik-Schnipsel oder eine politische Aussage, die du überprüfen willst. '
+                . 'Das stärkste verfügbare Modell prüft sie mit dem höchsten Reasoning-Effort und liefert eine prozentuale Einschätzung, '
+                . 'eine ausführliche Begründung mit historischem Kontext sowie 5–8 belastbare Quellen aus Medien, Studien und offiziellen Stellen. '
+                . 'Die Prüfung dauert in der Regel 30 bis 90 Sekunden – du musst die Seite nicht offen halten und kannst zwischendurch wegschauen, das Ergebnis lädt sich automatisch nach.';
+            return '<div id="factcheck-result"><p class="factcheck__hint">' . $hint . '</p></div>';
+        }
+        $percentage = (int) $result['percentage'];
+        $verdict = (string) $result['verdict'];
+        $verdictKey = match (true) {
+            $verdict === 'stimmt' => 'true',
+            $verdict === 'stimmt nicht' => 'false',
+            default => 'partial',
+        };
+        $verdictLabel = htmlspecialchars(string: $verdict, flags: ENT_QUOTES);
+        $confidence = (int) $result['confidence'];
+        $explanationEscaped = htmlspecialchars(string: trim(string: $result['explanation']), flags: ENT_QUOTES);
+        $explanationEscaped = (string) preg_replace(
+            pattern: '/\*\*(.+?)\*\*/s',
+            replacement: '<strong>$1</strong>',
+            subject: $explanationEscaped
+        );
+        // Split prose on paragraph breaks (double newlines or stand-alone
+        // <br> chains) so longer explanations render as multiple paragraphs.
+        $proseHtml = '';
+        foreach (preg_split(pattern: '/\n{2,}/', subject: $explanationEscaped) ?: [$explanationEscaped] as $paragraph) {
+            $paragraph = trim(string: (string) $paragraph);
+            if ($paragraph === '') {
+                continue;
+            }
+            $proseHtml .= '<p class="factcheck__prose">' . $paragraph . '</p>';
+        }
+        $sourcesHtml = '';
+        foreach ($result['sources'] as $src) {
+            $label = htmlspecialchars(string: $src['label'], flags: ENT_QUOTES);
+            $url = (string) $src['url'];
+            // filter_var(FILTER_VALIDATE_URL) accepts javascript: / data: URIs
+            // as syntactically valid — gate the anchor on an explicit http/
+            // https scheme to keep the href XSS-safe even if a manipulated
+            // prompt convinces the LLM to emit a scheme-loaded URL.
+            $scheme = $url !== '' ? strtolower(string: (string) parse_url(url: $url, component: PHP_URL_SCHEME)) : '';
+            $isSafeUrl = in_array(needle: $scheme, haystack: ['http', 'https'], strict: true)
+                && filter_var(value: $url, filter: FILTER_VALIDATE_URL) !== false;
+            if ($isSafeUrl) {
+                $sourcesHtml .= '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES) . '" target="_blank" rel="noreferrer noopener">' . $label . '</a>';
+            } else {
+                $sourcesHtml .= '<span>' . $label . '</span>';
+            }
+        }
+        $sourcesBlock = $sourcesHtml !== '' ? '<div class="factcheck__sources">' . $sourcesHtml . '</div>' : '';
+        $bar = '<div class="factcheck__bar factcheck__bar--' . $verdictKey . '">'
+            . '<div class="factcheck__bar-fill" style="width: ' . $percentage . '%;"></div>'
+            . '<span class="factcheck__bar-label">' . $percentage . '% – ' . $verdictLabel . '</span>'
+            . '</div>';
+        $confidenceHtml = '<div class="factcheck__meta">Sicherheit der Bewertung: <strong>' . $confidence . '%</strong></div>';
+        return '<div id="factcheck-result">'
+            . $bar
+            . $confidenceHtml
+            . $proseHtml
+            . $sourcesBlock
             . '</div>';
     }
 
@@ -6144,6 +6304,212 @@ final class Extrablatt
         return $stmt->fetchAll(mode: PDO::FETCH_ASSOC) ?: [];
     }
 
+    /**
+     * Quick-Fact-Check: ask the strongest model on the configured endpoint
+     * with the highest reasoning effort to verify a statement and return a
+     * structured verdict. Bypasses the aihelper wrapper because aihelper's
+     * enable_thinking parameter only reaches effort=medium; we want "high"
+     * here so the model takes its time and reasons through the claim.
+     *
+     * @return array{verdict: string, percentage: int, confidence: int, explanation: string, sources: array<int, array{label: string, url: string}>}|null
+     */
+    private function runFactCheck(string $statement): ?array
+    {
+        $env = $this->loadEnv();
+        $apiKey = (string) ($env['AI_API_KEY'] ?? '');
+        $baseUrl = rtrim(string: (string) ($env['AI_BASE_URL'] ?? ''), characters: '/');
+        if ($apiKey === '' || $baseUrl === '') {
+            return null;
+        }
+        // gpt-5.5 is the strongest general model on the rebuhleiv endpoint;
+        // "reasoning.effort=high" routes through the long-thinking path.
+        // Prompt-Aufbau orientiert sich an etablierten Fact-Check-Skills
+        // (petar-nauka/SKILL.md, dia browser, daymade, awesomeskill): Claim-
+        // Zerlegung als Backbone, mehrstufige Quellen-Hierarchie mit
+        // Triangulation, CRAAP-Check, Red-Flag-Taxonomie, adversarial
+        // review, transparente Confidence-Kalibrierung, sauberes Verdict-
+        // Mapping vom internen 6-Punkte-Schema auf das 3-Punkte-Output.
+        $prompt = "Du bist ein methodisch arbeitender, nüchterner Fact-Checker. Prüfe die folgende Aussage gründlich nach dem unten beschriebenen Verfahren.\n\n" .
+            "AUSSAGE: \"" . $statement . "\"\n\n" .
+
+            "===== VERFAHREN (intern anwenden, NICHT im Output erwähnen) =====\n\n" .
+
+            "(1) CLAIM-ZERLEGUNG\n" .
+            "Zerlege die Aussage in einzelne überprüfbare Teil-Behauptungen. Klassifiziere jede:\n" .
+            "- F = Faktische Behauptung (überprüfbar)\n" .
+            "- S = Statistische Behauptung (Zahlen — extra prüfen: Kontext, Bezugsgröße, Zeitraum, Methodik, absolut vs. relativ)\n" .
+            "- I = Implizierte Behauptung (nicht direkt gesagt, aber stark suggeriert — z. B. durch Framing, Reihenfolge, Andeutung)\n" .
+            "- O = Meinung / Werturteil (nicht prüfbar)\n" .
+            "- P = Prognose / Zukunftsaussage (nicht prüfbar)\n" .
+            "- U = Vage / nicht falsifizierbar\n" .
+            "Bewerte JEDE Teil-Behauptung einzeln, dann aggregiere zur Gesamtbewertung. Wichtig: Desinformation ist selten 100 % falsch — sie mischt Wahres mit Falschem. Ein pauschales \"stimmt nicht\" für eine Aussage, die einen korrekten und einen falschen Teil enthält, ist ebenso problematisch wie ein pauschales \"stimmt\".\n\n" .
+
+            "(2) QUELLEN-TRIANGULATION\n" .
+            "Für jede F- oder S-Teil-Behauptung: mindestens **3 unabhängige Belege aus Tier 1-4**. Quellen gelten als unabhängig, wenn sie nicht voneinander zitieren oder dieselbe Pressemitteilung wiedergeben. Bei nur 1-2 belastbaren Belegen → confidence reduzieren.\n\n" .
+
+            "(3) QUELLEN-HIERARCHIE (höchste → niedrigste Verlässlichkeit)\n" .
+            "- Tier 1 — Fact-Check-Organisationen (IFCN-zertifiziert): Correctiv, dpa-Faktencheck, ARD Faktenfinder, AFP Fact Check, Snopes, PolitiFact, Full Fact, FactCheck.org, EUvsDisinfo\n" .
+            "- Tier 2 — Offizielle Institutionen: WHO, CDC, RKI, EMA, ECDC, Eurostat, Destatis, Bundesregierung, EU-Kommission, Bundesbank, BVerfG, OECD, IPCC\n" .
+            "- Tier 3 — Wire-Services & Qualitätsjournalismus: Reuters, AP, dpa, BBC, Tagesschau, FAZ, Süddeutsche, Zeit, Spiegel, Handelsblatt, NYT, Guardian, Economist\n" .
+            "- Tier 4 — Peer-reviewed Journals & Forschungsdatenbanken: PubMed, Cochrane Reviews, Nature, Science, The Lancet, NEJM, Google Scholar, arXiv (mit Vorsicht: Preprint ≠ peer-reviewed)\n" .
+            "- Tier 5 — Fachorganisationen / Universitäten: Max-Planck-Institute, Helmholtz, Leibniz, IAEA, ITU, Universitäts-Publikationen\n" .
+            "- Tier 6 — Etablierte Regional- oder Online-Medien mit Redaktion (z. B. heise, golem, t3n für Tech; PNP, RP-Online für regional)\n" .
+            "- Tier 7 — Blogs, persönliche Sites, Social Media — nur ergänzend, nie als alleiniger Beleg\n" .
+            "- Tier 8 — Anonyme oder unzuschreibbare Quellen — nicht verwenden\n" .
+            "Mische PRIMÄRQUELLEN (Originaldokumente, Studien, Gesetzestexte, Statistik-Originale) UND SEKUNDÄRQUELLEN (journalistische Aufbereitung). Primärquellen bevorzugt.\n\n" .
+
+            "(4) CRAAP-CHECK pro Quelle\n" .
+            "- Currency — Aktualität: passt der Zeitstand zur Behauptung?\n" .
+            "- Relevance — Adressiert die Quelle die Behauptung direkt?\n" .
+            "- Authority — Wer ist Autor/Herausgeber? Qualifikation im richtigen Fachgebiet?\n" .
+            "- Accuracy — Werden Primärquellen zitiert? Sind Zahlen mit Methodik unterlegt?\n" .
+            "- Purpose — Information vs. Persuasion vs. Werbung vs. Satire?\n\n" .
+
+            "(5) RED-FLAG-ERKENNUNG (auf Manipulationsmarker achten)\n" .
+            "- Cherry-picking — selektive Daten ohne Kontext oder Vergleichszeitraum\n" .
+            "- False dichotomy / Strohmann / Whataboutism / Slippery Slope\n" .
+            "- Korrelation als Kausalität präsentiert (post hoc ergo propter hoc)\n" .
+            "- Relative vs. absolute Prozent (\"100 % mehr Risiko\" ohne Basisrate)\n" .
+            "- Veraltete Daten als aktuell präsentiert; Zahlen aus anderem Land/Kontext übernommen\n" .
+            "- Aus dem Kontext gerissene Zitate; selektive Zitierung von Studien\n" .
+            "- Fehlattribuierte Studien (\"Studie zeigt\" ohne Beleg, oder Studie sagt das Gegenteil des Behaupteten)\n" .
+            "- Appeal to false authority (Experte spricht außerhalb seines Fachgebiets)\n" .
+            "- Naturalistic Fallacy (\"natürlich = gut\", \"chemisch = böse\")\n" .
+            "- Anekdoten als Beleg für allgemeine Trends (n=1 → Verallgemeinerung)\n\n" .
+
+            "(6) ADVERSARIAL REVIEW\n" .
+            "Bevor du das Verdict festschreibst: Argumentiere intern aus der Gegenposition. Was würde ein kritischer Reviewer einwenden? Hat die Aussage einen Kern, der korrekt sein könnte, auch wenn das Framing schief ist? Wenn ja → eher \"teilweise\" statt \"stimmt nicht\".\n\n" .
+
+            "(7) CONFIDENCE-KALIBRIERUNG\n" .
+            "- HOCH (80-100): ≥3 unabhängige Tier-1-2-Quellen stimmen überein; offizielle Daten belegen direkt; keine wesentlichen Restunsicherheiten.\n" .
+            "- MITTEL (50-79): nur 1-2 belastbare Quellen; Sekundärquellen dominieren; kleine Diskrepanzen zwischen Quellen; Spezialgebiet, das du nur grob abdeckst.\n" .
+            "- NIEDRIG (0-49): Behauptung betrifft Zeitraum nach deinem Trainings-Wissensstand; Quellen widersprechen sich erheblich; ausschließlich Sekundärquellen ohne Primärbeleg; Behauptung schwer falsifizierbar; technisch komplexes Spezialgebiet außerhalb deiner Kernkompetenz.\n\n" .
+
+            "===== OUTPUT =====\n\n" .
+
+            "Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Markdown-Codeblock, keine Vorrede:\n\n" .
+            "{\n" .
+            "  \"verdict\": \"stimmt\" | \"teilweise\" | \"stimmt nicht\",\n" .
+            "  \"percentage\": <Ganze Zahl 0-100, wieviel Prozent der Aussage faktisch korrekt ist>,\n" .
+            "  \"confidence\": <Ganze Zahl 0-100, wie sicher du bei dieser Bewertung bist>,\n" .
+            "  \"explanation\": \"<8-14 Sätze in 3-4 Absätzen, Absätze durch \\n\\n getrennt>\",\n" .
+            "  \"sources\": [ {\"label\": \"<Quellenname mit Kontext>\", \"url\": \"https://...\"}, ... ]\n" .
+            "}\n\n" .
+
+            "VERDICT-MAPPING (intern 6-stufig, gibst 3 aus):\n" .
+            "- \"stimmt\" = CONFIRMED (alle Teil-Behauptungen unabhängig belegt) oder MOSTLY TRUE (Kernaussage korrekt, Details unpräzise) → percentage 75-100\n" .
+            "- \"teilweise\" = MIXED (Wahres mit Falschem gemischt), UNVERIFIED (mit verfügbaren Belegen nicht entscheidbar) oder MISLEADING (irreführend gerahmt trotz korrekter Einzel-Fakten) → percentage 25-74\n" .
+            "- \"stimmt nicht\" = FALSE (durch belastbare Belege direkt widerlegt) → percentage 0-24\n\n" .
+
+            "EXPLANATION — Aufbau:\n" .
+            "- Absatz 1: Verdict + die entscheidenden Fakten/Zahlen, die es tragen.\n" .
+            "- Absatz 2: Historischer/fachlicher Kontext (warum die Behauptung in dieser Form kursiert, welcher Konsens herrscht).\n" .
+            "- Absatz 3: Welche Teil-Behauptungen stimmen, welche nicht — jeweils kurz begründet. Bei \"teilweise\": die Mischung ausführlich erklären.\n" .
+            "- Absatz 4 (optional): Confidence-Faktoren (was hebt/senkt die Sicherheit), Restunsicherheiten, zeitlicher Kontext (\"Stand 2025...\", \"frühere Daten lauteten...\").\n" .
+            "Sprachliche Vorgaben:\n" .
+            "- Sachlich, ohne Floskeln, ohne moralische Wertung, ohne rhetorische Fragen.\n" .
+            "- Numerische Präzision an der Quelle ausrichten (\"etwa 1,2 Mio.\" wenn Quelle exakter ist; nicht \"ungefähr\" verwenden, wenn Originalwert bekannt).\n" .
+            "- Datums-sensitive Aussagen mit Stand kennzeichnen.\n" .
+            "- Hebe 5-10 Schlüsselbegriffe und Zahlen mit **doppelten Sternchen** als Markdown-Bold hervor.\n\n" .
+
+            "SOURCES — Regeln:\n" .
+            "- 5 bis 8 Quellen, möglichst aus Tier 1-4, gemischt aus Primär- und Sekundärquellen.\n" .
+            "- Mindestens 3 müssen unabhängig die Bewertung stützen (Triangulation).\n" .
+            "- Bei Statistik-Behauptungen: mindestens 1 Tier-2-Quelle (offizielles Statistik-Amt / Behörde).\n" .
+            "- Bei medizinischen Behauptungen: mindestens 1 Tier-2-Quelle (WHO, RKI, EMA o. ä.) UND 1 Tier-4-Quelle (peer-reviewed).\n" .
+            "- KEINE Quellen erfinden. Bei Unsicherheit über die exakte URL: NUR Label angeben, \"url\" leer (\"\") lassen.\n" .
+            "- Label sollte aussagekräftig sein (z. B. \"Destatis — Pressemitteilung Nr. 384/2024 vom 09.10.2024\" statt nur \"Destatis\").\n\n" .
+
+            "EDGE CASES:\n" .
+            "- Aussage betrifft Ereignis nach Trainings-Wissensstand → verdict \"teilweise\", confidence niedrig, in Absatz 4 explizit erwähnen.\n" .
+            "- Aussage ist im Kern eine Meinung/Wertung → verdict \"teilweise\", erkläre, dass es keine Tatsachenbehauptung ist, prüfe etwaige eingebettete Tatsachenkomponenten separat.\n" .
+            "- Aussage ist mehrdeutig/vage → verdict \"teilweise\", erkläre die Mehrdeutigkeit, prüfe die plausibelste Lesart.\n" .
+            "- Aussage enthält veraltete Zahlen, die zum damaligen Zeitpunkt korrekt waren → verdict \"teilweise\" mit erklärtem Zeitkontext.\n" .
+            "- Aussage ist statistisch korrekt, aber irreführend gerahmt (\"100 % korrekt zitierte Studie zu falschem Kontext\") → verdict \"teilweise\" oder \"stimmt nicht\", explizit als MISLEADING erklären.\n\n" .
+
+            "ANTI-HALLUZINATION:\n" .
+            "- Bei Statistiken: niemals exakte Zahlen erfinden. Bandbreite oder \"in der Größenordnung von\" wenn unsicher.\n" .
+            "- Bei Studien: lieber \"mehrere Reviews zeigen\" als eine erfundene Einzelstudie nennen.\n" .
+            "- Bei URLs: nur die, bei denen du mit hoher Sicherheit weißt, dass sie existieren. Im Zweifel Label-only ohne URL.\n" .
+            "- Wenn du den Sachverhalt nicht belegen kannst: verdict \"teilweise\" mit niedriger confidence statt geraten.\n\n" .
+
+            "WICHTIG: Schreibe nicht \"Tier 1\", \"CRAAP\", \"F/S/I/O/P/U\" oder \"adversarial review\" in den Output — die Methode ist nur interne Denkstruktur. Im Explanation-Text fliesst die Bewertung als natürlicher Fachtext.";
+
+        $body = json_encode(value: [
+            'model' => 'gpt-5.5',
+            'input' => $prompt,
+            'reasoning' => ['effort' => 'high'],
+            'max_output_tokens' => 12000,
+        ], flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($body === false) {
+            return null;
+        }
+
+        $ch = curl_init();
+        curl_setopt_array(handle: $ch, options: [
+            CURLOPT_URL => $baseUrl . '/responses',
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . $apiKey, 'Content-Type: application/json'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 300,
+        ]);
+        $resp = curl_exec(handle: $ch);
+        $httpCode = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
+        if (!is_string(value: $resp) || $httpCode !== 200) {
+            return null;
+        }
+        $decoded = json_decode(json: $resp, associative: true);
+        if (!is_array(value: $decoded)) {
+            return null;
+        }
+        // Responses API: output[*].content[*].text holds the model reply.
+        $text = '';
+        foreach ((array) ($decoded['output'] ?? []) as $node) {
+            foreach ((array) ($node['content'] ?? []) as $c) {
+                if (($c['type'] ?? '') === 'output_text' && isset($c['text']) && is_string($c['text'])) {
+                    $text .= $c['text'];
+                }
+            }
+        }
+        $text = trim(string: $text);
+        $text = (string) preg_replace(pattern: '~^\s*```(?:json)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
+        $parsed = json_decode(json: $text, associative: true);
+        if (!is_array(value: $parsed)) {
+            return null;
+        }
+        $verdict = (string) ($parsed['verdict'] ?? 'teilweise');
+        if (!in_array(needle: $verdict, haystack: ['stimmt', 'teilweise', 'stimmt nicht'], strict: true)) {
+            $verdict = 'teilweise';
+        }
+        $percentage = max(0, min(100, (int) ($parsed['percentage'] ?? 0)));
+        $confidence = max(0, min(100, (int) ($parsed['confidence'] ?? 0)));
+        $explanation = trim(string: (string) ($parsed['explanation'] ?? ''));
+        if ($explanation === '') {
+            return null;
+        }
+        $sources = [];
+        foreach ((array) ($parsed['sources'] ?? []) as $src) {
+            if (!is_array(value: $src)) {
+                continue;
+            }
+            $label = trim(string: (string) ($src['label'] ?? ''));
+            $url = trim(string: (string) ($src['url'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $sources[] = ['label' => $label, 'url' => $url];
+        }
+        return [
+            'verdict' => $verdict,
+            'percentage' => $percentage,
+            'confidence' => $confidence,
+            'explanation' => $explanation,
+            'sources' => $sources,
+        ];
+    }
+
     private function renderDashboard(
         string $paperFilter,
         string $tvFilter,
@@ -6154,7 +6520,9 @@ final class Extrablatt
         string $sortFilter,
         string $magicFilter,
         string $thumbFilter,
-        string $viewFilter
+        string $viewFilter,
+        string $factcheckStatement = '',
+        bool $factcheckPending = false
     ): string {
         $articles = $this->fetchArticlesForDashboard(
             paperFilter: $paperFilter,
@@ -6418,17 +6786,20 @@ final class Extrablatt
         // shows the classic filter form + list. Filter form carries the
         // view in a hidden input so submitting a filter preserves the tab.
         $isZeitung = $viewFilter === 'zeitung';
+        $isFactcheck = $viewFilter === 'factcheck';
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset; "Meldungen" tab covers every other meldungen state.
-        $isTalkshowView = !$isZeitung && $tvFilter === 'all';
+        $isTalkshowView = !$isZeitung && !$isFactcheck && $tvFilter === 'all';
+        $isMeldungenView = !$isZeitung && !$isFactcheck && !$isTalkshowView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
-        $meldungenActive = (!$isZeitung && !$isTalkshowView) ? ' viewnav__tab--active' : '';
+        $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
+        $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
         // onchange="filterChange(this)" auto-flips Magisch → "Alle" when the
         // user picks a single filter on an otherwise empty form. See the
         // <script> at the bottom of the template.
-        $meldungenBlock = $isZeitung ? '' : <<<HTML
+        $meldungenBlock = $isMeldungenView || $isTalkshowView ? <<<HTML
                 <form class="filters" method="get" action="/">
                     <input type="hidden" name="view" value="meldungen">
                     <select name="paper" onchange="filterChange(this)">{$paperOptions}</select>
@@ -6442,7 +6813,8 @@ final class Extrablatt
                     <select name="sort" onchange="this.form.submit()">{$sortDropdown}</select>
                 </form>
                 <ul class="items">{$rows}</ul>
-HTML;
+HTML : '';
+        $factcheckBlock = $isFactcheck ? $this->buildFactCheckBlock(statement: $factcheckStatement, pending: $factcheckPending) : '';
 
         // Last scrape timestamp via mtime of scrape.log (truncated at scrape
         // start, appended throughout — mtime tracks the most recent emit).
@@ -6552,6 +6924,31 @@ HTML;
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
+                section.factcheck { margin: 1.5rem 0; font-family: Lora, Georgia, "Times New Roman", serif; }
+                .factcheck__form { display: flex; gap: 8px; margin-bottom: 1.3rem; }
+                .factcheck__form input[type="text"] { flex: 1; min-width: 0; font: 500 16px/1.3 system-ui, sans-serif; padding: 10px 12px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; color: #18181b; }
+                .factcheck__form input[type="text"]:focus { outline: none; border-color: #18181b; }
+                .factcheck__form button { font: 700 13px/1 system-ui, sans-serif; padding: 10px 18px; background: #18181b; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+                .factcheck__form button:hover { background: #3f3f46; }
+                .factcheck__hint { font: 500 14px/1.6 system-ui, sans-serif; color: #71717a; margin: 2.5rem 0; text-align: justify; hyphens: auto; }
+                .factcheck__loading { display: flex; flex-direction: column; align-items: stretch; gap: 56px; padding: 40px 0; }
+                .factcheck__loading .factcheck__spinner { align-self: center; }
+                .factcheck__spinner { width: 32px; height: 32px; border: 3px solid #e4e4e7; border-top-color: #18181b; border-radius: 50%; animation: factcheck-spin 0.8s linear infinite; }
+                @keyframes factcheck-spin { to { transform: rotate(360deg); } }
+                .factcheck__loading .factcheck__hint { margin: 0; }
+                .factcheck__prose + .factcheck__prose { margin-top: 0.7rem; }
+                .factcheck__bar { position: relative; height: 28px; background: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 6px; overflow: hidden; margin-bottom: 0.6rem; }
+                .factcheck__bar-fill { height: 100%; transition: width 0.4s ease; }
+                .factcheck__bar--true .factcheck__bar-fill { background: linear-gradient(90deg, #86efac, #16a34a); }
+                .factcheck__bar--false .factcheck__bar-fill { background: linear-gradient(90deg, #fca5a5, #dc2626); }
+                .factcheck__bar--partial .factcheck__bar-fill { background: linear-gradient(90deg, #fde68a, #ca8a04); }
+                .factcheck__bar-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font: 700 13px/1 system-ui, sans-serif; letter-spacing: 0.02em; color: #18181b; text-shadow: 0 0 4px rgba(255,255,255,0.6); }
+                .factcheck__meta { font: 500 12px/1.4 system-ui, sans-serif; color: #71717a; margin-bottom: 1rem; }
+                .factcheck__meta strong { color: #18181b; }
+                .factcheck__prose { font-size: 16px; line-height: 1.55; color: #18181b; margin: 0 0 0.8rem; text-align: justify; hyphens: auto; }
+                .factcheck__sources { display: flex; flex-direction: column; gap: 4px; margin-top: 1rem; font: 500 12.5px/1.4 system-ui, sans-serif; color: #a1a1aa; letter-spacing: 0.02em; }
+                .factcheck__sources a, .factcheck__sources span { color: #71717a; text-decoration: none; display: block; }
+                .factcheck__sources a:hover { color: #18181b; text-decoration: underline; }
                 ul.items { list-style: none; padding: 0; margin: 0; }
                 .item { position: relative; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; margin: 0 0 10px; transition: opacity 0.18s ease, max-height 0.18s ease, margin 0.18s ease, border-width 0.18s ease; contain: layout paint style; content-visibility: auto; contain-intrinsic-size: 0 92px; }
                 .item__swipe { position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: #fff; touch-action: pan-y; transition: transform 0.18s ease; will-change: transform; }
@@ -6645,6 +7042,19 @@ HTML;
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
+                html[data-theme="dark"] .factcheck__form input[type="text"] { background: #27272a; color: #e4e4e7; border-color: #3f3f46; }
+                html[data-theme="dark"] .factcheck__form input[type="text"]:focus { border-color: #a1a1aa; }
+                html[data-theme="dark"] .factcheck__form button { background: #e4e4e7; color: #18181b; }
+                html[data-theme="dark"] .factcheck__form button:hover { background: #fafafa; }
+                html[data-theme="dark"] .factcheck__hint { color: #a1a1aa; }
+                html[data-theme="dark"] .factcheck__spinner { border-color: #3f3f46; border-top-color: #e4e4e7; }
+                html[data-theme="dark"] .factcheck__bar { background: #27272a; border-color: #3f3f46; }
+                html[data-theme="dark"] .factcheck__bar-label { color: #fafafa; text-shadow: 0 0 4px rgba(0,0,0,0.7); }
+                html[data-theme="dark"] .factcheck__meta { color: #a1a1aa; }
+                html[data-theme="dark"] .factcheck__meta strong { color: #fafafa; }
+                html[data-theme="dark"] .factcheck__prose { color: #e4e4e7; }
+                html[data-theme="dark"] .factcheck__sources, html[data-theme="dark"] .factcheck__sources a, html[data-theme="dark"] .factcheck__sources span { color: #a1a1aa; }
+                html[data-theme="dark"] .factcheck__sources a:hover { color: #fafafa; }
                 html[data-theme="dark"] .meta__paper { background: #3f3f46; color: #e4e4e7; }
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
@@ -6672,9 +7082,11 @@ HTML;
                     <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                     <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                     <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
+                    <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
                 </nav>
                 {$zeitungBlock}
                 {$meldungenBlock}
+                {$factcheckBlock}
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
