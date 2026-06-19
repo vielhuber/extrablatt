@@ -1221,6 +1221,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'zdfmediathek://')) {
             return $this->fetchZdfMediathekItems(paper: $paper, feedUrl: $feedUrl);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'wikipedia://')) {
+            return $this->fetchWikipediaCurrentEventsItems(paper: $paper);
+        }
 
         $body = $this->cacheGet(key: 'feed:' . $paper);
         if ($body === null || $body === '') {
@@ -1511,6 +1514,175 @@ final class Extrablatt
             }
         }
         return $items;
+    }
+
+    /**
+     * Scrape Wikipedia's Portal:Current_events into individual news items.
+     * No official RSS feed exists for the portal, but the page has clean
+     * semantic markup: a "Topics in the news" (ITN) highlights box and one
+     * "vevent" block per day whose leaf <li> items each carry a news
+     * sentence plus an external source link (Reuters, AP, Al Jazeera, …).
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchWikipediaCurrentEventsItems(string $paper): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        if ($body === null || $body === '') {
+            $result = $this->fetchViaImpersonate(url: 'https://en.wikipedia.org/wiki/Portal:Current_events');
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseWikipediaCurrentEvents(html: $body);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseWikipediaCurrentEvents(string $html): array
+    {
+        if (trim(string: $html) === '') {
+            return [];
+        }
+        $dom = new \DOMDocument();
+        $previous = libxml_use_internal_errors(use_errors: true);
+        // The encoding hint forces UTF-8 so umlauts/dashes survive parsing.
+        $dom->loadHTML('<?xml encoding="UTF-8">' . $html);
+        libxml_clear_errors();
+        libxml_use_internal_errors(use_errors: $previous);
+        $xpath = new \DOMXPath(document: $dom);
+
+        $items = [];
+        $seen = [];
+        $now = time();
+
+        // 1) Top news — the "Topics in the news" highlights box. Each <li> is
+        //    one item linking to a Wikipedia article. These get a rating boost
+        //    so they outrank routine daily items in the magic bucket.
+        $itnList = $xpath->query(expression: "//h2[@id='Topics_in_the_news']/following::ul[1]/li");
+        if ($itnList !== false) {
+            foreach ($itnList as $li) {
+                if (!$li instanceof \DOMElement) {
+                    continue;
+                }
+                $text = $this->wikipediaCleanItemText(xpath: $xpath, node: $li);
+                // Drop the "(… pictured)" caption note from ITN items. It sits
+                // just before the closing period, so allow trailing punctuation.
+                $text = trim(string: (string) preg_replace(pattern: '~\s*\([^)]*pictured[^)]*\)\s*([.;,])?\s*$~iu', replacement: '$1', subject: $text));
+                if (mb_strlen(string: $text) < 20) {
+                    continue;
+                }
+                $link = $this->wikipediaBestLink(xpath: $xpath, node: $li);
+                if ($link === '' || isset($seen[$link])) {
+                    continue;
+                }
+                $seen[$link] = true;
+                $items[] = new FeedItem(
+                    title: mb_substr(string: $text, start: 0, length: 240),
+                    link: $link,
+                    publishedAt: $now,
+                    imageUrl: null,
+                    rating: 100
+                );
+            }
+        }
+
+        // 2) Daily news — leaf <li> items inside each day's content block that
+        //    carry an external source citation. Days are already newest-first.
+        $dayBlocks = $xpath->query(expression: "//div[contains(concat(' ', normalize-space(@class), ' '), ' current-events-main ')]");
+        if ($dayBlocks !== false) {
+            foreach ($dayBlocks as $day) {
+                if (!$day instanceof \DOMElement) {
+                    continue;
+                }
+                $publishedAt = $now;
+                $bday = $xpath->query(expression: ".//span[contains(concat(' ', normalize-space(@class), ' '), ' bday ')]", contextNode: $day)->item(index: 0);
+                if ($bday !== null) {
+                    $ts = strtotime(datetime: trim(string: $bday->textContent));
+                    if ($ts !== false) {
+                        // Anchor at local noon so day-granular dates sort sanely.
+                        $publishedAt = $ts + 12 * 3600;
+                    }
+                }
+                $leaves = $xpath->query(
+                    expression: ".//div[contains(concat(' ', normalize-space(@class), ' '), ' current-events-content ')]"
+                        . "//li[not(.//ul) and .//a[contains(concat(' ', normalize-space(@class), ' '), ' external ')]]",
+                    contextNode: $day
+                );
+                if ($leaves === false) {
+                    continue;
+                }
+                foreach ($leaves as $li) {
+                    if (!$li instanceof \DOMElement) {
+                        continue;
+                    }
+                    $ext = $xpath->query(expression: ".//a[contains(concat(' ', normalize-space(@class), ' '), ' external ')]", contextNode: $li)->item(index: 0);
+                    if (!$ext instanceof \DOMElement) {
+                        continue;
+                    }
+                    $link = trim(string: $ext->getAttribute(qualifiedName: 'href'));
+                    if ($link === '' || isset($seen[$link]) || !str_starts_with(haystack: $link, needle: 'http')) {
+                        continue;
+                    }
+                    $text = $this->wikipediaCleanItemText(xpath: $xpath, node: $li);
+                    if (mb_strlen(string: $text) < 20) {
+                        continue;
+                    }
+                    $seen[$link] = true;
+                    $items[] = new FeedItem(
+                        title: mb_substr(string: $text, start: 0, length: 240),
+                        link: $link,
+                        publishedAt: $publishedAt,
+                        imageUrl: null,
+                        rating: null
+                    );
+                    if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                        return $items;
+                    }
+                }
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * Plain-text of a Wikipedia list item with the trailing source-citation
+     * anchors (e.g. "(Reuters)") stripped out.
+     */
+    private function wikipediaCleanItemText(\DOMXPath $xpath, \DOMElement $node): string
+    {
+        $clone = $node->cloneNode(deep: true);
+        $externals = $xpath->query(expression: ".//a[contains(concat(' ', normalize-space(@class), ' '), ' external ')]", contextNode: $clone);
+        if ($externals !== false) {
+            foreach (iterator_to_array(iterator: $externals) as $a) {
+                if ($a->parentNode !== null) {
+                    $a->parentNode->removeChild(child: $a);
+                }
+            }
+        }
+        $text = (string) preg_replace(pattern: '~\s+~u', replacement: ' ', subject: $clone->textContent);
+        return trim(string: $text);
+    }
+
+    /**
+     * Best target link for a top-news item: prefer the bold (editorially
+     * highlighted) Wikipedia article, else the first internal wiki link.
+     * Returns an absolute en.wikipedia.org URL, or '' if none found.
+     */
+    private function wikipediaBestLink(\DOMXPath $xpath, \DOMElement $node): string
+    {
+        $bold = $xpath->query(expression: ".//b//a[starts-with(@href, '/wiki/')]", contextNode: $node)->item(index: 0);
+        $anchor = $bold instanceof \DOMElement
+            ? $bold
+            : $xpath->query(expression: ".//a[starts-with(@href, '/wiki/')]", contextNode: $node)->item(index: 0);
+        if (!$anchor instanceof \DOMElement) {
+            return '';
+        }
+        $href = $anchor->getAttribute(qualifiedName: 'href');
+        return $href !== '' ? 'https://en.wikipedia.org' . $href : '';
     }
 
     /**
