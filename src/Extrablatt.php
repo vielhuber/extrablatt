@@ -5459,11 +5459,13 @@ final class Extrablatt
             return;
         }
 
-        $cutoff = time() - 7 * 86400;
-        // No LIMIT: the duplicate_of filter already keeps the volume in
-        // check (~2-3k items for a 7-day window) and feeding the full pool
-        // lets the LLM pick across all themes instead of biasing toward the
-        // most recent 1000 headlines.
+        $now = time();
+        $cutoff = $now - 7 * 86400;
+        // Pull the full 7-day, non-duplicate pool newest-first, then
+        // downsample (below). Feeding the raw pool (~18k headlines / ~470k
+        // tokens) turned the Wochenübersicht into a flat trailing-7-day
+        // average: it barely moved day-to-day and froze long-running stories
+        // on their first-week framing (e.g. "WM 1. Woche" deep into week two).
         $stmt = $db->prepare(query: '
             SELECT url, paper, title, category, published_at
             FROM articles
@@ -5473,31 +5475,63 @@ final class Extrablatt
             ORDER BY published_at DESC
         ');
         $stmt->execute(params: [':since' => $cutoff]);
-        $articles = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
-        if ($articles === []) {
+        $pool = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
+        if ($pool === []) {
             $emit('  → keine Artikel in den letzten 7 Tagen, überspringe');
             return;
         }
 
+        // Recency-weighted downsample: cap how many headlines each
+        // (day, category) bucket may contribute, with today/yesterday getting
+        // a far higher quota than older days. Keeps the prompt small (~1k
+        // lines) and lets fresh items dominate, so the digest reflects the
+        // CURRENT state of the week instead of averaging the whole window.
         $todayMidnight = strtotime(datetime: 'today');
+        $perBucket = [];
+        $articles = [];
         $todayCount = 0;
-        $lines = [];
-        foreach ($articles as $i => $a) {
-            $isToday = ((int) ($a['published_at'] ?? 0)) >= $todayMidnight;
-            if ($isToday) {
+        $maxTotal = 1500;
+        foreach ($pool as $a) {
+            if (count(value: $articles) >= $maxTotal) {
+                break;
+            }
+            $pub = (int) ($a['published_at'] ?? 0);
+            // Clamp future-dated items (some feeds post ahead) into today.
+            $effective = $pub > $now ? $now : $pub;
+            $daysAgo = (int) floor(num: max(0, $todayMidnight - strtotime(datetime: 'today', baseTimestamp: $effective)) / 86400);
+            $cap = match (true) {
+                $daysAgo <= 0 => 6,   // today
+                $daysAgo === 1 => 3,  // yesterday
+                default => 2,         // 2–6 days ago
+            };
+            $bucket = $daysAgo . '|' . ((string) ($a['category'] ?? '-'));
+            $perBucket[$bucket] = ($perBucket[$bucket] ?? 0) + 1;
+            if ($perBucket[$bucket] > $cap) {
+                continue;
+            }
+            $articles[] = $a;
+            if ($pub >= $todayMidnight) {
                 $todayCount++;
             }
-            $marker = $isToday ? ' (heute)' : '';
-            $lines[] = ($i + 1) . '. [' . ((string) ($a['paper'] ?? '?')) . ' | ' . ((string) ($a['category'] ?? '-')) . ']' . $marker . ' '
+        }
+
+        $lines = [];
+        foreach ($articles as $i => $a) {
+            $pub = (int) ($a['published_at'] ?? 0);
+            $isToday = $pub >= $todayMidnight;
+            $dateStr = date(format: 'd.m.', timestamp: $pub > $now ? $now : $pub);
+            $lines[] = ($i + 1) . '. ' . $dateStr . ($isToday ? ' (heute)' : '')
+                . ' [' . ((string) ($a['paper'] ?? '?')) . ' | ' . ((string) ($a['category'] ?? '-')) . '] '
                 . mb_substr(string: (string) ($a['title'] ?? ''), start: 0, length: 180);
         }
 
         $prompt =
+            "Heute ist der " . date(format: 'd.m.Y', timestamp: $now) . ".\n" .
             "Du bist ein Zeitungs-Chefredakteur und schreibst ZWEI Texte für einen Privatleser, " .
             "der nicht jeden Tag liest:\n" .
             "  1. EINE \"Meldung des Tages\" — die brisanteste Story von HEUTE, themenübergreifend gewählt.\n" .
             "  2. Eine Wochenübersicht mit 5 bis 7 Geschichten der letzten 7 Tage, geordnet nach Themengruppen.\n\n" .
-            "Hier alle Artikel-Schlagzeilen. Artikel von HEUTE sind mit '(heute)' markiert:\n\n" .
+            "Jede Zeile beginnt mit dem Erscheinungsdatum (TT.MM.); Artikel von HEUTE sind zusätzlich mit '(heute)' markiert:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
             "MELDUNG DES TAGES (top_today): EIN Absatz von 1 bis 2 Sätzen zur BRISANTESTEN Story von heute, " .
             "THEMENÜBERGREIFEND. Die Story muss NICHT politisch sein — wähle aus ALLEN Themengruppen (Politik, " .
@@ -5527,7 +5561,8 @@ final class Extrablatt
             "  3. dann alle Wirtschaft-&-Finanzen-Absätze\n" .
             "  4. dann Sport, Kultur & Medien, Gesundheit, Gesellschaft & Panorama, Lokal & Regional, Reise & Lifestyle, Sonstiges (in dieser Folge)\n" .
             "Themengruppen ohne ausgewählte Story werden einfach übersprungen. Innerhalb derselben Gruppe absteigend nach Brisanz und Tragweite. " .
-            "Mehrfach-Berichterstattung zur gleichen Story (auch über mehrere Tage) in einem Absatz bündeln. " .
+            "Mehrfach-Berichterstattung zur gleichen Story (auch über mehrere Tage) in einem Absatz bündeln und dabei den AKTUELLEN Stand laut den JÜNGSTEN Artikeln (höchstes Datum) beschreiben — NICHT das Anfangs-Framing vom Wochenbeginn. " .
+            "Bei laufenden Ereignissen (Turniere, Kriege, Prozesse, Wahlen) den heutigen Stand explizit benennen (z. B. aktuelle Turnierphase/Spieltag, jüngste Entwicklung), nicht den Beginn. " .
             "WICHTIG: Die Story aus \"Meldung des Tages\" DARF in der Wochenübersicht NICHT erneut " .
             "auftauchen — wähle thematisch komplett andere Geschichten, damit es keine inhaltliche " .
             "Doppelung gibt.\n\n" .
