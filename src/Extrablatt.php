@@ -5578,6 +5578,8 @@ final class Extrablatt
             "WICHTIG: Die Artikel-Nummern gehören AUSSCHLIESSLICH in das \"sources\"-Feld des JSON. " .
             "Schreibe KEINE Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den \"paragraph\"-Text — der Fließtext " .
             "darf keinerlei Verweise auf Index-Nummern enthalten.\n\n" .
+            "WICHTIG: Schreibe KEIN Datum und KEINEN '(heute)'-Marker in den \"paragraph\"-Text, auch nicht am Anfang. " .
+            "Die Datumsangaben in den Eingabezeilen dienen NUR deiner Einordnung des aktuellen Stands — der Fließtext ist reine Prosa OHNE Datums-Präfix.\n\n" .
             "Hebe in jedem Absatz die zentralen Schlüsselwörter (Eigennamen, Orte, Zahlen, Kernbegriffe) " .
             "mit doppelten Sternchen als Markdown-Bold hervor — sparsam, maximal 2 bis 4 Stellen pro Absatz, " .
             "Beispiel: **Olaf Scholz** kündigte den Rücktritt aus dem **NATO-Bündnis** an.\n\n" .
@@ -6379,6 +6381,14 @@ final class Extrablatt
         // some models keep appending despite the prompt.
         $paragraph = (string) preg_replace(
             pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u',
+            replacement: '',
+            subject: $paragraph
+        );
+        // Strip a leading date marker like "25.06. (heute) ", "25.06.2026 "
+        // or "(heute) " — the model sometimes echoes the dated input-line
+        // format into the prose. The paragraph must be pure text, no stamp.
+        $paragraph = (string) preg_replace(
+            pattern: '/^\s*(?:\d{1,2}\.\d{1,2}\.(?:\d{2,4})?\.?\s*)?(?:\(\s*heute\s*\)\s*)?/iu',
             replacement: '',
             subject: $paragraph
         );
