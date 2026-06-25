@@ -2889,11 +2889,12 @@ final class Extrablatt
         $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
         $aiModel = (string) ($env['AI_MODEL'] ?? '');
         $aiBaseUrl = (string) ($env['AI_BASE_URL'] ?? '');
+        $aiApiKey = (string) ($env['AI_API_KEY'] ?? '');
         if ($aiProvider === '' || $aiModel === '' || $aiBaseUrl === '') {
             $emit('⚠️  AI nicht vollständig konfiguriert (AI_PROVIDER / AI_MODEL / AI_BASE_URL in .env) — Scrape abgebrochen.');
             return false;
         }
-        $reach = $this->checkAiHostReachable(baseUrl: $aiBaseUrl);
+        $reach = $this->checkAiHostReachable(baseUrl: $aiBaseUrl, apiKey: $aiApiKey);
         if (!$reach['ok']) {
             $emit(sprintf('⚠️  AI-Host nicht erreichbar (%s): %s — Scrape abgebrochen.', $aiBaseUrl, $reach['reason']));
             return false;
@@ -2904,24 +2905,31 @@ final class Extrablatt
     }
 
     /**
-     * Preflight check for the configured AI base URL. Probes /models with a
-     * short connect+read timeout. Any HTTP response (even 401/404) means the
-     * host is alive — only network failures and 5xx count as unreachable.
+     * Preflight check for the configured AI base URL. Sends an authenticated
+     * GET /models with a short connect+read timeout, so a working setup
+     * answers HTTP 200 (confirming host *and* auth). Any HTTP response still
+     * counts as reachable — only network failures and 5xx abort. The probe is
+     * authenticated because some proxies (e.g. cliproxyapi) return 401/404 on
+     * an unauthenticated /models, which looks alarming in the log even though
+     * the host is up.
      *
      * @return array{ok: bool, reason: string}
      */
-    private function checkAiHostReachable(string $baseUrl): array
+    private function checkAiHostReachable(string $baseUrl, string $apiKey = ''): array
     {
         $probeUrl = rtrim(string: $baseUrl, characters: '/') . '/models';
-        $ch = curl_init();
-        curl_setopt_array(handle: $ch, options: [
+        $options = [
             CURLOPT_URL => $probeUrl,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_NOBODY => true,
             CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_TIMEOUT => 10,
             CURLOPT_FOLLOWLOCATION => true,
-        ]);
+        ];
+        if ($apiKey !== '') {
+            $options[CURLOPT_HTTPHEADER] = ['Authorization: Bearer ' . $apiKey];
+        }
+        $ch = curl_init();
+        curl_setopt_array(handle: $ch, options: $options);
         curl_exec(handle: $ch);
         $code = (int) curl_getinfo(handle: $ch, option: CURLINFO_HTTP_CODE);
         $err = (string) curl_error(handle: $ch);
