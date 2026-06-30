@@ -6936,7 +6936,7 @@ final class Extrablatt
                     ? '<time class="meta__date" datetime="' .
                         htmlspecialchars(string: date(format: 'c', timestamp: $publishedAt), flags: ENT_QUOTES) .
                         '">' .
-                        htmlspecialchars(string: date(format: 'd.m. H:i', timestamp: $publishedAt), flags: ENT_QUOTES) .
+                        htmlspecialchars(string: date(format: 'd.m.Y H:i', timestamp: $publishedAt), flags: ENT_QUOTES) .
                         '</time>'
                     : '';
 
@@ -7164,10 +7164,10 @@ HTML : '';
                 header.top h1 a:hover { text-decoration: underline; }
                 header.top .count { font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #71717a; }
                 header.top .last-scrape { font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #a1a1aa; }
-                header.top .scrape-link { margin-left: auto; font: 600 12px/1 system-ui, sans-serif; text-decoration: none; background: #18181b; color: #fff; padding: 8px 12px; border-radius: 6px; }
+                header.top .scrape-link { font: 600 12px/1 system-ui, sans-serif; text-decoration: none; background: #18181b; color: #fff; padding: 8px 12px; border-radius: 6px; }
                 header.top .scrape-link:hover { background: #3f3f46; }
-                header.top .search { margin: 0; }
-                header.top .search input { font: 500 13px/1 system-ui, sans-serif; background: #fff; color: #18181b; padding: 8px 12px; border-radius: 6px; border: 1px solid #d4d4d8; width: 220px; max-width: 42vw; }
+                header.top .search { margin: 0; flex: 1 1 140px; min-width: 120px; }
+                header.top .search input { font: 500 13px/1 system-ui, sans-serif; background: #fff; color: #18181b; padding: 8px 12px; border-radius: 6px; border: 1px solid #d4d4d8; width: 100%; box-sizing: border-box; }
                 header.top .search input:focus { outline: none; border-color: #18181b; }
                 section.search-results { margin-top: 0.5rem; }
                 .search__title { font: 700 16px/1.3 system-ui, sans-serif; color: #18181b; margin: 0 0 0.8rem; }
@@ -7342,10 +7342,10 @@ HTML : '';
                     <span class="count" id="count" data-suffix=" Artikel">{$countLabel}</span>
                     <span class="last-scrape" title="Letzter Scrape">{$lastScrapeLabel}</span>
                     <button type="button" class="theme-toggle" id="themeToggle" title="Theme umschalten" aria-label="Theme umschalten"></button>
-                    <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
                     <form class="search" method="get" action="/" role="search">
                         <input type="search" name="q" value="{$searchValue}" placeholder="🔍 Volltextsuche…" autocomplete="off" aria-label="Volltextsuche">
                     </form>
+                    <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
                 </header>
                 <nav class="viewnav">
                     <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
