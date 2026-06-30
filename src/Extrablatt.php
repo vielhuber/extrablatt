@@ -1686,6 +1686,11 @@ final class Extrablatt
         $weekNumber = (int) date(format: 'W', timestamp: $lastWeekTs);
         $weekYear = (int) date(format: 'o', timestamp: $lastWeekTs);
         $weekStart = strtotime(datetime: $weekYear . 'W' . str_pad(string: (string) $weekNumber, length: 2, pad_string: '0', pad_type: STR_PAD_LEFT));
+        // Date items at the week's END (Sunday ~23:00), not the Monday start:
+        // the weekly leaderboard only finalises at week's end, and a Monday
+        // timestamp pushes the items out of the 7-day "Zeitung" window by
+        // mid-next-week. Clamp to now so it never lands in the future.
+        $weekEnd = min(((int) ($weekStart !== false ? $weekStart : $lastWeekTs)) + 6 * 86400 + 23 * 3600, time());
         if ($body === null || $body === '') {
             $url = 'https://www.producthunt.com/leaderboard/weekly/' . $weekYear . '/' . $weekNumber;
             $result = $this->fetchViaImpersonate(url: $url);
@@ -1695,13 +1700,13 @@ final class Extrablatt
             $body = $result->body;
             $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
-        return $this->parseProductHuntLeaderboard(html: $body, weekStart: $weekStart !== false ? $weekStart : $lastWeekTs);
+        return $this->parseProductHuntLeaderboard(html: $body, publishedTs: $weekEnd);
     }
 
     /**
      * @return array<int, FeedItem>
      */
-    private function parseProductHuntLeaderboard(string $html, int $weekStart): array
+    private function parseProductHuntLeaderboard(string $html, int $publishedTs): array
     {
         // Each card carries a "<rank>. <title>" anchor that points to the
         // product slug; the span with data-target="true" marks the entry
@@ -1750,7 +1755,7 @@ final class Extrablatt
             $items[] = new FeedItem(
                 title: implode(separator: ' ', array: $titleParts),
                 link: 'https://www.producthunt.com' . $path,
-                publishedAt: $weekStart,
+                publishedAt: $publishedTs,
                 imageUrl: null,
                 rating: max(0, 200 - $rank)
             );
@@ -5484,11 +5489,30 @@ final class Extrablatt
         $articles = [];
         $todayCount = 0;
         $maxTotal = 1500;
+        // Discovery feeds (GitHub-Trending repos, ProductHunt launches) cluster
+        // in a single category on a single day — the per-(day,category) cap
+        // would starve them (e.g. 17 ProductHunt items all "AI" → only 2 pass).
+        // Give them a dedicated per-paper quota that bypasses the category cap
+        // so enough reach the LLM for the trending paragraph.
+        $discoveryQuota = ['github' => 12, 'producthunt' => 12];
+        $discoveryCount = [];
         foreach ($pool as $a) {
             if (count(value: $articles) >= $maxTotal) {
                 break;
             }
             $pub = (int) ($a['published_at'] ?? 0);
+            $paper = (string) ($a['paper'] ?? '');
+            if (isset($discoveryQuota[$paper])) {
+                if (($discoveryCount[$paper] ?? 0) >= $discoveryQuota[$paper]) {
+                    continue;
+                }
+                $discoveryCount[$paper] = ($discoveryCount[$paper] ?? 0) + 1;
+                $articles[] = $a;
+                if ($pub >= $todayMidnight) {
+                    $todayCount++;
+                }
+                continue;
+            }
             // Clamp future-dated items (some feeds post ahead) into today.
             $effective = $pub > $now ? $now : $pub;
             $daysAgo = (int) floor(num: max(0, $todayMidnight - strtotime(datetime: 'today', baseTimestamp: $effective)) / 86400);
@@ -5545,6 +5569,7 @@ final class Extrablatt
             "  - Sonstiges: Auto & Verkehr, Garten & Pflanzen, Wetter & Natur, Unfälle, Verbraucher\n" .
             "MENGEN-VORGABEN je Themengruppe (Gesamtsumme MUSS zwischen 5 und 7 liegen):\n" .
             "  - Wissen & Technik: GENAU 2 Absätze (PFLICHT, wenn Stories im Set vorhanden — das ist der Lieblingsbereich des Lesers)\n" .
+            "    Trending-Absatz (PFLICHT, sobald solche Einträge im Set sind): EINER der beiden Wissen-&-Technik-Absätze MUSS die Entwickler-/Produkt-Trends der Woche bündeln und dabei BEIDE Quellenarten abdecken — SOWOHL 2 bis 3 auffällige GitHub-Trending-Projekte (Quelle 'github', herausragende Open-Source-Projekte) ALS AUCH 2 bis 3 auffällige ProductHunt-Launches (Quelle 'producthunt', meistbeachtete Produkt-/Tool-Launches), jeweils kurz benannt (wofür sie stehen). Die \"sources\"-Liste dieses Absatzes MUSS sowohl github- als auch producthunt-Einträge enthalten. Der ANDERE Technik-Absatz bleibt der echten Tech-Nachricht der Woche vorbehalten.\n" .
             "  - Politik: 1 bis 2 Absätze\n" .
             "  - Wirtschaft & Finanzen: 1 Absatz\n" .
             "  - Alle übrigen Gruppen (Sport, Kultur, Gesundheit, Gesellschaft, Lokal, Reise, Sonstiges): zusammen 0 bis 2 Absätze, nur wenn wirklich bedeutsam\n" .
