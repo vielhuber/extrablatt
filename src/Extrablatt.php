@@ -445,23 +445,7 @@ final class Extrablatt
         $magicFilter = (string) ($_GET['magic'] ?? '');
         $thumbFilter = (string) ($_GET['thumb'] ?? '');
         $viewFilter = (string) ($_GET['view'] ?? '');
-
-        if (isset($_POST['reset']) && $_POST['reset'] === '1') {
-            $db = $this->openDatabase();
-            $db->exec(statement: 'DELETE FROM articles');
-            $this->cacheClear();
-            header(header: 'Location: /');
-            return;
-        }
-
-        // Bulk mark-all-read: stamps read_at on every currently unread row.
-        if (isset($_POST['mark_all_read']) && $_POST['mark_all_read'] === '1') {
-            $db = $this->openDatabase();
-            $stmt = $db->prepare(query: 'UPDATE articles SET read_at = :ts WHERE read_at IS NULL');
-            $stmt->execute(params: [':ts' => time()]);
-            header(header: 'Location: /');
-            return;
-        }
+        $searchQuery = trim(string: (string) ($_GET['q'] ?? ''));
 
         // Read-mark beacon: fire-and-forget POST from the dashboard link click.
         // Persists read state in the DB so it survives across browsers and devices.
@@ -565,7 +549,8 @@ final class Extrablatt
                 thumbFilter: $thumbFilter,
                 viewFilter: $viewFilter,
                 factcheckStatement: $factcheckStatement,
-                factcheckPending: $factcheckPending
+                factcheckPending: $factcheckPending,
+                searchQuery: $searchQuery
             );
             return;
         }
@@ -6396,26 +6381,31 @@ final class Extrablatt
         if ($paragraph === '') {
             return '';
         }
+        // Show ALL distinct cited sources (dedup by URL, not by paper) so the
+        // full provenance is visible. Repeated outlets get a counter suffix
+        // (e.g. "FT", "FT 2") so identical labels don't look like a bug.
         $sourceHtml = '';
-        $seenPapers = [];
+        $seenUrls = [];
+        $labelCounts = [];
+        $papers = $this->papers();
         foreach ((array) ($item['sources'] ?? []) as $src) {
             if (!is_array(value: $src)) {
                 continue;
             }
             $url = (string) ($src['url'] ?? '');
-            if ($url === '') {
+            if ($url === '' || isset($seenUrls[$url])) {
                 continue;
             }
+            $seenUrls[$url] = true;
             $paper = (string) ($src['paper'] ?? '');
-            $label = $paper !== '' ? $paper : (string) parse_url(url: $url, component: PHP_URL_HOST);
-            $dedupKey = strtolower(string: $label);
-            if (isset($seenPapers[$dedupKey])) {
-                continue;
-            }
-            $seenPapers[$dedupKey] = true;
+            $label = $paper !== ''
+                ? (string) ($papers[$paper]['label'] ?? $paper)
+                : (string) parse_url(url: $url, component: PHP_URL_HOST);
+            $labelCounts[$label] = ($labelCounts[$label] ?? 0) + 1;
+            $shown = $labelCounts[$label] > 1 ? $label . ' ' . $labelCounts[$label] : $label;
             $sourceHtml .= '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES)
                 . '" target="_blank" rel="noreferrer noopener">'
-                . htmlspecialchars(string: $label, flags: ENT_QUOTES)
+                . htmlspecialchars(string: $shown, flags: ENT_QUOTES)
                 . '</a>';
         }
         // Escape first, then upgrade markdown **bold** to <strong>. Doing
@@ -6525,6 +6515,41 @@ final class Extrablatt
             (empty($where) ? '' : ' WHERE ' . implode(separator: ' AND ', array: $where)) .
             ' ORDER BY ' . $orderBy . ' LIMIT ' . $limit;
         $stmt = $db->prepare(query: $sql);
+        $stmt->execute(params: $params);
+        return $stmt->fetchAll(mode: PDO::FETCH_ASSOC) ?: [];
+    }
+
+    /**
+     * Full-text search across the whole archive. Only the title is stored as
+     * text (article bodies are never persisted), so this matches anywhere in
+     * the title, tokenised: every whitespace-separated term must occur (AND).
+     * Unlike the dashboard list it ignores the read/duplicate/magic filters —
+     * a search spans everything that was ever scraped. SQLite LIKE is
+     * ASCII-case-insensitive, which covers the common case.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function searchArticles(string $query): array
+    {
+        $tokens = preg_split(pattern: '/\s+/', subject: $query, limit: -1, flags: PREG_SPLIT_NO_EMPTY) ?: [];
+        $tokens = array_slice(array: $tokens, offset: 0, length: 8);
+        if ($tokens === []) {
+            return [];
+        }
+        $where = [];
+        $params = [];
+        foreach ($tokens as $i => $token) {
+            $where[] = 'title LIKE :q' . $i . " ESCAPE '\\'";
+            // Escape LIKE wildcards so a literal % or _ in the query matches itself.
+            $escaped = str_replace(search: ['\\', '%', '_'], replace: ['\\\\', '\\%', '\\_'], subject: (string) $token);
+            $params[':q' . $i] = '%' . $escaped . '%';
+        }
+        $sql = 'SELECT url, paper, title, published_at, status, paywall, thumbnail, category, rating, read_at, vote
+                FROM articles
+                WHERE ' . implode(separator: ' AND ', array: $where) . '
+                ORDER BY published_at DESC
+                LIMIT 300';
+        $stmt = $this->openDatabase()->prepare(query: $sql);
         $stmt->execute(params: $params);
         return $stmt->fetchAll(mode: PDO::FETCH_ASSOC) ?: [];
     }
@@ -6747,19 +6772,26 @@ final class Extrablatt
         string $thumbFilter,
         string $viewFilter,
         string $factcheckStatement = '',
-        bool $factcheckPending = false
+        bool $factcheckPending = false,
+        string $searchQuery = ''
     ): string {
-        $articles = $this->fetchArticlesForDashboard(
-            paperFilter: $paperFilter,
-            tvFilter: $tvFilter,
-            statusFilter: $statusFilter,
-            paywallFilter: $paywallFilter,
-            categoryFilter: $categoryFilter,
-            readFilter: $readFilter,
-            sortFilter: $sortFilter,
-            magicFilter: $magicFilter,
-            thumbFilter: $thumbFilter
-        );
+        // Search mode short-circuits the normal filtered/magic list: it scans
+        // the whole archive (read, duplicates and all) by title and shows the
+        // matches in place of the tab content.
+        $isSearch = $searchQuery !== '';
+        $articles = $isSearch
+            ? $this->searchArticles(query: $searchQuery)
+            : $this->fetchArticlesForDashboard(
+                paperFilter: $paperFilter,
+                tvFilter: $tvFilter,
+                statusFilter: $statusFilter,
+                paywallFilter: $paywallFilter,
+                categoryFilter: $categoryFilter,
+                readFilter: $readFilter,
+                sortFilter: $sortFilter,
+                magicFilter: $magicFilter,
+                thumbFilter: $thumbFilter
+            );
 
         // Auto-submitting <select> dropdowns. The form's GET action keeps
         // every filter in the URL so links stay shareable. The dropdown
@@ -7010,12 +7042,14 @@ final class Extrablatt
         // Tab toggle: "zeitung" shows only the textual digest, "meldungen"
         // shows the classic filter form + list. Filter form carries the
         // view in a hidden input so submitting a filter preserves the tab.
-        $isZeitung = $viewFilter === 'zeitung';
-        $isFactcheck = $viewFilter === 'factcheck';
+        // Search mode suppresses all tab content (no tab highlighted) and
+        // renders the result list instead.
+        $isZeitung = !$isSearch && $viewFilter === 'zeitung';
+        $isFactcheck = !$isSearch && $viewFilter === 'factcheck';
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset; "Meldungen" tab covers every other meldungen state.
-        $isTalkshowView = !$isZeitung && !$isFactcheck && $tvFilter === 'all';
-        $isMeldungenView = !$isZeitung && !$isFactcheck && !$isTalkshowView;
+        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && $tvFilter === 'all';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isTalkshowView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
@@ -7040,6 +7074,19 @@ final class Extrablatt
                 <ul class="items">{$rows}</ul>
 HTML : '';
         $factcheckBlock = $isFactcheck ? $this->buildFactCheckBlock(statement: $factcheckStatement, pending: $factcheckPending) : '';
+
+        $searchValue = htmlspecialchars(string: $searchQuery, flags: ENT_QUOTES);
+        $searchBlock = '';
+        if ($isSearch) {
+            $hits = count(value: $articles);
+            $heading = '<h2 class="search__title">Suchergebnisse für „'
+                . htmlspecialchars(string: $searchQuery, flags: ENT_QUOTES)
+                . '" <span class="search__count">' . $hits . ' Treffer</span></h2>';
+            $list = $hits > 0
+                ? '<ul class="items">' . $rows . '</ul>'
+                : '<p class="viewnav__empty">Keine Treffer.</p>';
+            $searchBlock = '<section class="search-results">' . $heading . $list . '</section>';
+        }
 
         // Last scrape timestamp via mtime of scrape.log (truncated at scrape
         // start, appended throughout — mtime tracks the most recent emit).
@@ -7119,10 +7166,12 @@ HTML : '';
                 header.top .last-scrape { font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #a1a1aa; }
                 header.top .scrape-link { margin-left: auto; font: 600 12px/1 system-ui, sans-serif; text-decoration: none; background: #18181b; color: #fff; padding: 8px 12px; border-radius: 6px; }
                 header.top .scrape-link:hover { background: #3f3f46; }
-                header.top .reset-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #991b1b; padding: 8px 12px; border-radius: 6px; border: 1px solid #fecaca; cursor: pointer; }
-                header.top .reset-btn:hover { background: #fef2f2; border-color: #f87171; }
-                header.top .markall-btn { font: 600 12px/1 system-ui, sans-serif; background: #fff; color: #1e40af; padding: 8px 12px; border-radius: 6px; border: 1px solid #bfdbfe; cursor: pointer; }
-                header.top .markall-btn:hover { background: #eff6ff; border-color: #60a5fa; }
+                header.top .search { margin: 0; }
+                header.top .search input { font: 500 13px/1 system-ui, sans-serif; background: #fff; color: #18181b; padding: 8px 12px; border-radius: 6px; border: 1px solid #d4d4d8; width: 220px; max-width: 42vw; }
+                header.top .search input:focus { outline: none; border-color: #18181b; }
+                section.search-results { margin-top: 0.5rem; }
+                .search__title { font: 700 16px/1.3 system-ui, sans-serif; color: #18181b; margin: 0 0 0.8rem; }
+                .search__count { font-weight: 400; color: #a1a1aa; letter-spacing: 0.02em; margin-left: 0.4em; }
                 nav.viewnav { display: flex; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
                 nav.viewnav .viewnav__tab { font: 600 13px/1 system-ui, sans-serif; color: #71717a; text-decoration: none; padding: 10px 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
@@ -7241,10 +7290,10 @@ HTML : '';
                 html[data-theme="dark"] .item--empty { background: #27272a; color: #a1a1aa; }
                 html[data-theme="dark"] .item--empty a { color: #e4e4e7; }
                 html[data-theme="dark"] header.top h1 a { color: #e4e4e7; }
-                html[data-theme="dark"] header.top .markall-btn { background: #27272a; color: #93c5fd; border-color: #1e3a8a; }
-                html[data-theme="dark"] header.top .markall-btn:hover { background: #1e3a8a; border-color: #3b82f6; }
-                html[data-theme="dark"] header.top .reset-btn { background: #27272a; color: #fca5a5; border-color: #7f1d1d; }
-                html[data-theme="dark"] header.top .reset-btn:hover { background: #7f1d1d; border-color: #ef4444; }
+                html[data-theme="dark"] header.top .search input { background: #27272a; color: #e4e4e7; border-color: #3f3f46; }
+                html[data-theme="dark"] header.top .search input:focus { border-color: #a1a1aa; }
+                html[data-theme="dark"] .search__title { color: #e4e4e7; }
+                html[data-theme="dark"] .search__count { color: #71717a; }
                 html[data-theme="dark"] nav.viewnav { border-bottom-color: #3f3f46; }
                 html[data-theme="dark"] nav.viewnav .viewnav__tab { color: #a1a1aa; }
                 html[data-theme="dark"] nav.viewnav .viewnav__tab:hover { color: #e4e4e7; }
@@ -7294,13 +7343,8 @@ HTML : '';
                     <span class="last-scrape" title="Letzter Scrape">{$lastScrapeLabel}</span>
                     <button type="button" class="theme-toggle" id="themeToggle" title="Theme umschalten" aria-label="Theme umschalten"></button>
                     <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
-                    <form method="post" action="/" onsubmit="return confirm('Alle ungelesenen Artikel als gelesen markieren?');" style="margin:0">
-                        <input type="hidden" name="mark_all_read" value="1">
-                        <button type="submit" class="markall-btn">All read</button>
-                    </form>
-                    <form method="post" action="/" onsubmit="return confirm('Alles zurücksetzen: {$count} DB-Einträge plus alle Cache-Dateien löschen?');" style="margin:0">
-                        <input type="hidden" name="reset" value="1">
-                        <button type="submit" class="reset-btn">Reset</button>
+                    <form class="search" method="get" action="/" role="search">
+                        <input type="search" name="q" value="{$searchValue}" placeholder="🔍 Volltextsuche…" autocomplete="off" aria-label="Volltextsuche">
                     </form>
                 </header>
                 <nav class="viewnav">
@@ -7312,6 +7356,7 @@ HTML : '';
                 {$zeitungBlock}
                 {$meldungenBlock}
                 {$factcheckBlock}
+                {$searchBlock}
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
