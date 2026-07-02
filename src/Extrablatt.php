@@ -2769,6 +2769,38 @@ final class Extrablatt
         return $this->loadConfig()['papers'];
     }
 
+    private function paperDomain(array $info): string
+    {
+        $host = (string) parse_url(url: (string) ($info['url'] ?? ''), component: PHP_URL_HOST);
+        return (string) preg_replace(pattern: '~^(?:www|m)\.~', replacement: '', subject: $host);
+    }
+
+    /**
+     * All paper keys sharing the given paper's domain (e.g. the two Medium
+     * tag feeds) — they act as one source in the dropdown and its filter.
+     *
+     * @return array<int, string>
+     */
+    private function paperDomainSiblings(string $paper): array
+    {
+        $papers = $this->papers();
+        $tvPapers = $this->talkshowPapers();
+        if (!isset($papers[$paper]) || in_array(needle: $paper, haystack: $tvPapers, strict: true)) {
+            return [$paper];
+        }
+        $domain = $this->paperDomain(info: $papers[$paper]);
+        $siblings = [];
+        foreach ($papers as $key => $info) {
+            if (in_array(needle: (string) $key, haystack: $tvPapers, strict: true)) {
+                continue;
+            }
+            if ($this->paperDomain(info: $info) === $domain) {
+                $siblings[] = (string) $key;
+            }
+        }
+        return $siblings;
+    }
+
     /**
      * Flat list of all values that can be stored in articles.category — i.e.
      * leaf categories. Parents with children never get stored; childless
@@ -6483,8 +6515,13 @@ final class Extrablatt
             $where[] = 'paper = :paper';
             $params[':paper'] = $tvFilter;
         } elseif ($paperFilter !== '') {
-            $where[] = 'paper = :paper';
-            $params[':paper'] = $paperFilter;
+            $siblings = $this->paperDomainSiblings(paper: $paperFilter);
+            $placeholders = [];
+            foreach ($siblings as $i => $sibling) {
+                $placeholders[] = ':paper' . $i;
+                $params[':paper' . $i] = $sibling;
+            }
+            $where[] = 'paper IN (' . implode(separator: ',', array: $placeholders) . ')';
         }
         if ($statusFilter !== '') {
             $where[] = 'status = :status';
@@ -6844,11 +6881,18 @@ final class Extrablatt
             array: $paperList,
             callback: fn(array $a, array $b): int => strcasecmp(string1: $a['domain'], string2: $b['domain'])
         );
-        $paperOptions = '<option value="">Quelle</option>';
+        // Papers sharing a domain (e.g. the two Medium tag feeds) collapse
+        // into one option; the filter expands to all siblings via
+        // paperDomainSiblings().
+        $domainPapers = [];
         foreach ($paperList as $key => $info) {
-            $escapedKey = htmlspecialchars(string: (string) $key, flags: ENT_QUOTES);
-            $escapedDomain = htmlspecialchars(string: $info['domain'], flags: ENT_QUOTES);
-            $sel = $paperFilter === $key ? ' selected' : '';
+            $domainPapers[$info['domain']][] = (string) $key;
+        }
+        $paperOptions = '<option value="">Quelle</option>';
+        foreach ($domainPapers as $domain => $domainKeys) {
+            $escapedKey = htmlspecialchars(string: $domainKeys[0], flags: ENT_QUOTES);
+            $escapedDomain = htmlspecialchars(string: (string) $domain, flags: ENT_QUOTES);
+            $sel = in_array(needle: $paperFilter, haystack: $domainKeys, strict: true) ? ' selected' : '';
             $paperOptions .= '<option value="' . $escapedKey . '"' . $sel . '>' . $escapedDomain . '</option>';
         }
 
