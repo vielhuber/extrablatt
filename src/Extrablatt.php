@@ -5494,7 +5494,7 @@ final class Extrablatt
         // would starve them (e.g. 17 ProductHunt items all "AI" → only 2 pass).
         // Give them a dedicated per-paper quota that bypasses the category cap
         // so enough reach the LLM for the trending paragraph.
-        $discoveryQuota = ['github' => 12, 'producthunt' => 12];
+        $discoveryQuota = ['github' => 12, 'producthunt' => 12, 'medium_ai' => 8, 'medium_programming' => 8];
         $discoveryCount = [];
         foreach ($pool as $a) {
             if (count(value: $articles) >= $maxTotal) {
@@ -5569,7 +5569,7 @@ final class Extrablatt
             "  - Sonstiges: Auto & Verkehr, Garten & Pflanzen, Wetter & Natur, Unfälle, Verbraucher\n" .
             "MENGEN-VORGABEN je Themengruppe (Gesamtsumme MUSS zwischen 5 und 7 liegen):\n" .
             "  - Wissen & Technik: GENAU 2 Absätze (PFLICHT, wenn Stories im Set vorhanden — das ist der Lieblingsbereich des Lesers)\n" .
-            "    Trending-Absatz (PFLICHT, sobald solche Einträge im Set sind): EINER der beiden Wissen-&-Technik-Absätze MUSS die Entwickler-/Produkt-Trends der Woche bündeln und dabei BEIDE Quellenarten abdecken — SOWOHL 2 bis 3 auffällige GitHub-Trending-Projekte (Quelle 'github', herausragende Open-Source-Projekte) ALS AUCH 2 bis 3 auffällige ProductHunt-Launches (Quelle 'producthunt', meistbeachtete Produkt-/Tool-Launches), jeweils kurz benannt (wofür sie stehen). Die \"sources\"-Liste dieses Absatzes MUSS sowohl github- als auch producthunt-Einträge enthalten. Der ANDERE Technik-Absatz bleibt der echten Tech-Nachricht der Woche vorbehalten.\n" .
+            "    Trending-Absatz (PFLICHT, sobald solche Einträge im Set sind): EINER der beiden Wissen-&-Technik-Absätze MUSS die Entwickler-/Produkt-Trends der Woche bündeln und dabei BEIDE Quellenarten abdecken — SOWOHL 2 bis 3 auffällige GitHub-Trending-Projekte (Quelle 'github', herausragende Open-Source-Projekte) ALS AUCH 2 bis 3 auffällige ProductHunt-Launches (Quelle 'producthunt', meistbeachtete Produkt-/Tool-Launches), jeweils kurz benannt (wofür sie stehen). Die \"sources\"-Liste dieses Absatzes MUSS sowohl github- als auch producthunt-Einträge enthalten. Sind zudem Medium-Fachartikel im Set (Quellen 'medium_ai' oder 'medium_programming'), webe zusätzlich 1 bis 2 der lesenswertesten davon in diesen Absatz ein (kurz benannt, worum es geht) und nimm sie in die \"sources\"-Liste auf — behandle sie als vollwertige Tech-Stories, nicht als Blog-Spam. Der ANDERE Technik-Absatz bleibt der echten Tech-Nachricht der Woche vorbehalten.\n" .
             "  - Politik: 1 bis 2 Absätze\n" .
             "  - Wirtschaft & Finanzen: 1 Absatz\n" .
             "  - Alle übrigen Gruppen (Sport, Kultur, Gesundheit, Gesellschaft, Lokal, Reise, Sonstiges): zusammen 0 bis 2 Absätze, nur wenn wirklich bedeutsam\n" .
