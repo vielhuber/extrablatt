@@ -5617,14 +5617,18 @@ final class Extrablatt
             "auftauchen — wähle thematisch komplett andere Geschichten, damit es keine inhaltliche " .
             "Doppelung gibt.\n\n" .
             "Sprache: klar, nüchtern, plakativ, ohne Floskeln.\n\n" .
-            "WICHTIG: Die Artikel-Nummern gehören AUSSCHLIESSLICH in das \"sources\"-Feld des JSON. " .
-            "Schreibe KEINE Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den \"paragraph\"-Text — der Fließtext " .
-            "darf keinerlei Verweise auf Index-Nummern enthalten.\n\n" .
+            "WICHTIG: Artikel-Nummern dürfen im \"paragraph\"-Text NUR in der Inline-Link-Form [Begriff](N) vorkommen (siehe unten). " .
+            "Schreibe KEINE nackten Zahlen oder Index-Listen wie \"(5, 12, 27)\" in den Fließtext.\n\n" .
             "WICHTIG: Schreibe KEIN Datum und KEINEN '(heute)'-Marker in den \"paragraph\"-Text, auch nicht am Anfang. " .
             "Die Datumsangaben in den Eingabezeilen dienen NUR deiner Einordnung des aktuellen Stands — der Fließtext ist reine Prosa OHNE Datums-Präfix.\n\n" .
-            "Hebe in jedem Absatz die zentralen Schlüsselwörter (Eigennamen, Orte, Zahlen, Kernbegriffe) " .
-            "mit doppelten Sternchen als Markdown-Bold hervor — sparsam, maximal 2 bis 4 Stellen pro Absatz, " .
-            "Beispiel: **Olaf Scholz** kündigte den Rücktritt aus dem **NATO-Bündnis** an.\n\n" .
+            "INLINE-LINKS: Verlinke in JEDEM Absatz die zentralen Begriffe, die sich auf einen konkreten Quell-Artikel " .
+            "beziehen (Eigennamen, Orte, Ereignisse, Produkte, Kernbegriffe), inline im Markdown-Format [Begriff](N). " .
+            "Dabei ist N die Artikel-Nummer aus der obigen Liste — genau die Nummer, die den verlinkten Sachverhalt belegt " .
+            "und die du auch in \"sources\" nennst. Setze 2 bis 4 solcher Inline-Links pro Absatz auf die wichtigsten Begriffe; " .
+            "jede Nummer aus \"sources\" soll möglichst mindestens einmal als Inline-Link im Text auftauchen. " .
+            "Verschachtele Links NICHT und verlinke denselben Begriff nur einmal. " .
+            "Zusätzlich darfst du sparsam weitere Kernbegriffe OHNE Link mit doppelten Sternchen (**…**) fett hervorheben. " .
+            "Beispiel: [Olaf Scholz](5) kündigte den Rücktritt aus dem [NATO-Bündnis](12) an.\n\n" .
             "Antworte AUSSCHLIESSLICH mit gültigem JSON, keine Erklärung davor oder dahinter, kein Markdown-Codeblock:\n" .
             "{\"top_today\":{\"paragraph\":\"...\",\"sources\":[1,4]},\"items\":[{\"paragraph\":\"...\",\"sources\":[1,4,12]}]}\n" .
             "\"top_today\" darf auch null sein. Die Zahlen in \"sources\" sind die Indizes der Artikel aus der Liste oben.";
@@ -5768,19 +5772,29 @@ final class Extrablatt
         if ($generated === null) {
             return null;
         }
-        // Resolve source indices (1-based) to {url, paper} entries; dedup
-        // and ignore out-of-range numbers the model might hallucinate.
+        // Rewrite inline references, then resolve the explicit source indices
+        // (1-based) to {url, paper} entries; dedup by URL and ignore
+        // out-of-range numbers the model might hallucinate.
         $sources = [];
-        $seen = [];
+        $paragraph = $this->linkifyDigestParagraph(paragraph: $generated['paragraph'], numbered: $numbered, sources: $sources);
+        $seenUrls = [];
+        foreach ($sources as $s) {
+            $seenUrls[$s['url']] = true;
+        }
         foreach ($generated['sources'] as $idx) {
             $i = (int) $idx - 1;
-            if (isset($numbered[$i]) && !isset($seen[$i])) {
-                $seen[$i] = true;
-                $sources[] = $numbered[$i];
+            if (!isset($numbered[$i])) {
+                continue;
             }
+            $url = (string) ($numbered[$i]['url'] ?? '');
+            if ($url === '' || isset($seenUrls[$url])) {
+                continue;
+            }
+            $seenUrls[$url] = true;
+            $sources[] = $numbered[$i];
         }
         return [
-            'paragraph' => $generated['paragraph'],
+            'paragraph' => $paragraph,
             'sources' => $sources,
             'count' => count(value: $rows),
         ];
@@ -5811,10 +5825,14 @@ final class Extrablatt
             "  NICHT die Sendungen mit den dominantesten Themen, sondern die mit der schärfsten Auseinandersetzung.\n" .
             "- Pro Sendung KURZ: welche Show, welches Thema, welche Pointe; " .
             "  Gäste-Namen organisch einbauen, keine reine Liste.\n" .
-            "- Hebe 2-4 zentrale Begriffe mit Markdown-Bold (**…**) hervor.\n" .
+            "- INLINE-LINKS: Verlinke die zentralen Begriffe, die sich auf eine konkrete Sendung beziehen " .
+            "  (Show-Name, Gast, Streitthema), inline im Markdown-Format [Begriff](N) — N ist die Sendungs-Nummer " .
+            "  aus der Liste oben, dieselbe, die du in \"sources\" nennst. 2 bis 4 solcher Links; jede Nummer aus " .
+            "  \"sources\" soll möglichst einmal als Inline-Link vorkommen. Verschachtele Links nicht.\n" .
+            "- Zusätzlich darfst du sparsam weitere Kernbegriffe OHNE Link mit Markdown-Bold (**…**) hervorheben.\n" .
             "- Keine Aufzählung, kein Datum, keine Sender-Übersicht.\n" .
-            "- WICHTIG: Die Sendungs-Nummern gehören AUSSCHLIESSLICH ins \"sources\"-Feld des JSON. " .
-            "  KEINE Zahlen oder Index-Listen im \"paragraph\"-Text.\n\n" .
+            "- WICHTIG: Sendungs-Nummern dürfen im \"paragraph\"-Text NUR in der Inline-Link-Form [Begriff](N) vorkommen. " .
+            "  KEINE nackten Zahlen oder Index-Listen im Fließtext.\n\n" .
             "Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Markdown-Codeblock:\n" .
             "{\"paragraph\":\"...\",\"sources\":[1,4]}\n" .
             "Die Zahlen in \"sources\" sind die Indizes der gewählten Sendungen aus der Liste oben.";
@@ -5846,8 +5864,9 @@ final class Extrablatt
         }
         $paragraph = trim(string: $parsed['paragraph']);
         // Strip trailing index lists "(5, 12)" the model sometimes leaks
-        // into the prose despite the prompt.
-        $paragraph = trim(string: (string) preg_replace(pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u', replacement: '', subject: $paragraph));
+        // into the prose despite the prompt. Lookbehind spares inline links
+        // ending in "…](3)" so they survive linkification later.
+        $paragraph = trim(string: (string) preg_replace(pattern: '/\s*(?<!\])[\(\[][\d,\s]+[\)\]]\s*$/u', replacement: '', subject: $paragraph));
         if ($paragraph === '') {
             return null;
         }
@@ -6078,10 +6097,47 @@ final class Extrablatt
     }
 
     /**
-     * Validate one LLM-emitted digest item: trim the paragraph, map each
-     * source index back to the corresponding article (URL + paper), drop
-     * out-of-range / duplicate indices. Returns null if the paragraph is
-     * empty or no source survives mapping.
+     * Rewrite inline article references [Begriff](N) in a digest paragraph so
+     * N points at the paragraph's OWN (1-based) source list instead of the
+     * volatile generation-time article index — that keeps the cached digest
+     * self-contained (the renderer never needs the original article list).
+     * Every referenced article is appended to $sources (by reference, deduped
+     * by URL) so the source footer stays complete. Unresolvable references are
+     * unwrapped to plain term text.
+     *
+     * @param array<int, array<string, mixed>> $numbered generation-time index → row with url/paper
+     * @param array<int, array{url: string, paper: string}> $sources in/out accumulator
+     */
+    private function linkifyDigestParagraph(string $paragraph, array $numbered, array &$sources): string
+    {
+        $posByUrl = [];
+        foreach ($sources as $i => $s) {
+            $posByUrl[(string) ($s['url'] ?? '')] = $i + 1;
+        }
+        return (string) preg_replace_callback(
+            pattern: '/\[([^\[\]]+)\]\((\d+)\)/',
+            callback: function (array $m) use ($numbered, &$sources, &$posByUrl): string {
+                $term = $m[1];
+                $idx = (int) $m[2] - 1;
+                $url = (string) ($numbered[$idx]['url'] ?? '');
+                if ($url === '') {
+                    return $term;
+                }
+                if (!isset($posByUrl[$url])) {
+                    $sources[] = ['url' => $url, 'paper' => (string) ($numbered[$idx]['paper'] ?? '')];
+                    $posByUrl[$url] = count(value: $sources);
+                }
+                return '[' . $term . '](' . $posByUrl[$url] . ')';
+            },
+            subject: $paragraph
+        );
+    }
+
+    /**
+     * Validate one LLM-emitted digest item: trim the paragraph, rewrite inline
+     * article references and map each source index back to the corresponding
+     * article (URL + paper), drop out-of-range / duplicate indices. Returns
+     * null if the paragraph is empty or no source survives mapping.
      */
     private function mapDigestSources(array $rawItem, array $articles): ?array
     {
@@ -6090,20 +6146,24 @@ final class Extrablatt
             return null;
         }
         $sources = [];
-        $seen = [];
+        $paragraph = $this->linkifyDigestParagraph(paragraph: $paragraph, numbered: $articles, sources: $sources);
+        $seenUrls = [];
+        foreach ($sources as $s) {
+            $seenUrls[$s['url']] = true;
+        }
         foreach ((array) ($rawItem['sources'] ?? []) as $src) {
             $idx = (int) $src - 1;
             if ($idx < 0 || $idx >= count(value: $articles)) {
                 continue;
             }
-            if (isset($seen[$idx])) {
+            $url = (string) ($articles[$idx]['url'] ?? '');
+            if ($url === '' || isset($seenUrls[$url])) {
                 continue;
             }
-            $seen[$idx] = true;
-            $a = $articles[$idx];
+            $seenUrls[$url] = true;
             $sources[] = [
-                'url' => (string) ($a['url'] ?? ''),
-                'paper' => (string) ($a['paper'] ?? ''),
+                'url' => $url,
+                'paper' => (string) ($articles[$idx]['paper'] ?? ''),
             ];
         }
         if ($sources === []) {
@@ -6420,9 +6480,11 @@ final class Extrablatt
     {
         $paragraph = trim(string: (string) ($item['paragraph'] ?? ''));
         // Strip trailing index lists like " (5, 12, 27)" or " [5, 12]" that
-        // some models keep appending despite the prompt.
+        // some models keep appending despite the prompt. The negative
+        // lookbehind spares legit inline links ending in "…](3)" — those are
+        // preceded by "]" and must survive for linkification below.
         $paragraph = (string) preg_replace(
-            pattern: '/\s*[\(\[][\d,\s]+[\)\]]\s*$/u',
+            pattern: '/\s*(?<!\])[\(\[][\d,\s]+[\)\]]\s*$/u',
             replacement: '',
             subject: $paragraph
         );
@@ -6445,12 +6507,19 @@ final class Extrablatt
         $seenUrls = [];
         $labelCounts = [];
         $papers = $this->papers();
+        // Positional URL list (1-based via array index) that inline
+        // references [Begriff](N) resolve against — order matches the stored
+        // sources array, which is what linkifyDigestParagraph() indexed into.
+        $sourceUrls = [];
+        foreach ((array) ($item['sources'] ?? []) as $src) {
+            $sourceUrls[] = is_array(value: $src) ? (string) ($src['url'] ?? '') : '';
+        }
         foreach ((array) ($item['sources'] ?? []) as $src) {
             if (!is_array(value: $src)) {
                 continue;
             }
             $url = (string) ($src['url'] ?? '');
-            if ($url === '' || isset($seenUrls[$url])) {
+            if ($url === '' || isset($seenUrls[$url]) || preg_match(pattern: '~^https?://~i', subject: $url) !== 1) {
                 continue;
             }
             $seenUrls[$url] = true;
@@ -6471,6 +6540,25 @@ final class Extrablatt
         // before the regex runs, so only the literal ** markers can
         // produce real tags.
         $escaped = htmlspecialchars(string: $paragraph, flags: ENT_QUOTES);
+        // Inline article links [Begriff](N) → anchor to the N-th source. The
+        // term text is already escaped; the URL comes from our own article DB
+        // and is re-escaped and scheme-gated, so this stays XSS-safe. Runs
+        // BEFORE the bold upgrade so **…** inside the link text still applies.
+        $escaped = (string) preg_replace_callback(
+            pattern: '/\[([^\[\]]+)\]\((\d+)\)/',
+            callback: function (array $m) use ($sourceUrls): string {
+                $term = $m[1];
+                $url = (string) ($sourceUrls[(int) $m[2] - 1] ?? '');
+                if ($url === '' || preg_match(pattern: '~^https?://~i', subject: $url) !== 1) {
+                    return $term;
+                }
+                return '<a href="' . htmlspecialchars(string: $url, flags: ENT_QUOTES)
+                    . '" target="_blank" rel="noreferrer noopener" class="digest__ref">'
+                    . $term
+                    . '</a>';
+            },
+            subject: $escaped
+        );
         $escaped = (string) preg_replace(
             pattern: '/\*\*(.+?)\*\*/s',
             replacement: '<strong>$1</strong>',
@@ -7256,6 +7344,8 @@ HTML : '';
                 .digest p { margin: 0 0 0.7rem; text-align: justify; hyphens: auto; }
                 .digest p:last-child { margin-bottom: 0; }
                 .digest strong { font-weight: 700; color: #18181b; }
+                .digest__ref { color: inherit; text-decoration: none; background-image: linear-gradient(#c7bda6, #c7bda6); background-repeat: no-repeat; background-position: 0 100%; background-size: 100% 1px; transition: background-size 0.15s, color 0.15s; }
+                .digest__ref:hover { color: #18181b; background-image: linear-gradient(#18181b, #18181b); background-size: 100% 1.5px; }
                 .digest__lead { margin: 0 0 1.3rem; padding-bottom: 1.2rem; border-bottom: 1px solid #d4d4d8; }
                 .digest__lead p { font-size: 18px; line-height: 1.55; color: #18181b; }
                 .digest__title--lead { color: #18181b; }
@@ -7375,6 +7465,8 @@ HTML : '';
                 html[data-theme="dark"] .digest__title { color: #a1a1aa; border-bottom-color: #3f3f46; }
                 html[data-theme="dark"] .digest__date { color: #71717a; }
                 html[data-theme="dark"] .digest strong { color: #fafafa; }
+                html[data-theme="dark"] .digest__ref { background-image: linear-gradient(#5c5546, #5c5546); }
+                html[data-theme="dark"] .digest__ref:hover { color: #fafafa; background-image: linear-gradient(#fafafa, #fafafa); }
                 html[data-theme="dark"] .digest__lead { border-bottom-color: #3f3f46; }
                 html[data-theme="dark"] .digest__lead p { color: #fafafa; }
                 html[data-theme="dark"] .digest__title--lead { color: #e4e4e7; }
