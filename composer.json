@@ -6,7 +6,7 @@
         "php": ">=8.3",
         "ext-pdo_sqlite": "*",
         "ext-gd": "*",
-        "vielhuber/aihelper": "^3.8.0"
+        "vielhuber/aihelper": "^4.1.2"
     },
     "autoload": {
         "psr-4": {
