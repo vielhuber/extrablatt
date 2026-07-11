@@ -169,6 +169,16 @@ final class Extrablatt
     // feeds and sitemaps are ingested without any cap.
     private const SOCIAL_FEED_MAX_ITEMS = 100;
     private const TV_MAX_AGE_DAYS = 30;
+    // Media feeds (Streaming/Kino/Gaming) only accept releases within this
+    // window — "neu" means at most three months old.
+    private const MEDIA_WINDOW_DAYS = 90;
+    // Rotten-Tomatoes affiliate slug => label woven into item titles.
+    private const STREAMING_SERVICES = [
+        'netflix' => 'Netflix',
+        'amazon-prime-video' => 'Prime Video',
+        'apple-tv-plus' => 'Apple TV+',
+        'disney-plus' => 'Disney+',
+    ];
     private const DASHBOARD_MAX_ITEMS = 10000;
     private const ARCHIVE_CHECK_CONCURRENCY = 8;
     private const THUMBNAIL_SIZE = 160;
@@ -505,7 +515,7 @@ final class Extrablatt
             if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
                 $thumbFilter = '';
             }
-            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen', 'talkshows', 'factcheck'], strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild'], strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -1200,6 +1210,12 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'producthunt://')) {
             return $this->fetchProductHuntWeeklyItems(paper: $paper);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'rottentomatoes://')) {
+            return $this->fetchRottenTomatoesItems(paper: $paper, feedUrl: $feedUrl);
+        }
+        if (str_starts_with(haystack: $feedUrl, needle: 'metacritic://')) {
+            return $this->fetchMetacriticGameItems(paper: $paper);
+        }
         if (str_starts_with(haystack: $feedUrl, needle: 'ardmediathek://')) {
             return $this->fetchArdMediathekItems(paper: $paper, feedUrl: $feedUrl);
         }
@@ -1762,6 +1778,206 @@ final class Extrablatt
             if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
                 break;
             }
+        }
+        return $items;
+    }
+
+    /**
+     * Scrape Rotten Tomatoes browse grids via the undocumented cnapi JSON
+     * endpoint (the napi sibling 404s; the SSR page only server-renders an
+     * unrelated tile rail). Three feed variants share the custom scheme
+     * rottentomatoes://<slug>: tv-series and movies-at-home loop over the
+     * four streaming services, movies-in-theaters is a single grid.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchRottenTomatoesItems(string $paper, string $feedUrl): array
+    {
+        $slug = substr(string: $feedUrl, offset: strlen(string: 'rottentomatoes://'));
+        $queries = [];
+        if ($slug === 'movies-in-theaters') {
+            $queries[''] = 'https://www.rottentomatoes.com/cnapi/browse/movies_in_theaters/sort:newest';
+        }
+        if ($slug === 'tv-series' || $slug === 'movies-at-home') {
+            $browse = $slug === 'tv-series' ? 'tv_series_browse' : 'movies_at_home';
+            foreach (self::STREAMING_SERVICES as $affiliate => $service) {
+                $queries[$service] = 'https://www.rottentomatoes.com/cnapi/browse/' . $browse . '/affiliates:' . $affiliate . '~sort:newest';
+            }
+        }
+        $items = [];
+        $seenLinks = [];
+        foreach ($queries as $service => $url) {
+            $cacheKey = 'feed:' . $paper . ($service !== '' ? ':' . $service : '');
+            $body = $this->cacheGet(key: $cacheKey);
+            if ($body === null || $body === '') {
+                $result = $this->fetchViaImpersonate(url: $url);
+                if ($result->body === null) {
+                    continue;
+                }
+                $body = $result->body;
+                $this->cacheSet(key: $cacheKey, value: $body);
+            }
+            // A title available on several services keeps its first service —
+            // the RT detail URL is identical across them.
+            foreach ($this->parseRottenTomatoesGrid(json: $body, service: (string) $service) as $item) {
+                if (isset($seenLinks[$item->link])) {
+                    continue;
+                }
+                $seenLinks[$item->link] = true;
+                $items[] = $item;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseRottenTomatoesGrid(string $json, string $service): array
+    {
+        $data = json_decode(json: $json, associative: true);
+        $list = is_array(value: $data) ? ($data['grid']['list'] ?? null) : null;
+        if (!is_array(value: $list)) {
+            return [];
+        }
+        $now = time();
+        $cutoff = $now - self::MEDIA_WINDOW_DAYS * 86400;
+        $items = [];
+        foreach ($list as $entry) {
+            if (!is_array(value: $entry)) {
+                continue;
+            }
+            $mediaUrl = (string) ($entry['mediaUrl'] ?? '');
+            $title = trim(string: (string) ($entry['title'] ?? ''));
+            if ($mediaUrl === '' || $title === '') {
+                continue;
+            }
+            $dateText = (string) ($entry['releaseDateText'] ?? '');
+            // Re-releases of decades-old classics dominate the "newest" sort
+            // in theaters — they are not new content.
+            if (str_starts_with(haystack: $dateText, needle: 'Re-released')) {
+                continue;
+            }
+            $publishedAt = $now;
+            // "Streaming Jul 10, 2026" / "Opened Jul 10, 2026".
+            if (preg_match(pattern: '~([A-Z][a-z]{2} \d{1,2}, \d{4})$~', subject: $dateText, matches: $m) === 1) {
+                $ts = strtotime(datetime: $m[1]);
+                if ($ts !== false) {
+                    if ($ts < $cutoff) {
+                        continue;
+                    }
+                    $publishedAt = min($ts, $now);
+                }
+            }
+            // "Latest Episode: Jul 10" — series carry no year; a December
+            // episode read in January would parse one year ahead.
+            if (preg_match(pattern: '~Latest Episode: ([A-Z][a-z]{2} \d{1,2})$~', subject: $dateText, matches: $m) === 1) {
+                $ts = strtotime(datetime: $m[1] . ', ' . date(format: 'Y', timestamp: $now));
+                if ($ts !== false && $ts > $now + 86400) {
+                    $ts = strtotime(datetime: $m[1] . ', ' . ((int) date(format: 'Y', timestamp: $now) - 1));
+                }
+                if ($ts !== false) {
+                    $publishedAt = min($ts, $now);
+                }
+            }
+            $score = null;
+            $critics = $entry['criticsScore'] ?? null;
+            if (is_array(value: $critics) && ($critics['score'] ?? null) !== null && (string) $critics['score'] !== '') {
+                $score = (int) $critics['score'];
+            }
+            $suffixParts = [];
+            if ($service !== '') {
+                $suffixParts[] = $service;
+            }
+            if ($score !== null) {
+                $suffixParts[] = 'Kritiker ' . $score . ' %';
+            }
+            $items[] = new FeedItem(
+                title: $title . ($suffixParts !== [] ? ' (' . implode(separator: ', ', array: $suffixParts) . ')' : ''),
+                link: 'https://www.rottentomatoes.com' . $mediaUrl,
+                publishedAt: $publishedAt,
+                imageUrl: ((string) ($entry['posterUri'] ?? '')) !== '' ? (string) $entry['posterUri'] : null,
+                rating: $score
+            );
+        }
+        return $items;
+    }
+
+    /**
+     * Scrape Metacritic's PC games browse pages (SSR HTML — the finder JSON
+     * API silently ignores every platform parameter variant). Sorted by
+     * metascore over the release-year window covering the media window, then
+     * filtered to actual releases inside it, so only scored, genuinely new
+     * games survive.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchMetacriticGameItems(string $paper): array
+    {
+        $now = time();
+        $cutoff = $now - self::MEDIA_WINDOW_DAYS * 86400;
+        $items = [];
+        $seenLinks = [];
+        foreach ([1, 2] as $page) {
+            $cacheKey = 'feed:' . $paper . ':' . $page;
+            $body = $this->cacheGet(key: $cacheKey);
+            if ($body === null || $body === '') {
+                $url = 'https://www.metacritic.com/browse/game/pc/?releaseYearMin=' . date(format: 'Y', timestamp: $cutoff)
+                    . '&releaseYearMax=' . date(format: 'Y', timestamp: $now) . '&sortBy=-metaScore&page=' . $page;
+                $result = $this->fetchViaImpersonate(url: $url);
+                if ($result->body === null) {
+                    continue;
+                }
+                $body = $result->body;
+                $this->cacheSet(key: $cacheKey, value: $body);
+            }
+            foreach ($this->parseMetacriticGames(html: $body, cutoff: $cutoff) as $item) {
+                if (isset($seenLinks[$item->link])) {
+                    continue;
+                }
+                $seenLinks[$item->link] = true;
+                $items[] = $item;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseMetacriticGames(string $html, int $cutoff): array
+    {
+        // One product card per anchor; the tempered dot keeps every group
+        // inside the same <a>, so nav links to /game/... never match (they
+        // carry no data-title / Metascore inside the anchor).
+        $count = preg_match_all(
+            pattern: '~<a[^>]+href="(/game/[^"]+)"[^>]*>(?:(?!</a>).)*?data-title="([^"]+)"(?:(?!</a>).)*?<span>([A-Z][a-z]{2} \d{1,2}, \d{4})</span>(?:(?!</a>).)*?Metascore (\d+) out of 100~s',
+            subject: $html,
+            matches: $cards,
+            flags: PREG_SET_ORDER
+        );
+        if ($count === false || $count === 0) {
+            return [];
+        }
+        $now = time();
+        $items = [];
+        foreach ($cards as $card) {
+            $title = trim(string: html_entity_decode(string: $card[2], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            if ($title === '') {
+                continue;
+            }
+            $releasedAt = strtotime(datetime: $card[3]);
+            if ($releasedAt === false || $releasedAt < $cutoff || $releasedAt > $now) {
+                continue;
+            }
+            $score = (int) $card[4];
+            $items[] = new FeedItem(
+                title: $title . ' (PC, Metascore ' . $score . ')',
+                link: 'https://www.metacritic.com' . $card[1],
+                publishedAt: $releasedAt,
+                imageUrl: null,
+                rating: $score
+            );
         }
         return $items;
     }
@@ -2843,6 +3059,25 @@ final class Extrablatt
     }
 
     /**
+     * Paper keys carrying a fixed "category" in their config (media sources
+     * like Rotten Tomatoes, Metacritic, laut.de). Their items are
+     * monothematic: Phase 1 seeds the category cache with the configured
+     * value and Phase 8 skips them during dedup.
+     *
+     * @return array<int, string>
+     */
+    private function fixedCategoryPapers(): array
+    {
+        $keys = [];
+        foreach ($this->papers() as $key => $cfg) {
+            if ((string) ($cfg['category'] ?? '') !== '') {
+                $keys[] = (string) $key;
+            }
+        }
+        return $keys;
+    }
+
+    /**
      * Every value selectable in the filter dropdown — parents AND children.
      *
      * @return array<int, string>
@@ -3082,6 +3317,25 @@ final class Extrablatt
         }
         if ($tvSeeded > 0) {
             $emit(sprintf('  → %d Talkshow-Items als Kategorie "TV" vorgemerkt', $tvSeeded));
+        }
+
+        // Media papers (Rotten Tomatoes, Metacritic, laut.de) are equally
+        // monothematic — their config carries a fixed "category", so Phase 6
+        // skips the AI call and Phase 7 writes them with that category.
+        $mediaSeeded = 0;
+        foreach ($allItems as $entry) {
+            $fixedCategory = (string) ($papers[$entry['paper']]['category'] ?? '');
+            if ($fixedCategory === '') {
+                continue;
+            }
+            $title = $entry['item']->title;
+            if (!$this->categoryCacheExists(title: $title)) {
+                $this->writeCategoryCache(title: $title, category: $fixedCategory);
+                $mediaSeeded++;
+            }
+        }
+        if ($mediaSeeded > 0) {
+            $emit(sprintf('  → %d Medien-Items mit fixer Kategorie vorgemerkt', $mediaSeeded));
         }
         $emit('');
 
@@ -5101,11 +5355,14 @@ final class Extrablatt
         // Talk-show episodes share titles between full sendung and topic
         // segments by design ("maischberger am 10.06.2026" + "Joschka Fischer
         // über…") — Jaccard would happily merge them, destroying the per-
-        // guest segments. Exclude all talk-show papers from dedup.
-        $talkshowPapers = $this->talkshowPapers();
+        // guest segments. Exclude all talk-show papers from dedup. Media
+        // papers (fixed-category sources) are excluded too: their titles are
+        // product names, and a release must never be swallowed as duplicate
+        // of a news article reporting about it.
+        $excludedPapers = array_merge($this->talkshowPapers(), $this->fixedCategoryPapers());
         $excludeClause = '';
-        if ($talkshowPapers !== []) {
-            $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $talkshowPapers));
+        if ($excludedPapers !== []) {
+            $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $excludedPapers));
             $excludeClause = ' AND paper NOT IN (' . $list . ')';
         }
         $stmt = $db->query(query: "
@@ -5696,6 +5953,26 @@ final class Extrablatt
 
         $tv = $this->buildTalkshowBlock(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, cutoff: $cutoff);
 
+        // Media blocks (Streaming, Kino, Musik, Gaming) — same mechanics as
+        // the talk-show block, one LLM prose paragraph per section.
+        $media = [];
+        foreach ($this->mediaSections() as $sectionKey => $section) {
+            $block = $this->buildProseBlock(
+                db: $db,
+                paperKeys: $section['papers'],
+                since: $now - (int) $section['window_days'] * 86400,
+                limit: (int) $section['limit'],
+                intro: (string) $section['intro'],
+                requirements: (string) $section['requirements'],
+                refNoun: (string) $section['refNoun'],
+                aiConfig: $aiConfig,
+                apiKey: $apiKey
+            );
+            if ($block !== null) {
+                $media[$sectionKey] = $block;
+            }
+        }
+
         $payload = [
             'generated_at' => time(),
             'window_start' => $cutoff,
@@ -5703,19 +5980,22 @@ final class Extrablatt
             'items' => $items,
             'weather' => $weather,
             'tv' => $tv,
+            'media' => $media,
         ];
         $this->cacheSet(
             key: 'daily_digest',
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
         $emit(sprintf(
-            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s, TV: %s)',
+            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s, TV: %s, Medien: %d/%d Blöcke)',
             count(value: $items),
             count(value: $articles),
             $todayCount,
             $topToday !== null ? 'ja' : 'nein',
             $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein',
-            $tv !== null ? sprintf('%d Sendungen', (int) ($tv['count'] ?? 0)) : 'nein'
+            $tv !== null ? sprintf('%d Sendungen', (int) ($tv['count'] ?? 0)) : 'nein',
+            count(value: $media),
+            count(value: $this->mediaSections())
         ));
     }
 
@@ -5734,11 +6014,121 @@ final class Extrablatt
         // category 'TV' alone gets occasional false positives from articles
         // about TV programming on news sites (LLM over-matching the new
         // leaf during Phase 6).
-        $talkshowPapers = $this->talkshowPapers();
-        if ($talkshowPapers === []) {
+        return $this->buildProseBlock(
+            db: $db,
+            paperKeys: $this->talkshowPapers(),
+            since: $cutoff,
+            limit: 60,
+            intro: 'Du erhältst die Schlagzeilen der letzten politischen Talkshows ' .
+                '(Maischberger, Markus Lanz, Caren Miosga, hart aber fair, Maybrit Illner) ' .
+                'der vergangenen 7 Tage. Wähle die 2 bis 3 BRISANTESTEN Sendungen aus und ' .
+                'verdichte sie in einem prägnanten Fließtext (2 bis 3 Sätze).',
+            requirements: "- Wähle die brisantesten Diskussionen — Streit, harte Konfrontation, große Tragweite — " .
+                "  NICHT die Sendungen mit den dominantesten Themen, sondern die mit der schärfsten Auseinandersetzung.\n" .
+                "- Pro Sendung KURZ: welche Show, welches Thema, welche Pointe; " .
+                "  Gäste-Namen organisch einbauen, keine reine Liste.\n" .
+                "- Verlinkbare Begriffe: Show-Name, Gast, Streitthema.\n" .
+                '- Keine Sender-Übersicht.',
+            refNoun: 'Sendungs-Nummer',
+            aiConfig: $aiConfig,
+            apiKey: $apiKey
+        );
+    }
+
+    /**
+     * Configuration of the media digest blocks — one prose section each for
+     * streaming series, streaming movies, cinema, music albums and PC games,
+     * built with the exact same mechanics as the talk-show block. The keys
+     * double as payload keys inside the cached digest ("media" object).
+     *
+     * @return array<string, array{papers: array<int, string>, window_days: int, limit: int, heading: string, subtitle: string, intro: string, requirements: string, refNoun: string}>
+     */
+    private function mediaSections(): array
+    {
+        return [
+            'streaming_serien' => [
+                'papers' => ['streaming_serien'],
+                'window_days' => self::MEDIA_WINDOW_DAYS,
+                'limit' => 80,
+                'heading' => 'Streaming-Serien',
+                'subtitle' => 'Netflix · Prime Video · Apple TV+ · Disney+',
+                'intro' => 'Du erhältst Serien, die zuletzt neu oder mit neuen Folgen auf Netflix, Prime Video, Apple TV+ oder Disney+ ' .
+                    'erschienen sind (Rotten-Tomatoes-Daten, Kritiker-Score in Prozent falls vorhanden). ' .
+                    'Wähle die 3 bis 4 LOHNENDSTEN neuen Serien bzw. Staffeln aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
+                'requirements' => "- Bevorzuge echte Serien-Neustarts und neue Staffeln nennenswerter Produktionen, gern mit hohem Kritiker-Score; " .
+                    "  ignoriere Dauerläufer-Reality-Formate, Game-Shows und alte Katalog-Ware.\n" .
+                    '- Nenne zu jeder Empfehlung organisch den Streaming-Dienst.',
+                'refNoun' => 'Titel-Nummer',
+            ],
+            'streaming_filme' => [
+                'papers' => ['streaming_filme'],
+                'window_days' => self::MEDIA_WINDOW_DAYS,
+                'limit' => 80,
+                'heading' => 'Streaming-Filme',
+                'subtitle' => 'Netflix · Prime Video · Apple TV+ · Disney+',
+                'intro' => 'Du erhältst Filme, die zuletzt neu auf Netflix, Prime Video, Apple TV+ oder Disney+ erschienen sind ' .
+                    '(Rotten-Tomatoes-Daten, Kritiker-Score in Prozent falls vorhanden). ' .
+                    'Wähle die 3 bis 4 SEHENSWERTESTEN aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
+                'requirements' => "- Bevorzuge relevante Neuerscheinungen mit hohem Kritiker-Score; " .
+                    "  ignoriere Katalog-Ware, Stand-up-Mitschnitte und B-Movies ohne Score.\n" .
+                    '- Nenne zu jeder Empfehlung organisch den Streaming-Dienst.',
+                'refNoun' => 'Titel-Nummer',
+            ],
+            'kino' => [
+                'papers' => ['kino'],
+                'window_days' => self::MEDIA_WINDOW_DAYS,
+                'limit' => 60,
+                'heading' => 'Kino',
+                'subtitle' => 'neu angelaufen',
+                'intro' => 'Du erhältst Filme, die zuletzt im Kino angelaufen sind (Rotten-Tomatoes-Daten, Kritiker-Score in Prozent ' .
+                    'falls vorhanden). Wähle die 3 bis 4 SEHENSWERTESTEN aktuellen Kinofilme aus und verdichte sie in einem ' .
+                    'prägnanten Fließtext (2 bis 4 Sätze).',
+                'requirements' => '- Bevorzuge die größten und bestbewerteten Kinostarts; ignoriere Nischen-Dokus und Filme ohne Score.',
+                'refNoun' => 'Titel-Nummer',
+            ],
+            'musik' => [
+                'papers' => ['alben'],
+                'window_days' => 45,
+                'limit' => 60,
+                'heading' => 'Musik',
+                'subtitle' => 'neue Alben',
+                'intro' => 'Du erhältst frisch von laut.de rezensierte Album-Neuerscheinungen. ' .
+                    'Wähle die 3 bis 4 INTERESSANTESTEN Alben aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
+                'requirements' => '- Bevorzuge relevante Künstler und bemerkenswerte Neuerscheinungen quer durch die Genres; nenne Künstler und Albumtitel organisch.',
+                'refNoun' => 'Titel-Nummer',
+            ],
+            'gaming' => [
+                'papers' => ['spiele'],
+                'window_days' => self::MEDIA_WINDOW_DAYS,
+                'limit' => 40,
+                'heading' => 'Gaming',
+                'subtitle' => 'neue PC-Spiele',
+                'intro' => 'Du erhältst die bestbewerteten neuen PC-Spiele der letzten drei Monate (Metacritic-Metascore). ' .
+                    'Wähle die 3 bis 4 BESTEN aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
+                'requirements' => '- Bevorzuge die höchsten Metascores und nennenswerte Releases; erwähne kurz, was für ein Spiel es jeweils ist.',
+                'refNoun' => 'Titel-Nummer',
+            ],
+        ];
+    }
+
+    /**
+     * Shared prose-block builder behind the talk-show and media digest
+     * sections: pull the recent articles of the given papers, have the LLM
+     * verdichten them into one short paragraph with inline links plus source
+     * indices, then resolve those to {url, paper} entries. Returns null when
+     * no rows exist or no prose could be produced — the digest then omits
+     * the block.
+     *
+     * @param array<int, string> $paperKeys
+     * @param array<string, mixed> $aiConfig
+     * @return array{paragraph: string, sources: array<int, array{url: string, paper: string}>, count: int}|null
+     */
+    private function buildProseBlock(PDO $db, array $paperKeys, int $since, int $limit, string $intro, string $requirements, string $refNoun, array $aiConfig, string $apiKey): ?array
+    {
+        if ($paperKeys === []) {
             return null;
         }
-        $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $talkshowPapers));
+        $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $paperKeys));
         $stmt = $db->prepare(query: "
             SELECT url, paper, title, published_at
             FROM articles
@@ -5747,9 +6137,9 @@ final class Extrablatt
               AND duplicate_of IS NULL
               AND title IS NOT NULL AND title <> ''
             ORDER BY published_at DESC
-            LIMIT 60
-        ");
-        $stmt->execute(params: [':since' => $cutoff]);
+            LIMIT " . (int) $limit . '
+        ');
+        $stmt->execute(params: [':since' => $since]);
         $rows = (array) $stmt->fetchAll(mode: PDO::FETCH_ASSOC);
         if ($rows === []) {
             return null;
@@ -5768,7 +6158,7 @@ final class Extrablatt
             ];
             $lines[] = sprintf('%d. [%s, %s] %s', $i + 1, $label, date(format: 'd.m.', timestamp: $publishedAt), mb_substr(string: $title, start: 0, length: 220));
         }
-        $generated = $this->generateTalkshowProse(lines: $lines, aiConfig: $aiConfig, apiKey: $apiKey);
+        $generated = $this->generateProseFromLines(lines: $lines, intro: $intro, requirements: $requirements, refNoun: $refNoun, aiConfig: $aiConfig, apiKey: $apiKey);
         if ($generated === null) {
             return null;
         }
@@ -5801,11 +6191,15 @@ final class Extrablatt
     }
 
     /**
+     * Shared LLM prose generation for the digest blocks: the intro and the
+     * task-specific requirement bullets come from the caller, the inline-link
+     * and JSON-format instructions are identical for every block.
+     *
      * @param array<int, string> $lines
      * @param array<string, mixed> $aiConfig
      * @return array{paragraph: string, sources: array<int, int>}|null
      */
-    private function generateTalkshowProse(array $lines, array $aiConfig, string $apiKey): ?array
+    private function generateProseFromLines(array $lines, string $intro, string $requirements, string $refNoun, array $aiConfig, string $apiKey): ?array
     {
         if (!class_exists(class: 'vielhuber\\aihelper\\aihelper') || $lines === []) {
             return null;
@@ -5815,27 +6209,21 @@ final class Extrablatt
         if ($provider === '' || $model === '' || $apiKey === '') {
             return null;
         }
-        $prompt = "Du erhältst die Schlagzeilen der letzten politischen Talkshows " .
-            "(Maischberger, Markus Lanz, Caren Miosga, hart aber fair, Maybrit Illner) " .
-            "der vergangenen 7 Tage. Wähle die 2 bis 3 BRISANTESTEN Sendungen aus und " .
-            "verdichte sie in einem prägnanten Fließtext (2 bis 3 Sätze).\n\n" .
-            "Schlagzeilen:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
+        $prompt = $intro . "\n\n" .
+            "Liste:\n" . implode(separator: "\n", array: $lines) . "\n\n" .
             "Anforderungen:\n" .
-            "- Wähle die brisantesten Diskussionen — Streit, harte Konfrontation, große Tragweite — " .
-            "  NICHT die Sendungen mit den dominantesten Themen, sondern die mit der schärfsten Auseinandersetzung.\n" .
-            "- Pro Sendung KURZ: welche Show, welches Thema, welche Pointe; " .
-            "  Gäste-Namen organisch einbauen, keine reine Liste.\n" .
-            "- INLINE-LINKS: Verlinke die zentralen Begriffe, die sich auf eine konkrete Sendung beziehen " .
-            "  (Show-Name, Gast, Streitthema), inline im Markdown-Format [Begriff](N) — N ist die Sendungs-Nummer " .
+            rtrim(string: $requirements) . "\n" .
+            "- INLINE-LINKS: Verlinke die zentralen Begriffe, die sich auf einen konkreten Eintrag beziehen, " .
+            "  inline im Markdown-Format [Begriff](N) — N ist die {$refNoun} " .
             "  aus der Liste oben, dieselbe, die du in \"sources\" nennst. 2 bis 4 solcher Links; jede Nummer aus " .
             "  \"sources\" soll möglichst einmal als Inline-Link vorkommen. Verschachtele Links nicht.\n" .
             "- Zusätzlich darfst du sparsam weitere Kernbegriffe OHNE Link mit Markdown-Bold (**…**) hervorheben.\n" .
-            "- Keine Aufzählung, kein Datum, keine Sender-Übersicht.\n" .
-            "- WICHTIG: Sendungs-Nummern dürfen im \"paragraph\"-Text NUR in der Inline-Link-Form [Begriff](N) vorkommen. " .
+            "- Keine Aufzählung, kein Datum.\n" .
+            "- WICHTIG: {$refNoun}n dürfen im \"paragraph\"-Text NUR in der Inline-Link-Form [Begriff](N) vorkommen. " .
             "  KEINE nackten Zahlen oder Index-Listen im Fließtext.\n\n" .
             "Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Markdown-Codeblock:\n" .
             "{\"paragraph\":\"...\",\"sources\":[1,4]}\n" .
-            "Die Zahlen in \"sources\" sind die Indizes der gewählten Sendungen aus der Liste oben.";
+            "Die Zahlen in \"sources\" sind die Indizes der gewählten Einträge aus der Liste oben.";
         try {
             $aiClass = 'vielhuber\\aihelper\\aihelper';
             $aiUrl = (string) ($aiConfig['url'] ?? '');
@@ -6230,10 +6618,20 @@ final class Extrablatt
         $tvHtml = '';
         $tv = isset($data['tv']) && is_array(value: $data['tv']) ? $data['tv'] : null;
         if ($tv !== null) {
-            $tvHtml = $this->buildTalkshowSection(tv: $tv);
+            $tvHtml = $this->buildProseSection(block: $tv, heading: 'TV-Talkshows', subtitle: 'letzte 7 Tage');
         }
 
-        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $tvHtml === '') {
+        $mediaHtml = '';
+        $media = isset($data['media']) && is_array(value: $data['media']) ? $data['media'] : [];
+        foreach ($this->mediaSections() as $sectionKey => $section) {
+            $block = $media[$sectionKey] ?? null;
+            if (!is_array(value: $block)) {
+                continue;
+            }
+            $mediaHtml .= $this->buildProseSection(block: $block, heading: $section['heading'], subtitle: $section['subtitle']);
+        }
+
+        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $tvHtml === '' && $mediaHtml === '') {
             return '';
         }
 
@@ -6241,35 +6639,112 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . $tvHtml . $weatherHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $tvHtml . $mediaHtml . $weatherHtml . '</section>';
     }
 
     /**
-     * Render the Polit-Talk weekly recap as a single LLM-written prose
-     * paragraph plus inline source links — same shape as a Wochenübersicht
-     * item, so we reuse buildDigestParagraph() for the body.
+     * Render a prose digest section (Polit-Talk recap, media blocks) as a
+     * single LLM-written paragraph plus inline source links — same shape as
+     * a Wochenübersicht item, so we reuse buildDigestParagraph() for the
+     * body. Heading and subtitle are trusted internal strings.
      *
-     * @param array{paragraph?: string, prose?: string, sources?: array<int, array<string, mixed>>} $tv
+     * @param array{paragraph?: string, prose?: string, sources?: array<int, array<string, mixed>>} $block
      */
-    private function buildTalkshowSection(array $tv): string
+    private function buildProseSection(array $block, string $heading, string $subtitle): string
     {
         // Accept the legacy "prose" key from older cached digests so a stale
         // cache still renders during the changeover scrape.
-        $paragraph = trim(string: (string) ($tv['paragraph'] ?? $tv['prose'] ?? ''));
+        $paragraph = trim(string: (string) ($block['paragraph'] ?? $block['prose'] ?? ''));
         if ($paragraph === '') {
             return '';
         }
         $body = $this->buildDigestParagraph(item: [
             'paragraph' => $paragraph,
-            'sources' => $tv['sources'] ?? [],
+            'sources' => $block['sources'] ?? [],
         ]);
         if ($body === '') {
             return '';
         }
         return '<div class="digest__tv">'
-            . '<h2 class="digest__title">TV-Talkshows <span class="digest__date">letzte 7 Tage</span></h2>'
+            . '<h2 class="digest__title">' . $heading . ' <span class="digest__date">' . $subtitle . '</span></h2>'
             . $body
             . '</div>';
+    }
+
+    /**
+     * Mirror the current BILD.de front page as a tile grid: same teasers,
+     * same images, same Kicker/Headline split, every tile linking straight
+     * to the original article in a new window. The homepage HTML is cached
+     * for 15 minutes so page loads stay instant; on fetch failure the stale
+     * copy keeps serving.
+     */
+    private function buildBildBlock(): string
+    {
+        $stmt = $this->openDatabase()->prepare(query: 'SELECT value, updated_at FROM cache WHERE key = :k');
+        $stmt->execute(params: [':k' => 'bild_home']);
+        $row = $stmt->fetch(mode: PDO::FETCH_ASSOC);
+        $html = is_array(value: $row) && (int) $row['updated_at'] > time() - 900 ? (string) $row['value'] : null;
+        if ($html === null) {
+            $result = $this->fetchViaImpersonate(url: 'https://www.bild.de/');
+            if ($result->body !== null) {
+                $html = $result->body;
+                $this->cacheSet(key: 'bild_home', value: $html);
+            }
+            if ($html === null && is_array(value: $row)) {
+                $html = (string) $row['value'];
+            }
+        }
+        if ($html === null || trim(string: $html) === '') {
+            return '<p class="viewnav__empty">BILD.de ist gerade nicht erreichbar.</p>';
+        }
+        $count = preg_match_all(pattern: '~<article[^>]*>(.*?)</article>~s', subject: $html, matches: $blocks);
+        if ($count === false || $count === 0 || !isset($blocks[1])) {
+            return '<p class="viewnav__empty">Keine Kacheln gefunden.</p>';
+        }
+        $tiles = '';
+        $seenHrefs = [];
+        $rendered = 0;
+        foreach ($blocks[1] as $block) {
+            if (preg_match(pattern: '~<a[^>]+href="([^"]+)"~', subject: $block, matches: $hrefMatch) !== 1) {
+                continue;
+            }
+            $href = html_entity_decode(string: $hrefMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+            if (!str_starts_with(haystack: $href, needle: 'http')) {
+                $href = 'https://www.bild.de' . $href;
+            }
+            if (!str_starts_with(haystack: $href, needle: 'https://www.bild.de/') || isset($seenHrefs[$href])) {
+                continue;
+            }
+            if (preg_match(pattern: '~<img[^>]+src="(https://images\.bild\.de/[^"]+)"~', subject: $block, matches: $imgMatch) !== 1) {
+                continue;
+            }
+            $headline = '';
+            if (preg_match(pattern: '~teaser__title__headline">([^<]*)<~', subject: $block, matches: $headlineMatch) === 1) {
+                $headline = trim(string: html_entity_decode(string: $headlineMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            }
+            if ($headline === '') {
+                continue;
+            }
+            $kicker = '';
+            if (preg_match(pattern: '~teaser__title__kicker">([^<]*)<~', subject: $block, matches: $kickerMatch) === 1) {
+                $kicker = trim(string: html_entity_decode(string: $kickerMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            }
+            $seenHrefs[$href] = true;
+            $imageUrl = html_entity_decode(string: $imgMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+            $leadClass = $rendered === 0 ? ' bild__tile--lead' : '';
+            $tiles .= '<a class="bild__tile' . $leadClass . '" href="' . htmlspecialchars(string: $href, flags: ENT_QUOTES) . '" target="_blank" rel="noreferrer noopener">'
+                . '<img class="bild__img" src="' . htmlspecialchars(string: $imageUrl, flags: ENT_QUOTES) . '" alt="" loading="lazy">'
+                . '<span class="bild__text">'
+                . ($kicker !== '' ? '<span class="bild__kicker">' . htmlspecialchars(string: $kicker, flags: ENT_QUOTES) . ':</span> ' : '')
+                . '<span class="bild__headline">' . htmlspecialchars(string: $headline, flags: ENT_QUOTES) . '</span>'
+                . '</span>'
+                . '</a>';
+            $rendered++;
+        }
+        if ($tiles === '') {
+            return '<p class="viewnav__empty">Keine Kacheln gefunden.</p>';
+        }
+        return '<section class="bild"><div class="bild__grid">' . $tiles . '</div></section>';
     }
 
     /**
@@ -7203,14 +7678,16 @@ final class Extrablatt
         // renders the result list instead.
         $isZeitung = !$isSearch && $viewFilter === 'zeitung';
         $isFactcheck = !$isSearch && $viewFilter === 'factcheck';
+        $isBild = !$isSearch && $viewFilter === 'bild';
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset; "Meldungen" tab covers every other meldungen state.
-        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && $tvFilter === 'all';
-        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isTalkshowView;
+        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && $tvFilter === 'all';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isTalkshowView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
+        $bildActive = $isBild ? ' viewnav__tab--active' : '';
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
         // onchange="filterChange(this)" auto-flips Magisch → "Alle" when the
         // user picks a single filter on an otherwise empty form. See the
@@ -7231,6 +7708,7 @@ final class Extrablatt
                 <ul class="items">{$rows}</ul>
 HTML : '';
         $factcheckBlock = $isFactcheck ? $this->buildFactCheckBlock(statement: $factcheckStatement, pending: $factcheckPending) : '';
+        $bildBlock = $isBild ? $this->buildBildBlock() : '';
 
         $searchValue = htmlspecialchars(string: $searchQuery, flags: ENT_QUOTES);
         $searchBlock = '';
@@ -7357,6 +7835,15 @@ HTML : '';
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
+                .bild__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+                .bild__tile { display: flex; flex-direction: column; background: #fff; border: 1px solid #e4e4e7; border-radius: 8px; overflow: hidden; text-decoration: none; color: #18181b; transition: transform 0.12s, box-shadow 0.12s; }
+                .bild__tile:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.12); }
+                .bild__tile--lead { grid-column: 1 / -1; }
+                .bild__img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #e4e4e7; }
+                .bild__tile--lead .bild__img { aspect-ratio: auto; }
+                .bild__text { padding: 10px 12px 12px; font-size: 15px; line-height: 1.35; }
+                .bild__kicker { color: #dd0000; font-weight: 700; }
+                .bild__headline { font-weight: 700; }
                 section.factcheck { margin: 1.5rem 0; font-family: Lora, Georgia, "Times New Roman", serif; }
                 .factcheck__form { display: flex; gap: 8px; margin-bottom: 1.3rem; }
                 .factcheck__form input[type="text"] { flex: 1; min-width: 0; font: 500 16px/1.3 system-ui, sans-serif; padding: 10px 12px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; color: #18181b; }
@@ -7477,6 +7964,10 @@ HTML : '';
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
+                html[data-theme="dark"] .bild__tile { background: #18181b; border-color: #3f3f46; color: #fafafa; }
+                html[data-theme="dark"] .bild__tile:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
+                html[data-theme="dark"] .bild__img { background: #27272a; }
+                html[data-theme="dark"] .bild__kicker { color: #f87171; }
                 html[data-theme="dark"] .factcheck__form input[type="text"] { background: #27272a; color: #e4e4e7; border-color: #3f3f46; }
                 html[data-theme="dark"] .factcheck__form input[type="text"]:focus { border-color: #a1a1aa; }
                 html[data-theme="dark"] .factcheck__form button { background: #e4e4e7; color: #18181b; }
@@ -7513,10 +8004,12 @@ HTML : '';
                     <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                     <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                     <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
+                    <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
                 </nav>
                 {$zeitungBlock}
                 {$meldungenBlock}
                 {$factcheckBlock}
+                {$bildBlock}
                 {$searchBlock}
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
