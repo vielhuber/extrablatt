@@ -172,6 +172,8 @@ final class Extrablatt
     // Media feeds (Streaming/Kino/Gaming) only accept releases within this
     // window — "neu" means at most three months old.
     private const MEDIA_WINDOW_DAYS = 90;
+    // laut.de author rating (1-5) an album needs to count as "top".
+    private const LAUT_MIN_RATING = 4;
     // Rotten-Tomatoes affiliate slug => label woven into item titles.
     private const STREAMING_SERVICES = [
         'netflix' => 'Netflix',
@@ -1232,6 +1234,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'metacritic://')) {
             return $this->fetchMetacriticGameItems(paper: $paper);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'lautde://')) {
+            return $this->fetchLautAlbumItems(paper: $paper);
+        }
         if (str_starts_with(haystack: $feedUrl, needle: 'ardmediathek://')) {
             return $this->fetchArdMediathekItems(paper: $paper, feedUrl: $feedUrl);
         }
@@ -1896,24 +1901,38 @@ final class Extrablatt
                     $publishedAt = min($ts, $now);
                 }
             }
-            $score = null;
+            $criticsScore = null;
             $critics = $entry['criticsScore'] ?? null;
             if (is_array(value: $critics) && ($critics['score'] ?? null) !== null && (string) $critics['score'] !== '') {
-                $score = (int) $critics['score'];
+                $criticsScore = (int) $critics['score'];
+            }
+            $audienceScore = null;
+            $audience = $entry['audienceScore'] ?? null;
+            if (is_array(value: $audience) && ($audience['score'] ?? null) !== null && (string) $audience['score'] !== '') {
+                $audienceScore = (int) $audience['score'];
+            }
+            // Completely unscored entries are catalog noise (reality
+            // long-runners, B-movies) — only titles with at least one score
+            // qualify as "top" content.
+            if ($criticsScore === null && $audienceScore === null) {
+                continue;
             }
             $suffixParts = [];
             if ($service !== '') {
                 $suffixParts[] = $service;
             }
-            if ($score !== null) {
-                $suffixParts[] = 'Kritiker ' . $score . ' %';
+            if ($criticsScore !== null) {
+                $suffixParts[] = 'Kritiker ' . $criticsScore . ' %';
+            }
+            if ($audienceScore !== null) {
+                $suffixParts[] = 'Publikum ' . $audienceScore . ' %';
             }
             $items[] = new FeedItem(
-                title: $title . ($suffixParts !== [] ? ' (' . implode(separator: ', ', array: $suffixParts) . ')' : ''),
+                title: $title . ' (' . implode(separator: ', ', array: $suffixParts) . ')',
                 link: 'https://www.rottentomatoes.com' . $mediaUrl,
                 publishedAt: $publishedAt,
                 imageUrl: ((string) ($entry['posterUri'] ?? '')) !== '' ? (string) $entry['posterUri'] : null,
-                rating: $score
+                rating: $criticsScore ?? $audienceScore
             );
         }
         return $items;
@@ -1963,11 +1982,11 @@ final class Extrablatt
      */
     private function parseMetacriticGames(string $html, int $cutoff): array
     {
-        // One product card per anchor; the tempered dot keeps every group
+        // One product card per anchor; the tempered dot keeps the match
         // inside the same <a>, so nav links to /game/... never match (they
-        // carry no data-title / Metascore inside the anchor).
+        // carry no Metascore inside the anchor).
         $count = preg_match_all(
-            pattern: '~<a[^>]+href="(/game/[^"]+)"[^>]*>(?:(?!</a>).)*?data-title="([^"]+)"(?:(?!</a>).)*?<span>([A-Z][a-z]{2} \d{1,2}, \d{4})</span>(?:(?!</a>).)*?Metascore (\d+) out of 100~s',
+            pattern: '~<a[^>]+href="(/game/[^"]+)"[^>]*>((?:(?!</a>).)*?Metascore (\d+) out of 100)~s',
             subject: $html,
             matches: $cards,
             flags: PREG_SET_ORDER
@@ -1978,21 +1997,134 @@ final class Extrablatt
         $now = time();
         $items = [];
         foreach ($cards as $card) {
-            $title = trim(string: html_entity_decode(string: $card[2], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            $body = $card[2];
+            if (preg_match(pattern: '~data-title="([^"]+)"~', subject: $body, matches: $titleMatch) !== 1) {
+                continue;
+            }
+            $title = trim(string: html_entity_decode(string: $titleMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
             if ($title === '') {
                 continue;
             }
-            $releasedAt = strtotime(datetime: $card[3]);
+            if (preg_match(pattern: '~<span>([A-Z][a-z]{2} \d{1,2}, \d{4})</span>~', subject: $body, matches: $dateMatch) !== 1) {
+                continue;
+            }
+            $releasedAt = strtotime(datetime: $dateMatch[1]);
             if ($releasedAt === false || $releasedAt < $cutoff || $releasedAt > $now) {
                 continue;
             }
-            $score = (int) $card[4];
+            // The lazy-loaded cover ships a 1x/2x srcset — take the sharper
+            // 2x variant as thumbnail source.
+            $imageUrl = null;
+            if (preg_match(pattern: '~srcset="([^"]*)"~', subject: $body, matches: $srcsetMatch) === 1) {
+                $variants = explode(separator: ',', string: html_entity_decode(string: $srcsetMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+                $last = trim(string: (string) end(array: $variants));
+                $candidate = trim(string: (string) preg_replace(pattern: '~\s+\d+x$~', replacement: '', subject: $last));
+                if (str_starts_with(haystack: $candidate, needle: 'https://')) {
+                    $imageUrl = $candidate;
+                }
+            }
+            $score = (int) $card[3];
             $items[] = new FeedItem(
                 title: $title . ' (PC, Metascore ' . $score . ')',
                 link: 'https://www.metacritic.com' . $card[1],
                 publishedAt: $releasedAt,
-                imageUrl: null,
+                imageUrl: $imageUrl,
                 rating: $score
+            );
+        }
+        return $items;
+    }
+
+    /**
+     * Scrape laut.de's album review list. The RSS feed carries neither
+     * ratings nor covers, but the /Alben teaser list exposes both via
+     * data-authors-rating (1-5) plus cover art. Only top-rated albums
+     * (>= LAUT_MIN_RATING) survive; the unrated first teaser is laut.de's
+     * own "Album der Woche" pick and counts as top by definition.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchLautAlbumItems(string $paper): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        if ($body === null || $body === '') {
+            $result = $this->fetchViaImpersonate(url: 'https://www.laut.de/Alben');
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseLautAlbums(html: $body);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseLautAlbums(string $html): array
+    {
+        // Only the "Album der Woche" and "Neu" sections hold new releases —
+        // the "Topklicks" (section id releases_top) and "Meilensteine" rails
+        // below re-surface classics.
+        $cut = strpos(haystack: $html, needle: 'id="releases_top"');
+        if ($cut !== false) {
+            $html = substr(string: $html, offset: 0, length: $cut);
+        }
+        $count = preg_match_all(
+            pattern: '~<article class="teaser"([^>]*)>(.*?)</article>~s',
+            subject: $html,
+            matches: $teasers,
+            flags: PREG_SET_ORDER
+        );
+        if ($count === false || $count === 0) {
+            return [];
+        }
+        $now = time();
+        $items = [];
+        $seenPaths = [];
+        foreach ($teasers as $teaser) {
+            $rating = null;
+            if (preg_match(pattern: '~data-authors-rating="(\d)"~', subject: $teaser[1], matches: $ratingMatch) === 1) {
+                $rating = (int) $ratingMatch[1];
+            }
+            $isAlbumOfWeek = $rating === null && str_contains(haystack: $teaser[2], needle: 'Album der Woche');
+            if (!$isAlbumOfWeek && ($rating === null || $rating < self::LAUT_MIN_RATING)) {
+                continue;
+            }
+            if (preg_match(pattern: '~href="(/[^"]+/Alben/[^"#]+)"~', subject: $teaser[2], matches: $hrefMatch) !== 1) {
+                continue;
+            }
+            $path = $hrefMatch[1];
+            if (isset($seenPaths[$path])) {
+                continue;
+            }
+            // Two teaser layouts: the "Album der Woche" lead uses
+            // artist/title spans, the rated list entries a teasertitel h3.
+            if (
+                preg_match(pattern: '~<span class="artist">([^<]*)</span>\s*<span class="title">([^<]*)</span>~s', subject: $teaser[2], matches: $nameMatch) !== 1
+                && preg_match(pattern: '~<h3 class="teasertitel">\s*<span>([^<]*)</span>\s*<strong[^>]*>([^<]*)</strong>~s', subject: $teaser[2], matches: $nameMatch) !== 1
+            ) {
+                continue;
+            }
+            $artist = trim(string: html_entity_decode(string: $nameMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            $albumTitle = trim(string: html_entity_decode(string: $nameMatch[2], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            if ($artist === '' || $albumTitle === '') {
+                continue;
+            }
+            $imageUrl = null;
+            if (preg_match(pattern: '~<img[^>]+src="(/bilder/[^"]+)"~', subject: $teaser[2], matches: $imgMatch) === 1) {
+                // Strip the "__<w>,<h>/" resize segment for the full-size cover.
+                $coverPath = (string) preg_replace(pattern: '~^/bilder/__\d+,\d+/~', replacement: '/bilder/', subject: html_entity_decode(string: $imgMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+                $imageUrl = 'https://www.laut.de' . $coverPath;
+            }
+            $seenPaths[$path] = true;
+            $suffix = $isAlbumOfWeek ? 'laut.de Album der Woche' : 'laut.de ' . $rating . '/5';
+            $items[] = new FeedItem(
+                title: '"' . $albumTitle . '" von ' . $artist . ' (' . $suffix . ')',
+                link: 'https://www.laut.de' . $path,
+                publishedAt: $now,
+                imageUrl: $imageUrl,
+                rating: $isAlbumOfWeek ? 5 : $rating
             );
         }
         return $items;
@@ -6086,7 +6218,7 @@ final class Extrablatt
                 'heading' => 'Streaming-Serien',
                 'subtitle' => 'Netflix · Prime Video · Apple TV+ · Disney+',
                 'intro' => 'Du erhältst Serien, die zuletzt neu oder mit neuen Folgen auf Netflix, Prime Video, Apple TV+ oder Disney+ ' .
-                    'erschienen sind (Rotten-Tomatoes-Daten, Kritiker-Score in Prozent falls vorhanden). ' .
+                    'erschienen sind (Rotten-Tomatoes-Daten mit Kritiker- und Publikums-Score in Prozent). ' .
                     'Wähle die 3 bis 4 LOHNENDSTEN neuen Serien bzw. Staffeln aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
                 'requirements' => "- Bevorzuge echte Serien-Neustarts und neue Staffeln nennenswerter Produktionen, gern mit hohem Kritiker-Score; " .
                     "  ignoriere Dauerläufer-Reality-Formate, Game-Shows und alte Katalog-Ware.\n" .
@@ -6100,10 +6232,10 @@ final class Extrablatt
                 'heading' => 'Streaming-Filme',
                 'subtitle' => 'Netflix · Prime Video · Apple TV+ · Disney+',
                 'intro' => 'Du erhältst Filme, die zuletzt neu auf Netflix, Prime Video, Apple TV+ oder Disney+ erschienen sind ' .
-                    '(Rotten-Tomatoes-Daten, Kritiker-Score in Prozent falls vorhanden). ' .
+                    '(Rotten-Tomatoes-Daten mit Kritiker- und Publikums-Score in Prozent). ' .
                     'Wähle die 3 bis 4 SEHENSWERTESTEN aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
                 'requirements' => "- Bevorzuge relevante Neuerscheinungen mit hohem Kritiker-Score; " .
-                    "  ignoriere Katalog-Ware, Stand-up-Mitschnitte und B-Movies ohne Score.\n" .
+                    "  ignoriere Katalog-Ware, Stand-up-Mitschnitte und B-Movies.\n" .
                     '- Nenne zu jeder Empfehlung organisch den Streaming-Dienst.',
                 'refNoun' => 'Titel-Nummer',
             ],
@@ -6113,10 +6245,10 @@ final class Extrablatt
                 'limit' => 60,
                 'heading' => 'Kino',
                 'subtitle' => 'neu angelaufen',
-                'intro' => 'Du erhältst Filme, die zuletzt im Kino angelaufen sind (Rotten-Tomatoes-Daten, Kritiker-Score in Prozent ' .
-                    'falls vorhanden). Wähle die 3 bis 4 SEHENSWERTESTEN aktuellen Kinofilme aus und verdichte sie in einem ' .
+                'intro' => 'Du erhältst Filme, die zuletzt im Kino angelaufen sind (Rotten-Tomatoes-Daten mit Kritiker- und ' .
+                    'Publikums-Score in Prozent). Wähle die 3 bis 4 SEHENSWERTESTEN aktuellen Kinofilme aus und verdichte sie in einem ' .
                     'prägnanten Fließtext (2 bis 4 Sätze).',
-                'requirements' => '- Bevorzuge die größten und bestbewerteten Kinostarts; ignoriere Nischen-Dokus und Filme ohne Score.',
+                'requirements' => '- Bevorzuge die größten und bestbewerteten Kinostarts; ignoriere Nischen-Dokus.',
                 'refNoun' => 'Titel-Nummer',
             ],
             'musik' => [
@@ -6125,9 +6257,10 @@ final class Extrablatt
                 'limit' => 60,
                 'heading' => 'Musik',
                 'subtitle' => 'neue Alben',
-                'intro' => 'Du erhältst frisch von laut.de rezensierte Album-Neuerscheinungen. ' .
-                    'Wähle die 3 bis 4 INTERESSANTESTEN Alben aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
-                'requirements' => '- Bevorzuge relevante Künstler und bemerkenswerte Neuerscheinungen quer durch die Genres; nenne Künstler und Albumtitel organisch.',
+                'intro' => 'Du erhältst die von laut.de am besten bewerteten Album-Neuerscheinungen (Redaktions-Wertung in Klammern, ' .
+                    'Skala 1-5, plus das aktuelle Album der Woche). ' .
+                    'Wähle die 3 bis 4 BESTEN Alben aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
+                'requirements' => '- Bevorzuge die höchsten Wertungen und das Album der Woche; nenne Künstler und Albumtitel organisch.',
                 'refNoun' => 'Titel-Nummer',
             ],
             'gaming' => [
@@ -8058,8 +8191,8 @@ HTML : '';
                     <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                     <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                     {$mediaTabsHtml}
-                    <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
                     <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
+                    <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
                 </nav>
                 {$zeitungBlock}
                 {$meldungenBlock}
