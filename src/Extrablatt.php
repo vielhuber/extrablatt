@@ -447,6 +447,7 @@ final class Extrablatt
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
         $tvFilter = (string) ($_GET['tv'] ?? '');
+        $mediaFilter = (string) ($_GET['media'] ?? '');
         $statusFilter = (string) ($_GET['status'] ?? '');
         $paywallFilter = (string) ($_GET['paywall'] ?? '');
         $categoryFilter = (string) ($_GET['category'] ?? '');
@@ -494,6 +495,9 @@ final class Extrablatt
             if ($tvFilter !== '' && $tvFilter !== 'all' && !in_array(needle: $tvFilter, haystack: $this->talkshowPapers(), strict: true)) {
                 $tvFilter = '';
             }
+            if ($mediaFilter !== '' && !isset($this->mediaTabs()[$mediaFilter])) {
+                $mediaFilter = '';
+            }
             if (!in_array(needle: $statusFilter, haystack: ['', 'original', 'archive'], strict: true)) {
                 $statusFilter = '';
             }
@@ -515,7 +519,8 @@ final class Extrablatt
             if (!in_array(needle: $thumbFilter, haystack: ['', 'yes', 'no'], strict: true)) {
                 $thumbFilter = '';
             }
-            if (!in_array(needle: $viewFilter, haystack: ['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild'], strict: true)) {
+            $mediaViews = array_keys(array: $this->mediaTabs());
+            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild'], $mediaViews), strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -526,6 +531,16 @@ final class Extrablatt
                 $tvFilter = 'all';
                 $magicFilter = 'all';
                 $paperFilter = '';
+                $mediaFilter = '';
+            }
+            // Media views (serien/filme/alben/games) work the same way:
+            // Meldungen shortcuts forcing media=<tab> and magic=all.
+            if (in_array(needle: $viewFilter, haystack: $mediaViews, strict: true)) {
+                $mediaFilter = $viewFilter;
+                $viewFilter = 'meldungen';
+                $magicFilter = 'all';
+                $paperFilter = '';
+                $tvFilter = '';
             }
             $factcheckStatement = '';
             $factcheckPending = false;
@@ -550,6 +565,7 @@ final class Extrablatt
             echo $this->renderDashboard(
                 paperFilter: $paperFilter,
                 tvFilter: $tvFilter,
+                mediaFilter: $mediaFilter,
                 statusFilter: $statusFilter,
                 paywallFilter: $paywallFilter,
                 categoryFilter: $categoryFilter,
@@ -3075,6 +3091,23 @@ final class Extrablatt
             }
         }
         return $keys;
+    }
+
+    /**
+     * Media shortcut tabs (Serien/Filme/Alben/Games) — each is a Meldungen
+     * preset filtering on the given paper keys, same pattern as the
+     * "talkshows" view. Keys double as view names and ?media= values.
+     *
+     * @return array<string, array{label: string, papers: array<int, string>}>
+     */
+    private function mediaTabs(): array
+    {
+        return [
+            'serien' => ['label' => 'Serien', 'papers' => ['streaming_serien']],
+            'filme' => ['label' => 'Filme', 'papers' => ['streaming_filme', 'kino']],
+            'alben' => ['label' => 'Alben', 'papers' => ['alben']],
+            'games' => ['label' => 'Games', 'papers' => ['spiele']],
+        ];
     }
 
     /**
@@ -7051,6 +7084,7 @@ final class Extrablatt
     private function fetchArticlesForDashboard(
         string $paperFilter,
         string $tvFilter,
+        string $mediaFilter,
         string $statusFilter,
         string $paywallFilter,
         string $categoryFilter,
@@ -7064,7 +7098,8 @@ final class Extrablatt
         $params = [];
         // TV-Filter has precedence over the paper dropdown — picking "Alle
         // TV-Sendungen" expands to paper IN (<talkshowPapers>), picking a
-        // single show narrows to that paper.
+        // single show narrows to that paper. The media tabs expand the same
+        // way to their configured paper set.
         if ($tvFilter === 'all') {
             $tvPapers = $this->talkshowPapers();
             if ($tvPapers !== []) {
@@ -7077,6 +7112,12 @@ final class Extrablatt
         } elseif ($tvFilter !== '') {
             $where[] = 'paper = :paper';
             $params[':paper'] = $tvFilter;
+        } elseif ($mediaFilter !== '' && isset($this->mediaTabs()[$mediaFilter])) {
+            $list = implode(separator: ',', array: array_map(
+                callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'",
+                array: $this->mediaTabs()[$mediaFilter]['papers']
+            ));
+            $where[] = 'paper IN (' . $list . ')';
         } elseif ($paperFilter !== '') {
             $siblings = $this->paperDomainSiblings(paper: $paperFilter);
             $placeholders = [];
@@ -7388,6 +7429,7 @@ final class Extrablatt
     private function renderDashboard(
         string $paperFilter,
         string $tvFilter,
+        string $mediaFilter,
         string $statusFilter,
         string $paywallFilter,
         string $categoryFilter,
@@ -7409,6 +7451,7 @@ final class Extrablatt
             : $this->fetchArticlesForDashboard(
                 paperFilter: $paperFilter,
                 tvFilter: $tvFilter,
+                mediaFilter: $mediaFilter,
                 statusFilter: $statusFilter,
                 paywallFilter: $paywallFilter,
                 categoryFilter: $categoryFilter,
@@ -7658,7 +7701,7 @@ final class Extrablatt
         // the result set. Without any filter the global total (excluding
         // dupes) is shown, so the header reflects the real archive size and
         // not just the magic/unread default slice.
-        $isFiltered = $paperFilter !== '' || $tvFilter !== '' || $statusFilter !== '' || $paywallFilter !== ''
+        $isFiltered = $paperFilter !== '' || $tvFilter !== '' || $mediaFilter !== '' || $statusFilter !== '' || $paywallFilter !== ''
             || $categoryFilter !== '' || $readFilter !== '' || $magicFilter !== '' || $thumbFilter !== '';
         if ($isFiltered) {
             $displayCount = $count;
@@ -7680,21 +7723,33 @@ final class Extrablatt
         $isFactcheck = !$isSearch && $viewFilter === 'factcheck';
         $isBild = !$isSearch && $viewFilter === 'bild';
         // "Talk-Shows" tab is active when the meldungen view is showing the
-        // tv=all preset; "Meldungen" tab covers every other meldungen state.
+        // tv=all preset, the media tabs when media=<tab> is set; "Meldungen"
+        // covers every other meldungen state.
         $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && $tvFilter === 'all';
-        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isTalkshowView;
+        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isTalkshowView && $mediaFilter !== '';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isTalkshowView && !$isMediaView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
         $bildActive = $isBild ? ' viewnav__tab--active' : '';
+        $mediaTabsHtml = '';
+        foreach ($this->mediaTabs() as $tabKey => $tab) {
+            $mediaActive = $isMediaView && $mediaFilter === $tabKey ? ' viewnav__tab--active' : '';
+            $mediaTabsHtml .= '<a class="viewnav__tab' . $mediaActive . '" href="/?view=' . $tabKey . '">' . $tab['label'] . '</a>';
+        }
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
+        // Keep the active media preset when the user submits another filter —
+        // the tv preset persists via its own dropdown, media has no dropdown.
+        $mediaHidden = $mediaFilter !== ''
+            ? '<input type="hidden" name="media" value="' . htmlspecialchars(string: $mediaFilter, flags: ENT_QUOTES) . '">'
+            : '';
         // onchange="filterChange(this)" auto-flips Magisch → "Alle" when the
         // user picks a single filter on an otherwise empty form. See the
         // <script> at the bottom of the template.
-        $meldungenBlock = $isMeldungenView || $isTalkshowView ? <<<HTML
+        $meldungenBlock = $isMeldungenView || $isTalkshowView || $isMediaView ? <<<HTML
                 <form class="filters" method="get" action="/">
-                    <input type="hidden" name="view" value="meldungen">
+                    <input type="hidden" name="view" value="meldungen">{$mediaHidden}
                     <select name="paper" onchange="filterChange(this)">{$paperOptions}</select>
                     <select name="tv" onchange="filterChange(this)">{$tvOptions}</select>
                     <select name="status" onchange="filterChange(this)">{$statusOptions}</select>
@@ -7839,8 +7894,7 @@ HTML : '';
                 .bild__tile { display: flex; flex-direction: column; background: #fff; border: 1px solid #e4e4e7; border-radius: 8px; overflow: hidden; text-decoration: none; color: #18181b; transition: transform 0.12s, box-shadow 0.12s; }
                 .bild__tile:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.12); }
                 .bild__tile--lead { grid-column: 1 / -1; }
-                .bild__img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #e4e4e7; }
-                .bild__tile--lead .bild__img { aspect-ratio: auto; }
+                .bild__img { width: 100%; height: auto; display: block; background: #e4e4e7; }
                 .bild__text { padding: 10px 12px 12px; font-size: 15px; line-height: 1.35; }
                 .bild__kicker { color: #dd0000; font-weight: 700; }
                 .bild__headline { font-weight: 700; }
@@ -8003,6 +8057,7 @@ HTML : '';
                     <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                     <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                     <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
+                    {$mediaTabsHtml}
                     <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
                     <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
                 </nav>
