@@ -3919,6 +3919,86 @@ final class Extrablatt
             }
         }
 
+        // Media backfill: media rows compete in the rating-ranked tabs where
+        // a missing cover is glaring, so they must reach 100% coverage. Rows
+        // still present in the feeds self-heal via the Phase-7 upsert (the
+        // grids deliver covers); this pass catches rows that already rotated
+        // out: og:image from the cached Phase-2 probe or a live probe of the
+        // detail page (works for Rotten Tomatoes and laut.de — Metacritic
+        // ships no og tags at all), source favicon as last resort.
+        $mediaPaperKeys = $this->fixedCategoryPapers();
+        if ($mediaPaperKeys !== []) {
+            $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $mediaPaperKeys));
+            $mediaRows = (array) $db->query(query: "
+                SELECT url, paper, title, image_url
+                FROM articles
+                WHERE paper IN ({$list})
+                  AND thumbnail IS NULL
+                  AND COALESCE(thumbnail_fail_count, 0) < 3
+            ")->fetchAll(mode: PDO::FETCH_ASSOC);
+            $inCurrentFeeds = array_flip(array: $urls);
+            $mediaImages = [];
+            $mediaCandidates = [];
+            $mediaProbed = 0;
+            foreach ($mediaRows as $row) {
+                $url = (string) $row['url'];
+                // Fresh-feed URLs are covered by the regular Phase-5 path
+                // plus the Phase-7 upsert in this very scrape.
+                if (isset($inCurrentFeeds[$url])) {
+                    continue;
+                }
+                $img = (string) ($row['image_url'] ?? '');
+                if ($img === '') {
+                    $img = (string) $this->readOgImageCache(url: $url);
+                }
+                if ($img === '' && $mediaProbed < 40) {
+                    $mediaProbed++;
+                    $page = $this->fetchViaImpersonate(url: $url);
+                    if ($page->body !== null && preg_match(pattern: '~<meta property="og:image" content="([^"]+)"~', subject: $page->body, matches: $ogMatch) === 1) {
+                        $img = html_entity_decode(string: $ogMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+                        $this->writeOgImageCache(url: $url, imageUrl: $img);
+                    }
+                }
+                if ($img === '' || preg_match(pattern: '~^https?://~i', subject: $img) !== 1) {
+                    $img = (string) ($papersConfig[$row['paper']]['default_image'] ?? '');
+                }
+                if ($img === '') {
+                    continue;
+                }
+                $mediaImages[$url] = $img;
+                $mediaCandidates[] = [
+                    'paper' => (string) $row['paper'],
+                    'item' => new FeedItem(
+                        title: (string) $row['title'],
+                        link: $url,
+                        publishedAt: null,
+                        imageUrl: $img
+                    )
+                ];
+            }
+            if ($mediaCandidates !== []) {
+                $emit(sprintf('  Medien-Backfill: %d Einträge ohne Thumbnail (%d og-Proben)', count(value: $mediaCandidates), $mediaProbed));
+                $mediaStart = microtime(as_float: true);
+                $mediaThumbs = $this->downloadThumbnailsStreaming(items: $mediaCandidates, imageUrls: $mediaImages, emit: $emit);
+                $mediaUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb, image_url = COALESCE(image_url, :img), thumbnail_fail_count = 0 WHERE url = :url');
+                $mediaFailBump = $db->prepare(query: 'UPDATE articles SET thumbnail_fail_count = COALESCE(thumbnail_fail_count, 0) + 1 WHERE url = :url');
+                $mediaWritten = 0;
+                $mediaFailed = 0;
+                foreach ($mediaImages as $url => $img) {
+                    $thumb = $mediaThumbs[$url] ?? null;
+                    if ($thumb !== null) {
+                        $mediaUpdate->execute(params: [':thumb' => $thumb, ':img' => $img, ':url' => (string) $url]);
+                        $mediaWritten++;
+                    } else {
+                        $mediaFailBump->execute(params: [':url' => (string) $url]);
+                        $mediaFailed++;
+                    }
+                }
+                $mediaMs = (int) round(num: (microtime(as_float: true) - $mediaStart) * 1000);
+                $emit(sprintf('  → Medien-Backfill: %d geschrieben, %d fehlgeschlagen (%d ms)', $mediaWritten, $mediaFailed, $mediaMs));
+            }
+        }
+
         // Generic backfill: any paper article in DB with image_url set but
         // thumbnail missing — covers items that slipped through earlier
         // because Phase 5 was broken (xargs denied, image host blip, etc.).
