@@ -174,6 +174,8 @@ final class Extrablatt
     private const MEDIA_WINDOW_DAYS = 90;
     // laut.de author rating (1-5) an album needs to count as "top".
     private const LAUT_MIN_RATING = 4;
+    // Metascore an album needs to count as "top" (75 = generally favorable).
+    private const METACRITIC_ALBUM_MIN_SCORE = 75;
     // Rotten-Tomatoes affiliate slug => label woven into item titles.
     private const STREAMING_SERVICES = [
         'netflix' => 'Netflix',
@@ -536,13 +538,18 @@ final class Extrablatt
                 $mediaFilter = '';
             }
             // Media views (serien/filme/alben/games) work the same way:
-            // Meldungen shortcuts forcing media=<tab> and magic=all.
+            // Meldungen shortcuts forcing media=<tab> and magic=all. They
+            // default to rating-ranked lists — critic score is the point of
+            // these tabs; the sort dropdown still lets the user override.
             if (in_array(needle: $viewFilter, haystack: $mediaViews, strict: true)) {
                 $mediaFilter = $viewFilter;
                 $viewFilter = 'meldungen';
                 $magicFilter = 'all';
                 $paperFilter = '';
                 $tvFilter = '';
+                if ($sortFilter === '') {
+                    $sortFilter = 'rating_desc';
+                }
             }
             $factcheckStatement = '';
             $factcheckPending = false;
@@ -1231,6 +1238,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'rottentomatoes://')) {
             return $this->fetchRottenTomatoesItems(paper: $paper, feedUrl: $feedUrl);
         }
+        if ($feedUrl === 'metacritic://albums') {
+            return $this->fetchMetacriticAlbumItems(paper: $paper);
+        }
         if (str_starts_with(haystack: $feedUrl, needle: 'metacritic://')) {
             return $this->fetchMetacriticGameItems(paper: $paper);
         }
@@ -1911,10 +1921,10 @@ final class Extrablatt
             if (is_array(value: $audience) && ($audience['score'] ?? null) !== null && (string) $audience['score'] !== '') {
                 $audienceScore = (int) $audience['score'];
             }
-            // Completely unscored entries are catalog noise (reality
-            // long-runners, B-movies) — only titles with at least one score
-            // qualify as "top" content.
-            if ($criticsScore === null && $audienceScore === null) {
+            // Entries without a critics score are catalog noise (reality
+            // long-runners, B-movies, audience-only self-promotion) — the
+            // media tabs rank by critic verdict, so that score is mandatory.
+            if ($criticsScore === null) {
                 continue;
             }
             $suffixParts = [];
@@ -1932,7 +1942,7 @@ final class Extrablatt
                 link: 'https://www.rottentomatoes.com' . $mediaUrl,
                 publishedAt: $publishedAt,
                 imageUrl: ((string) ($entry['posterUri'] ?? '')) !== '' ? (string) $entry['posterUri'] : null,
-                rating: $criticsScore ?? $audienceScore
+                rating: $criticsScore
             );
         }
         return $items;
@@ -2036,6 +2046,85 @@ final class Extrablatt
     }
 
     /**
+     * Scrape Metacritic's legacy album new-releases browse list (the only
+     * music surface that survived the 2023 redesign — the finder API knows
+     * no music product type and /music/ paths 403). Rows carry title,
+     * artist, release date, metascore and cover; only fresh releases at or
+     * above METACRITIC_ALBUM_MIN_SCORE survive.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchMetacriticAlbumItems(string $paper): array
+    {
+        $body = $this->cacheGet(key: 'feed:' . $paper);
+        if ($body === null || $body === '') {
+            $result = $this->fetchViaImpersonate(url: 'https://www.metacritic.com/browse/albums/release-date/new-releases/date');
+            if ($result->body === null) {
+                return [];
+            }
+            $body = $result->body;
+            $this->cacheSet(key: 'feed:' . $paper, value: $body);
+        }
+        return $this->parseMetacriticAlbums(html: $body);
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseMetacriticAlbums(string $html): array
+    {
+        $count = preg_match_all(
+            pattern: '~<div class="metascore_w large release[^"]*">(\d+)</div>\s*</a>\s*</div>\s*<a href="(/music/[^"]+)" class="title"><h3>([^<]+)</h3></a>\s*<div class="clamp-details">\s*<div class="artist">\s*by ([^<]+?)\s*</div>\s*<span>([A-Z][a-z]+ \d{1,2}, \d{4})</span>~s',
+            subject: $html,
+            matches: $rows,
+            flags: PREG_SET_ORDER
+        );
+        if ($count === false || $count === 0) {
+            return [];
+        }
+        // Cover lookup: the poster cell precedes the summary cell, keyed by
+        // the same detail href.
+        $covers = [];
+        if (preg_match_all(pattern: '~<a href="(/music/[^"]+)"><img src="(https://static\.metacritic\.com/[^"]+)"~', subject: $html, matches: $imgMatches, flags: PREG_SET_ORDER) > 0) {
+            foreach ($imgMatches as $imgMatch) {
+                $covers[$imgMatch[1]] = $imgMatch[2];
+            }
+        }
+        $now = time();
+        $cutoff = $now - self::MEDIA_WINDOW_DAYS * 86400;
+        $items = [];
+        $seenPaths = [];
+        foreach ($rows as $row) {
+            $score = (int) $row[1];
+            if ($score < self::METACRITIC_ALBUM_MIN_SCORE) {
+                continue;
+            }
+            $path = $row[2];
+            if (isset($seenPaths[$path])) {
+                continue;
+            }
+            $releasedAt = strtotime(datetime: $row[5]);
+            if ($releasedAt === false || $releasedAt < $cutoff || $releasedAt > $now) {
+                continue;
+            }
+            $albumTitle = trim(string: html_entity_decode(string: $row[3], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            $artist = trim(string: html_entity_decode(string: $row[4], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+            if ($albumTitle === '' || $artist === '') {
+                continue;
+            }
+            $seenPaths[$path] = true;
+            $items[] = new FeedItem(
+                title: '"' . $albumTitle . '" von ' . $artist . ' (Metascore ' . $score . ')',
+                link: 'https://www.metacritic.com' . $path,
+                publishedAt: $releasedAt,
+                imageUrl: $covers[$path] ?? null,
+                rating: $score
+            );
+        }
+        return $items;
+    }
+
+    /**
      * Scrape laut.de's album review list. The RSS feed carries neither
      * ratings nor covers, but the /Alben teaser list exposes both via
      * data-authors-rating (1-5) plus cover art. Only top-rated albums
@@ -2124,7 +2213,9 @@ final class Extrablatt
                 link: 'https://www.laut.de' . $path,
                 publishedAt: $now,
                 imageUrl: $imageUrl,
-                rating: $isAlbumOfWeek ? 5 : $rating
+                // Normalised to the 0-100 scale every other media source
+                // uses, so the rating-ranked tabs mix sources fairly.
+                rating: ($isAlbumOfWeek ? 5 : $rating) * 20
             );
         }
         return $items;
@@ -3237,7 +3328,7 @@ final class Extrablatt
         return [
             'serien' => ['label' => 'Serien', 'papers' => ['streaming_serien']],
             'filme' => ['label' => 'Filme', 'papers' => ['streaming_filme', 'kino']],
-            'alben' => ['label' => 'Alben', 'papers' => ['alben']],
+            'alben' => ['label' => 'Alben', 'papers' => ['alben', 'alben_metacritic']],
             'games' => ['label' => 'Games', 'papers' => ['spiele']],
         ];
     }
@@ -4296,6 +4387,18 @@ final class Extrablatt
         $feedBytes = (int) $db->query(query: "SELECT COALESCE(SUM(LENGTH(value)),0) FROM cache WHERE key LIKE 'feed:%'")->fetchColumn();
         $feedDeleted = $db->exec(statement: "DELETE FROM cache WHERE key LIKE 'feed:%'");
         $emit(sprintf('  → %d Feed-Cache-Einträge gelöscht (%d MB frei)', (int) $feedDeleted, intdiv($feedBytes, 1048576)));
+
+        // Media rows without a rating predate the score filter (the feeds
+        // only deliver scored items now) — they would pollute the
+        // rating-ranked media tabs forever.
+        $mediaPapers = $this->fixedCategoryPapers();
+        if ($mediaPapers !== []) {
+            $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $mediaPapers));
+            $mediaDeleted = $db->exec(statement: "DELETE FROM articles WHERE paper IN ({$list}) AND rating IS NULL");
+            if ((int) $mediaDeleted > 0) {
+                $emit(sprintf('  → %d Medien-Artikel ohne Wertung gelöscht', (int) $mediaDeleted));
+            }
+        }
 
         // Talk-show episode bodies (zdf-episode:<md5>) accumulate one entry
         // per crawled episode and would grow unbounded otherwise. Drop the
@@ -6252,15 +6355,15 @@ final class Extrablatt
                 'refNoun' => 'Titel-Nummer',
             ],
             'musik' => [
-                'papers' => ['alben'],
+                'papers' => ['alben', 'alben_metacritic'],
                 'window_days' => 45,
                 'limit' => 60,
                 'heading' => 'Musik',
                 'subtitle' => 'neue Alben',
-                'intro' => 'Du erhältst die von laut.de am besten bewerteten Album-Neuerscheinungen (Redaktions-Wertung in Klammern, ' .
-                    'Skala 1-5, plus das aktuelle Album der Woche). ' .
+                'intro' => 'Du erhältst die am besten bewerteten Album-Neuerscheinungen: laut.de-Rezensionen (Skala 1-5 plus das ' .
+                    'aktuelle Album der Woche) und Metacritic-Alben (Metascore 0-100). Dasselbe Album kann doppelt vorkommen. ' .
                     'Wähle die 3 bis 4 BESTEN Alben aus und verdichte sie in einem prägnanten Fließtext (2 bis 4 Sätze).',
-                'requirements' => '- Bevorzuge die höchsten Wertungen und das Album der Woche; nenne Künstler und Albumtitel organisch.',
+                'requirements' => '- Bevorzuge die höchsten Wertungen und das Album der Woche; nenne Künstler und Albumtitel organisch; nenne jedes Album höchstens einmal.',
                 'refNoun' => 'Titel-Nummer',
             ],
             'gaming' => [
