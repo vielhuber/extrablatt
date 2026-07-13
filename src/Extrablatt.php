@@ -573,7 +573,7 @@ final class Extrablatt
                 $paperFilter = '';
                 $tvFilter = '';
                 if ($sortFilter === '') {
-                    $sortFilter = 'rating_desc';
+                    $sortFilter = $this->mediaTabs()[$mediaFilter]['sort'] ?? 'rating_desc';
                 }
             }
             $factcheckStatement = '';
@@ -3018,6 +3018,10 @@ final class Extrablatt
             'published_asc' => ['label' => 'Datum ↑', 'orderBy' => 'published_at ASC, id ASC'],
             'rating_desc' => ['label' => 'Rating ↓', 'orderBy' => 'rating IS NULL, rating DESC, published_at DESC'],
             'rating_asc' => ['label' => 'Rating ↑', 'orderBy' => 'rating IS NULL, rating ASC, published_at DESC'],
+            // Reddit-style hot ranking: log-dampened score minus time decay
+            // (one log10 unit per two days), plus ±0.6 random jitter so every
+            // reload reshuffles the mix — like the Reddit home feed.
+            'hot' => ['label' => 'Hot 🔥', 'orderBy' => "(LOG10(MAX(COALESCE(rating, 0), 1)) - (strftime('%s','now') - COALESCE(published_at, 0)) / 172800.0 + (RANDOM() % 600) / 1000.0) DESC, published_at DESC"],
             'vote_desc' => ['label' => 'Vote ↓', 'orderBy' => 'vote DESC, published_at DESC'],
             'vote_asc' => ['label' => 'Vote ↑', 'orderBy' => 'vote ASC, published_at DESC'],
             'read_desc' => ['label' => 'Gelesen ↓', 'orderBy' => 'read_at IS NULL, read_at DESC, published_at DESC'],
@@ -3440,12 +3444,13 @@ final class Extrablatt
     }
 
     /**
-     * Media shortcut tabs (Serien/Filme/Alben/Games/Hacker News) — each is a
-     * Meldungen preset filtering on the given paper keys, same pattern as the
-     * "talkshows" view. Keys double as view names and ?media= values. An
-     * optional window_days narrows the tab to recent items at query time.
+     * Media shortcut tabs (Serien/Filme/Alben/Games/Hacker News/Reddit) —
+     * each is a Meldungen preset filtering on the given paper keys, same
+     * pattern as the "talkshows" view. Keys double as view names and ?media=
+     * values. An optional window_days narrows the tab to recent items at
+     * query time; an optional sort overrides the rating_desc default.
      *
-     * @return array<string, array{label: string, papers: array<int, string>, window_days?: int}>
+     * @return array<string, array{label: string, papers: array<int, string>, window_days?: int, sort?: string}>
      */
     private function mediaTabs(): array
     {
@@ -3455,7 +3460,7 @@ final class Extrablatt
             'alben' => ['label' => 'Alben', 'papers' => ['alben', 'alben_metacritic']],
             'games' => ['label' => 'Games', 'papers' => ['spiele']],
             'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7],
-            'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7],
+            'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7, 'sort' => 'hot'],
         ];
     }
 
