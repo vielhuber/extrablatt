@@ -428,11 +428,34 @@ final class Extrablatt
                 // standalone (currently only Phase 8 — clustering reads from
                 // the DB and doesn't depend on upstream scrape state).
                 $phase = (int) ($_GET['phase'] ?? 0);
+                // Concurrency guard: two scrapes would write the same tables
+                // and truncate the same log mid-run. flock is released by the
+                // OS when the request dies, so a crashed scrape can never
+                // leave a stale lock behind.
+                if (!is_dir(filename: $this->logDir)) {
+                    mkdir(directory: $this->logDir, permissions: 0755, recursive: true);
+                }
+                $lockHandle = fopen(filename: $this->logDir . '/scrape.lock', mode: 'c+');
+                if ($lockHandle === false || !flock(stream: $lockHandle, operation: LOCK_EX | LOCK_NB)) {
+                    $runningSince = $lockHandle !== false ? trim(string: (string) stream_get_contents(stream: $lockHandle)) : '';
+                    if ($lockHandle !== false) {
+                        fclose(stream: $lockHandle);
+                    }
+                    http_response_code(response_code: 409);
+                    header(header: 'Content-Type: text/plain; charset=utf-8');
+                    echo 'Scrape läuft bereits' . ($runningSince !== '' ? ' (seit ' . $runningSince . ')' : '') . " – zweiter Start abgelehnt.\n";
+                    return;
+                }
+                ftruncate(stream: $lockHandle, size: 0);
+                fwrite(stream: $lockHandle, data: date(format: 'Y-m-d H:i:s'));
+                fflush(stream: $lockHandle);
                 if ($phase > 0) {
                     $this->runSinglePhase(phase: $phase);
                 } else {
                     $this->runScrape();
                 }
+                flock(stream: $lockHandle, operation: LOCK_UN);
+                fclose(stream: $lockHandle);
                 return;
             }
             http_response_code(response_code: 403);
