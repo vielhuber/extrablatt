@@ -8230,10 +8230,10 @@ final class Extrablatt
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
         $bildActive = $isBild ? ' viewnav__tab--active' : '';
-        $mediaTabsHtml = '';
+        $mediaTabHtml = [];
         foreach ($this->mediaTabs() as $tabKey => $tab) {
             $mediaActive = $isMediaView && $mediaFilter === $tabKey ? ' viewnav__tab--active' : '';
-            $mediaTabsHtml .= '<a class="viewnav__tab' . $mediaActive . '" href="/?view=' . $tabKey . '">' . $tab['label'] . '</a>';
+            $mediaTabHtml[$tabKey] = '<a class="viewnav__tab' . $mediaActive . '" href="/?view=' . $tabKey . '">' . $tab['label'] . '</a>';
         }
         // Mobile nav collapses into a dropdown whose toggle shows the active
         // tab; search mode highlights no tab, hence the neutral fallback.
@@ -8598,10 +8598,15 @@ HTML : '';
                     </button>
                     <div class="viewnav__tabs" id="viewnavTabs">
                         <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
+                        {$mediaTabHtml['hackernews']}
+                        <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
+                        {$mediaTabHtml['reddit']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
-                        {$mediaTabsHtml}
-                        <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
+                        {$mediaTabHtml['serien']}
+                        {$mediaTabHtml['filme']}
+                        {$mediaTabHtml['alben']}
+                        {$mediaTabHtml['games']}
                         <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
                     </div>
                 </nav>
