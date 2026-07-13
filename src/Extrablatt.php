@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace vielhuber\extrablatt;
 
 use PDO;
+use PDOException;
 use SimpleXMLElement;
 
 final readonly class FetchResult
@@ -537,10 +538,11 @@ final class Extrablatt
                 $paperFilter = '';
                 $mediaFilter = '';
             }
-            // Media views (serien/filme/alben/games) work the same way:
-            // Meldungen shortcuts forcing media=<tab> and magic=all. They
-            // default to rating-ranked lists — critic score is the point of
-            // these tabs; the sort dropdown still lets the user override.
+            // Media views (serien/filme/alben/games/hackernews) work the same
+            // way: Meldungen shortcuts forcing media=<tab> and magic=all. They
+            // default to rating-ranked lists — critic score (or HN points) is
+            // the point of these tabs; the sort dropdown still lets the user
+            // override.
             if (in_array(needle: $viewFilter, haystack: $mediaViews, strict: true)) {
                 $mediaFilter = $viewFilter;
                 $viewFilter = 'meldungen';
@@ -3101,26 +3103,43 @@ final class Extrablatt
 
     private function cacheGet(string $key): ?string
     {
-        $stmt = $this->openDatabase()->prepare(query: 'SELECT value FROM cache WHERE key = :k');
-        $stmt->execute(params: [':k' => $key]);
-        $v = $stmt->fetchColumn();
+        // A cache row sitting on a corrupt page (torn DB copy) must degrade
+        // to a cache miss instead of taking the whole page down — the entry
+        // regenerates on the next fetch anyway.
+        try {
+            $stmt = $this->openDatabase()->prepare(query: 'SELECT value FROM cache WHERE key = :k');
+            $stmt->execute(params: [':k' => $key]);
+            $v = $stmt->fetchColumn();
+        } catch (PDOException $e) {
+            error_log(message: 'extrablatt cacheGet("' . $key . '") failed: ' . $e->getMessage());
+            return null;
+        }
         return $v === false ? null : (string) $v;
     }
 
     private function cacheHas(string $key): bool
     {
-        $stmt = $this->openDatabase()->prepare(query: 'SELECT 1 FROM cache WHERE key = :k');
-        $stmt->execute(params: [':k' => $key]);
-        return $stmt->fetchColumn() !== false;
+        try {
+            $stmt = $this->openDatabase()->prepare(query: 'SELECT 1 FROM cache WHERE key = :k');
+            $stmt->execute(params: [':k' => $key]);
+            return $stmt->fetchColumn() !== false;
+        } catch (PDOException $e) {
+            error_log(message: 'extrablatt cacheHas("' . $key . '") failed: ' . $e->getMessage());
+            return false;
+        }
     }
 
     private function cacheSet(string $key, string $value): void
     {
-        $stmt = $this->openDatabase()->prepare(
-            query: 'INSERT INTO cache (key, value, updated_at) VALUES (:k, :v, :t)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
-        );
-        $stmt->execute(params: [':k' => $key, ':v' => $value, ':t' => time()]);
+        try {
+            $stmt = $this->openDatabase()->prepare(
+                query: 'INSERT INTO cache (key, value, updated_at) VALUES (:k, :v, :t)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+            );
+            $stmt->execute(params: [':k' => $key, ':v' => $value, ':t' => time()]);
+        } catch (PDOException $e) {
+            error_log(message: 'extrablatt cacheSet("' . $key . '") failed: ' . $e->getMessage());
+        }
     }
 
     private function cacheClear(string $prefix = ''): void
@@ -3317,11 +3336,12 @@ final class Extrablatt
     }
 
     /**
-     * Media shortcut tabs (Serien/Filme/Alben/Games) — each is a Meldungen
-     * preset filtering on the given paper keys, same pattern as the
-     * "talkshows" view. Keys double as view names and ?media= values.
+     * Media shortcut tabs (Serien/Filme/Alben/Games/Hacker News) — each is a
+     * Meldungen preset filtering on the given paper keys, same pattern as the
+     * "talkshows" view. Keys double as view names and ?media= values. An
+     * optional window_days narrows the tab to recent items at query time.
      *
-     * @return array<string, array{label: string, papers: array<int, string>}>
+     * @return array<string, array{label: string, papers: array<int, string>, window_days?: int}>
      */
     private function mediaTabs(): array
     {
@@ -3330,6 +3350,7 @@ final class Extrablatt
             'filme' => ['label' => 'Filme', 'papers' => ['streaming_filme', 'kino']],
             'alben' => ['label' => 'Alben', 'papers' => ['alben', 'alben_metacritic']],
             'games' => ['label' => 'Games', 'papers' => ['spiele']],
+            'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7],
         ];
     }
 
@@ -7041,9 +7062,14 @@ final class Extrablatt
      */
     private function buildBildBlock(): string
     {
-        $stmt = $this->openDatabase()->prepare(query: 'SELECT value, updated_at FROM cache WHERE key = :k');
-        $stmt->execute(params: [':k' => 'bild_home']);
-        $row = $stmt->fetch(mode: PDO::FETCH_ASSOC);
+        try {
+            $stmt = $this->openDatabase()->prepare(query: 'SELECT value, updated_at FROM cache WHERE key = :k');
+            $stmt->execute(params: [':k' => 'bild_home']);
+            $row = $stmt->fetch(mode: PDO::FETCH_ASSOC);
+        } catch (PDOException $e) {
+            error_log(message: 'extrablatt bild_home cache read failed: ' . $e->getMessage());
+            $row = false;
+        }
         $html = is_array(value: $row) && (int) $row['updated_at'] > time() - 900 ? (string) $row['value'] : null;
         if ($html === null) {
             $result = $this->fetchViaImpersonate(url: 'https://www.bild.de/');
@@ -7441,11 +7467,19 @@ final class Extrablatt
             $where[] = 'paper = :paper';
             $params[':paper'] = $tvFilter;
         } elseif ($mediaFilter !== '' && isset($this->mediaTabs()[$mediaFilter])) {
+            $mediaTab = $this->mediaTabs()[$mediaFilter];
             $list = implode(separator: ',', array: array_map(
                 callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'",
-                array: $this->mediaTabs()[$mediaFilter]['papers']
+                array: $mediaTab['papers']
             ));
             $where[] = 'paper IN (' . $list . ')';
+            // Media papers are already fetch-filtered to their release window,
+            // but Hacker News accumulates weeks of history in the DB — its
+            // "top of last week" window has to be applied at query time.
+            if (isset($mediaTab['window_days'])) {
+                $where[] = 'published_at >= :mediaSince';
+                $params[':mediaSince'] = time() - (int) $mediaTab['window_days'] * 86400;
+            }
         } elseif ($paperFilter !== '') {
             $siblings = $this->paperDomainSiblings(paper: $paperFilter);
             $placeholders = [];
@@ -8066,6 +8100,27 @@ final class Extrablatt
             $mediaActive = $isMediaView && $mediaFilter === $tabKey ? ' viewnav__tab--active' : '';
             $mediaTabsHtml .= '<a class="viewnav__tab' . $mediaActive . '" href="/?view=' . $tabKey . '">' . $tab['label'] . '</a>';
         }
+        // Mobile nav collapses into a dropdown whose toggle shows the active
+        // tab; search mode highlights no tab, hence the neutral fallback.
+        $activeTabLabel = 'Menü';
+        if ($isZeitung) {
+            $activeTabLabel = 'Zeitung';
+        }
+        if ($isMeldungenView) {
+            $activeTabLabel = 'Meldungen';
+        }
+        if ($isTalkshowView) {
+            $activeTabLabel = 'Talk-Shows';
+        }
+        if ($isMediaView) {
+            $activeTabLabel = $this->mediaTabs()[$mediaFilter]['label'];
+        }
+        if ($isBild) {
+            $activeTabLabel = 'BILD';
+        }
+        if ($isFactcheck) {
+            $activeTabLabel = 'Faktencheck';
+        }
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
         // Keep the active media preset when the user submits another filter —
         // the tv preset persists via its own dropdown, media has no dropdown.
@@ -8190,8 +8245,10 @@ HTML : '';
                 section.search-results { margin-top: 0.5rem; }
                 .search__title { font: 700 16px/1.3 system-ui, sans-serif; color: #18181b; margin: 0 0 0.8rem; }
                 .search__count { font-weight: 400; color: #a1a1aa; letter-spacing: 0.02em; margin-left: 0.4em; }
-                nav.viewnav { display: flex; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
-                nav.viewnav .viewnav__tab { font: 600 13px/1 system-ui, sans-serif; color: #71717a; text-decoration: none; padding: 10px 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
+                nav.viewnav { display: flex; flex-wrap: wrap; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
+                .viewnav__tabs { display: contents; }
+                .viewnav__toggle { display: none; }
+                nav.viewnav .viewnav__tab { font: 600 13px/1 system-ui, sans-serif; color: #71717a; text-decoration: none; padding: 10px 11px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
@@ -8367,6 +8424,24 @@ HTML : '';
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
                 html[data-theme="dark"] .vote__btn:hover { background: #3f3f46; color: #e4e4e7; border-color: #71717a; }
+                /* Mobile: the tab row collapses into a dropdown menu. */
+                @media (max-width: 767px) {
+                    nav.viewnav { display: block; position: relative; border-bottom: none; }
+                    .viewnav__toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; font: 700 14px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; border-radius: 8px; padding: 12px 14px; cursor: pointer; }
+                    .viewnav__chevron { width: 9px; height: 9px; border-right: 2px solid #71717a; border-bottom: 2px solid #71717a; transform: translateY(-2px) rotate(45deg); transition: transform 0.15s; }
+                    nav.viewnav.viewnav--open .viewnav__chevron { transform: translateY(2px) rotate(-135deg); }
+                    .viewnav__tabs { display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; flex-direction: column; background: #fff; border: 1px solid #d4d4d8; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.14); padding: 6px; z-index: 40; }
+                    nav.viewnav.viewnav--open .viewnav__tabs { display: flex; animation: viewnavIn 0.15s ease; }
+                    nav.viewnav .viewnav__tab { padding: 12px; margin-bottom: 0; border-bottom: none; border-radius: 6px; font-size: 14px; }
+                    nav.viewnav .viewnav__tab--active { background: #18181b; color: #fff; }
+                    nav.viewnav .viewnav__tab--active:hover { color: #fff; }
+                    html[data-theme="dark"] .viewnav__toggle { background: #18181b; border-color: #3f3f46; color: #e4e4e7; }
+                    html[data-theme="dark"] .viewnav__chevron { border-color: #a1a1aa; }
+                    html[data-theme="dark"] .viewnav__tabs { background: #18181b; border-color: #3f3f46; box-shadow: 0 12px 32px rgba(0,0,0,0.55); }
+                    html[data-theme="dark"] nav.viewnav .viewnav__tab--active { background: #fafafa; color: #18181b; }
+                    html[data-theme="dark"] nav.viewnav .viewnav__tab--active:hover { color: #18181b; }
+                }
+                @keyframes viewnavIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
             </style>
         </head>
         <body>
@@ -8381,13 +8456,19 @@ HTML : '';
                     </form>
                     <a class="scrape-link" href="/?scrape=1" target="_blank" rel="noopener">Scrape ▶</a>
                 </header>
-                <nav class="viewnav">
-                    <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
-                    <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
-                    <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
-                    {$mediaTabsHtml}
-                    <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
-                    <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
+                <nav class="viewnav" id="viewnav">
+                    <button type="button" class="viewnav__toggle" id="viewnavToggle" aria-expanded="false" aria-controls="viewnavTabs">
+                        <span>{$activeTabLabel}</span>
+                        <span class="viewnav__chevron" aria-hidden="true"></span>
+                    </button>
+                    <div class="viewnav__tabs" id="viewnavTabs">
+                        <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
+                        <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
+                        <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
+                        {$mediaTabsHtml}
+                        <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
+                        <a class="viewnav__tab{$factcheckActive}" href="/?view=factcheck">Faktencheck</a>
+                    </div>
                 </nav>
                 {$zeitungBlock}
                 {$meldungenBlock}
@@ -8451,6 +8532,22 @@ HTML : '';
                     }
                     window.addEventListener('scroll', update, { passive: true });
                     update();
+                })();
+                // Mobile nav: the toggle button expands the tab list as a
+                // dropdown; tapping anywhere outside closes it again.
+                (function () {
+                    var \$nav = document.getElementById('viewnav');
+                    var \$toggle = document.getElementById('viewnavToggle');
+                    if (!\$nav || !\$toggle) return;
+                    \$toggle.addEventListener('click', function () {
+                        var open = \$nav.classList.toggle('viewnav--open');
+                        \$toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                    });
+                    document.addEventListener('click', function (e) {
+                        if (\$nav.contains(e.target)) return;
+                        \$nav.classList.remove('viewnav--open');
+                        \$toggle.setAttribute('aria-expanded', 'false');
+                    });
                 })();
                 // Voting controls: ▲ / ▼ adjust the curator vote by ±1,
                 // clamped to [-3, +3] on both client and server. Optimistic
