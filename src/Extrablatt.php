@@ -7637,8 +7637,12 @@ final class Extrablatt
         }
         // Duplicate-articles (same story across multiple sources) are
         // collapsed to the canonical entry — non-canonical rows stay in the
-        // DB but are hidden by the dashboard.
-        $where[] = 'duplicate_of IS NULL';
+        // DB but are hidden by the dashboard. Media tabs are exempt: they
+        // mirror an external ranking 1:1 (HN best list, Reddit home), and the
+        // cross-source collapse would silently drop entries from that list.
+        if ($tvFilter !== '' || $mediaFilter === '' || !isset($this->mediaTabs()[$mediaFilter])) {
+            $where[] = 'duplicate_of IS NULL';
+        }
         if ($categoryFilter !== '') {
             $values = $this->expandCategoryFilter(selected: $categoryFilter);
             $placeholders = [];
