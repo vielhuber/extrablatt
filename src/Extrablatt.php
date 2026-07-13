@@ -1254,6 +1254,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'reddit://')) {
             return $this->fetchRedditHomeItems(paper: $paper);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'hackernews://')) {
+            return $this->fetchHackerNewsBestItems(paper: $paper);
+        }
         if (str_starts_with(haystack: $feedUrl, needle: 'github://')) {
             return $this->fetchGitHubTrendingItems(paper: $paper, feedUrl: $feedUrl);
         }
@@ -1458,6 +1461,84 @@ final class Extrablatt
             if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
                 break;
             }
+        }
+        return $items;
+    }
+
+    /**
+     * Scrape news.ycombinator.com/best?h=168 — HN's official "top stories of
+     * the last week" leaderboard, strictly ordered by points. All pages are
+     * followed until the list is exhausted so the tab mirrors the full
+     * ranking with live scores; links point to the discussion thread,
+     * matching the previous RSS-based behaviour.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchHackerNewsBestItems(string $paper): array
+    {
+        $items = [];
+        $seen = [];
+        for ($page = 1; $page <= 10; $page++) {
+            $cacheKey = 'feed:' . $paper . ':p' . $page;
+            $body = $this->cacheGet(key: $cacheKey);
+            if ($body === null || $body === '') {
+                $result = $this->fetchViaImpersonate(url: 'https://news.ycombinator.com/best?h=168&p=' . $page);
+                if ($result->body === null) {
+                    break;
+                }
+                $body = $result->body;
+                $this->cacheSet(key: $cacheKey, value: $body);
+            }
+            $pageItems = $this->parseHackerNewsBest(html: $body);
+            if ($pageItems === []) {
+                break;
+            }
+            foreach ($pageItems as $item) {
+                if (isset($seen[$item->link])) {
+                    continue;
+                }
+                $seen[$item->link] = true;
+                $items[] = $item;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseHackerNewsBest(string $html): array
+    {
+        // Story rows: <tr class="athing submission" id="N"> holds the title
+        // line, score and age follow in the adjacent subtext row — splitting
+        // on the athing marker yields one chunk per story with its metadata.
+        $chunks = preg_split(pattern: '~<tr class="athing~', subject: $html);
+        if ($chunks === false) {
+            return [];
+        }
+        array_shift(array: $chunks);
+        $items = [];
+        foreach ($chunks as $chunk) {
+            if (preg_match(pattern: '~^[^>]*id="(\d+)"~', subject: $chunk, matches: $idMatch) !== 1) {
+                continue;
+            }
+            if (preg_match(pattern: '~<span class="titleline"><a href="[^"]*"[^>]*>([^<]+)</a>~', subject: $chunk, matches: $titleMatch) !== 1) {
+                continue;
+            }
+            // Job ads and flagged rows carry no score — skip them.
+            if (preg_match(pattern: '~score_\d+">(\d+)\s+point~', subject: $chunk, matches: $scoreMatch) !== 1) {
+                continue;
+            }
+            $publishedAt = preg_match(pattern: '~<span class="age" title="[^"]*\s(\d{9,11})"~', subject: $chunk, matches: $ageMatch) === 1
+                ? (int) $ageMatch[1]
+                : null;
+            $items[] = new FeedItem(
+                title: html_entity_decode(string: trim(string: $titleMatch[1]), flags: ENT_QUOTES | ENT_HTML5),
+                link: 'https://news.ycombinator.com/item?id=' . $idMatch[1],
+                publishedAt: $publishedAt,
+                imageUrl: null,
+                rating: (int) $scoreMatch[1]
+            );
         }
         return $items;
     }
@@ -3374,6 +3455,7 @@ final class Extrablatt
             'alben' => ['label' => 'Alben', 'papers' => ['alben', 'alben_metacritic']],
             'games' => ['label' => 'Games', 'papers' => ['spiele']],
             'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7],
+            'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7],
         ];
     }
 
@@ -3585,6 +3667,7 @@ final class Extrablatt
         // Phase 1: feeds.
         $emit('Phase 1/10: RSS-Feeds einlesen');
         $allItems = [];
+        $emptyPapers = [];
         foreach (array_keys(array: $this->papers()) as $paper) {
             $paperKey = (string) $paper;
             $phaseStart = microtime(as_float: true);
@@ -3592,8 +3675,27 @@ final class Extrablatt
             $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
             $withImg = count(value: array_filter(array: $items, callback: fn(FeedItem $i): bool => $i->imageUrl !== null));
             $emit(sprintf('  %-14s %3d items (%d mit Bild, %d ms)', $paperKey, count(value: $items), $withImg, $ms));
+            if ($items === []) {
+                $emptyPapers[] = $paperKey;
+            }
             foreach ($items as $item) {
                 $allItems[] = ['paper' => $paperKey, 'item' => $item];
+            }
+        }
+        // A transient network hiccup (DNS outage mid-phase) can blank every
+        // remaining feed for a whole cycle — failed fetches cache nothing, so
+        // one retry pass over empty feeds re-hits the network for real.
+        if ($emptyPapers !== []) {
+            $emit(sprintf('  → Retry für %d leere Feeds', count(value: $emptyPapers)));
+            foreach ($emptyPapers as $paperKey) {
+                $phaseStart = microtime(as_float: true);
+                $items = $this->fetchFeedItems(paper: $paperKey);
+                $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
+                $withImg = count(value: array_filter(array: $items, callback: fn(FeedItem $i): bool => $i->imageUrl !== null));
+                $emit(sprintf('  %-14s %3d items (%d mit Bild, %d ms, Retry)', $paperKey, count(value: $items), $withImg, $ms));
+                foreach ($items as $item) {
+                    $allItems[] = ['paper' => $paperKey, 'item' => $item];
+                }
             }
         }
         $emit(sprintf('  → %d Artikel insgesamt', count(value: $allItems)));
@@ -3911,13 +4013,14 @@ final class Extrablatt
         }
 
         // HN backfill: deeper body-image probe (first inline <img>) for HN
-        // articles whose Phase-2 og:image grep came up empty. Capped at 30
-        // per scrape so the wall time stays bounded; the body-img cache
-        // remembers exhausted probes so they aren't retried forever.
+        // articles whose Phase-2 og:image grep came up empty. Capped at 60
+        // per scrape so the wall time stays bounded (the best?h=168 list
+        // brings ~30 new stories a day); the body-img cache remembers
+        // exhausted probes so they aren't retried forever.
         $hnRows = (array) $db->query(query: "
             SELECT url, title FROM articles
             WHERE paper='hackernews' AND thumbnail IS NULL
-            ORDER BY published_at DESC LIMIT 30
+            ORDER BY published_at DESC LIMIT 60
         ")->fetchAll(mode: PDO::FETCH_ASSOC);
         $hnImages = [];
         $hnCandidates = [];
@@ -8268,10 +8371,10 @@ HTML : '';
                 section.search-results { margin-top: 0.5rem; }
                 .search__title { font: 700 16px/1.3 system-ui, sans-serif; color: #18181b; margin: 0 0 0.8rem; }
                 .search__count { font-weight: 400; color: #a1a1aa; letter-spacing: 0.02em; margin-left: 0.4em; }
-                nav.viewnav { display: flex; flex-wrap: wrap; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
+                nav.viewnav { display: flex; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
                 .viewnav__tabs { display: contents; }
                 .viewnav__toggle { display: none; }
-                nav.viewnav .viewnav__tab { font: 600 13px/1 system-ui, sans-serif; color: #71717a; text-decoration: none; padding: 10px 11px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
+                nav.viewnav .viewnav__tab { flex: 1 1 0; text-align: center; white-space: nowrap; font: 600 12px/1 system-ui, sans-serif; color: #71717a; text-decoration: none; padding: 10px 4px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
@@ -8455,7 +8558,7 @@ HTML : '';
                     nav.viewnav.viewnav--open .viewnav__chevron { transform: translateY(2px) rotate(-135deg); }
                     .viewnav__tabs { display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; flex-direction: column; background: #fff; border: 1px solid #d4d4d8; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.14); padding: 6px; z-index: 40; }
                     nav.viewnav.viewnav--open .viewnav__tabs { display: flex; animation: viewnavIn 0.15s ease; }
-                    nav.viewnav .viewnav__tab { padding: 12px; margin-bottom: 0; border-bottom: none; border-radius: 6px; font-size: 14px; }
+                    nav.viewnav .viewnav__tab { flex: none; text-align: left; padding: 12px; margin-bottom: 0; border-bottom: none; border-radius: 6px; font-size: 14px; }
                     nav.viewnav .viewnav__tab--active { background: #18181b; color: #fff; }
                     nav.viewnav .viewnav__tab--active:hover { color: #fff; }
                     html[data-theme="dark"] .viewnav__toggle { background: #18181b; border-color: #3f3f46; color: #e4e4e7; }
