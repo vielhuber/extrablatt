@@ -3448,9 +3448,10 @@ final class Extrablatt
      * each is a Meldungen preset filtering on the given paper keys, same
      * pattern as the "talkshows" view. Keys double as view names and ?media=
      * values. An optional window_days narrows the tab to recent items at
-     * query time; an optional sort overrides the rating_desc default.
+     * query time; an optional sort overrides the rating_desc default; an
+     * optional limit caps the list to the top N of the ranking.
      *
-     * @return array<string, array{label: string, papers: array<int, string>, window_days?: int, sort?: string}>
+     * @return array<string, array{label: string, papers: array<int, string>, window_days?: int, sort?: string, limit?: int}>
      */
     private function mediaTabs(): array
     {
@@ -3459,8 +3460,8 @@ final class Extrablatt
             'filme' => ['label' => 'Filme', 'papers' => ['streaming_filme', 'kino']],
             'alben' => ['label' => 'Alben', 'papers' => ['alben', 'alben_metacritic']],
             'games' => ['label' => 'Games', 'papers' => ['spiele']],
-            'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7],
-            'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7, 'sort' => 'hot'],
+            'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7, 'limit' => 10],
+            'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
         ];
     }
 
@@ -7258,6 +7259,11 @@ final class Extrablatt
                 . '</span>'
                 . '</a>';
             $rendered++;
+            // 11 = full-width lead + 10 tiles: the two-column grid closes
+            // with complete rows instead of one orphan tile.
+            if ($rendered >= 11) {
+                break;
+            }
         }
         if ($tiles === '') {
             return '<p class="viewnav__empty">Keine Kacheln gefunden.</p>';
@@ -7581,6 +7587,7 @@ final class Extrablatt
         $db = $this->openDatabase();
         $where = [];
         $params = [];
+        $mediaLimit = null;
         // TV-Filter has precedence over the paper dropdown — picking "Alle
         // TV-Sendungen" expands to paper IN (<talkshowPapers>), picking a
         // single show narrows to that paper. The media tabs expand the same
@@ -7599,6 +7606,7 @@ final class Extrablatt
             $params[':paper'] = $tvFilter;
         } elseif ($mediaFilter !== '' && isset($this->mediaTabs()[$mediaFilter])) {
             $mediaTab = $this->mediaTabs()[$mediaFilter];
+            $mediaLimit = $mediaTab['limit'] ?? null;
             $list = implode(separator: ',', array: array_map(
                 callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'",
                 array: $mediaTab['papers']
@@ -7672,6 +7680,9 @@ final class Extrablatt
             // Cap "Alle"-Modus to the most recent 100 items — keeps the
             // dashboard snappy. New articles slide in on reload.
             $limit = 100;
+        }
+        if ($mediaLimit !== null) {
+            $limit = $mediaLimit;
         }
         $sql =
             'SELECT url, paper, title, published_at, status, paywall, thumbnail, category, rating, read_at, vote FROM articles' .
@@ -8256,6 +8267,49 @@ final class Extrablatt
         if ($isFactcheck) {
             $activeTabLabel = 'Faktencheck';
         }
+        // Bottom pager: leaf through the tabs like turning newspaper pages.
+        // Only the first five tabs form the "Zeitung" — beyond Meldungen
+        // there is no pager. Order must match the tab row in the template
+        // below; search mode has no active tab and gets no pager either.
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'meldungen'];
+        $activeView = '';
+        if ($isZeitung) {
+            $activeView = 'zeitung';
+        }
+        if ($isMeldungenView) {
+            $activeView = 'meldungen';
+        }
+        if ($isTalkshowView) {
+            $activeView = 'talkshows';
+        }
+        if ($isMediaView) {
+            $activeView = $mediaFilter;
+        }
+        if ($isBild) {
+            $activeView = 'bild';
+        }
+        if ($isFactcheck) {
+            $activeView = 'factcheck';
+        }
+        $pagerHtml = '';
+        $navPosition = array_search(needle: $activeView, haystack: $navOrder, strict: true);
+        if ($navPosition !== false) {
+            $previousView = $navPosition > 0 ? $navOrder[$navPosition - 1] : null;
+            $nextView = $navPosition < count(value: $navOrder) - 1 ? $navOrder[$navPosition + 1] : null;
+            $previousHtml = $previousView !== null
+                ? '<a class="pager__btn" href="/?view=' . $previousView . '" aria-label="Vorheriger Tab">←</a>'
+                : '<span class="pager__btn pager__btn--disabled" aria-disabled="true">←</span>';
+            $nextHtml = $nextView !== null
+                ? '<a class="pager__btn" href="/?view=' . $nextView . '" aria-label="Nächster Tab">→</a>'
+                : '<span class="pager__btn pager__btn--disabled" aria-disabled="true">→</span>';
+            $pageCount = count(value: $navOrder);
+            $progressPercent = (int) round(num: ($navPosition + 1) / $pageCount * 100);
+            $pagerHtml = '<nav class="pager">' . $previousHtml
+                . '<span class="pager__page">Seite ' . ($navPosition + 1) . ' / ' . $pageCount
+                . '<span class="pager__track"><span class="pager__fill" style="width: ' . $progressPercent . '%"></span></span>'
+                . '</span>'
+                . $nextHtml . '</nav>';
+        }
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
         // Keep the active media preset when the user submits another filter —
         // the tv preset persists via its own dropdown, media has no dropdown.
@@ -8387,6 +8441,13 @@ HTML : '';
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
+                .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; }
+                .pager__page { display: flex; flex-direction: column; align-items: center; gap: 6px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
+                .pager__track { width: 120px; height: 4px; border-radius: 2px; background: #e4e4e7; overflow: hidden; }
+                .pager__fill { display: block; height: 100%; background: #18181b; border-radius: 2px; }
+                .pager__btn { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; font: 700 18px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; border-radius: 8px; text-decoration: none; }
+                .pager__btn:hover { border-color: #71717a; }
+                .pager__btn--disabled { opacity: 0.35; pointer-events: none; }
                 form.filters { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; margin: 0 0 1rem; }
                 form.filters select { min-width: 0; width: 100%; font: 600 11px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; padding: 7px 18px 7px 7px; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%2371717a' d='M6 8 0 0h12z'/></svg>"); background-repeat: no-repeat; background-position: right 5px center; background-size: 7px 4px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
                 form.filters select:hover { border-color: #71717a; }
@@ -8559,6 +8620,11 @@ HTML : '';
                 html[data-theme="dark"] .meta__paper:hover { background: #52525b; }
                 html[data-theme="dark"] .vote__btn { background: #27272a; border-color: #3f3f46; color: #a1a1aa; }
                 html[data-theme="dark"] .vote__btn:hover { background: #3f3f46; color: #e4e4e7; border-color: #71717a; }
+                html[data-theme="dark"] .pager__btn { background: #18181b; border-color: #3f3f46; color: #e4e4e7; }
+                html[data-theme="dark"] .pager__btn:hover { border-color: #71717a; }
+                html[data-theme="dark"] .pager__page { color: #a1a1aa; }
+                html[data-theme="dark"] .pager__track { background: #3f3f46; }
+                html[data-theme="dark"] .pager__fill { background: #e4e4e7; }
                 /* Mobile: the tab row collapses into a dropdown menu. */
                 @media (max-width: 767px) {
                     nav.viewnav { display: block; position: relative; border-bottom: none; }
@@ -8615,6 +8681,7 @@ HTML : '';
                 {$factcheckBlock}
                 {$bildBlock}
                 {$searchBlock}
+                {$pagerHtml}
             </main>
             <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
