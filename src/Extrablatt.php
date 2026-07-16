@@ -8419,7 +8419,7 @@ HTML : '';
                 * { box-sizing: border-box; }
                 html { overflow-y: scroll; }
                 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f4f4f5; color: #111; min-height: 100vh; }
-                main { max-width: 760px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
+                main { max-width: 760px; margin: 0 auto; padding: 1.25rem 1rem; }
                 header.top { display: flex; align-items: baseline; gap: 12px; margin: 0 0 1rem; flex-wrap: wrap; }
                 header.top h1 { font-size: clamp(1.4rem, 4vw, 2rem); margin: 0; letter-spacing: -0.02em; font-weight: 800; }
                 header.top h1 a { color: inherit; text-decoration: none; }
@@ -8641,6 +8641,8 @@ HTML : '';
                     html[data-theme="dark"] .viewnav__tabs { background: #18181b; border-color: #3f3f46; box-shadow: 0 12px 32px rgba(0,0,0,0.55); }
                     html[data-theme="dark"] nav.viewnav .viewnav__tab--active { background: #fafafa; color: #18181b; }
                     html[data-theme="dark"] nav.viewnav .viewnav__tab--active:hover { color: #18181b; }
+                    /* keep the fixed top button clear of the pager's right arrow and flush with the content edge */
+                    .top-btn { bottom: 76px; right: 1rem; }
                 }
                 @keyframes viewnavIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
             </style>
