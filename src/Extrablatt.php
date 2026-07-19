@@ -3462,6 +3462,7 @@ final class Extrablatt
             'games' => ['label' => 'Games', 'papers' => ['spiele']],
             'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7, 'limit' => 10],
             'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
+            'x' => ['label' => 'X', 'papers' => ['x'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
         ];
     }
 
@@ -8271,7 +8272,7 @@ final class Extrablatt
         // Only the first five tabs form the "Zeitung" — beyond Meldungen
         // there is no pager. Order must match the tab row in the template
         // below; search mode has no active tab and gets no pager either.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'meldungen'];
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'meldungen'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -8419,7 +8420,7 @@ HTML : '';
                 * { box-sizing: border-box; }
                 html { overflow-y: scroll; }
                 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f4f4f5; color: #111; min-height: 100vh; }
-                main { max-width: 760px; margin: 0 auto; padding: 1.25rem 1rem; }
+                main { max-width: 840px; margin: 0 auto; padding: 1.25rem 1rem; }
                 header.top { display: flex; align-items: baseline; gap: 12px; margin: 0 0 1rem; flex-wrap: wrap; }
                 header.top h1 { font-size: clamp(1.4rem, 4vw, 2rem); margin: 0; letter-spacing: -0.02em; font-weight: 800; }
                 header.top h1 a { color: inherit; text-decoration: none; }
@@ -8554,7 +8555,7 @@ HTML : '';
                 @keyframes done-tilt { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
                 .done__label { font: 600 14px/1 system-ui, sans-serif; color: #71717a; margin-top: 10px; letter-spacing: 0.02em; }
                 .item--empty a { color: #111; }
-                .top-btn { position: fixed; bottom: 20px; right: max(12px, calc((100vw - 760px) / 2 - 70px)); background: rgba(0,0,0,.78); color: #fff; text-decoration: none; font: 700 12px/1 system-ui, sans-serif; padding: 11px 14px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 2147483647; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
+                .top-btn { position: fixed; bottom: 20px; right: max(12px, calc((100vw - 840px) / 2 - 70px)); background: rgba(0,0,0,.78); color: #fff; text-decoration: none; font: 700 12px/1 system-ui, sans-serif; padding: 11px 14px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 2147483647; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
                 .top-btn.visible { opacity: 1; pointer-events: auto; }
                 .top-btn:hover { background: #000; }
                 .theme-toggle { background: transparent; border: 0; padding: 4px 6px; cursor: pointer; line-height: 0; color: #71717a; opacity: 0.8; display: inline-flex; align-items: center; transform: translateY(3px); }
@@ -8669,6 +8670,7 @@ HTML : '';
                         {$mediaTabHtml['hackernews']}
                         <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
                         {$mediaTabHtml['reddit']}
+                        {$mediaTabHtml['x']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                         {$mediaTabHtml['serien']}
