@@ -7895,7 +7895,11 @@ final class Extrablatt
             $mediaHtml .= $this->buildProseSection(block: $block, heading: $section['heading'], subtitle: $section['subtitle']);
         }
 
-        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $tvHtml === '' && $mediaHtml === '') {
+        // Derived from health_days at render time rather than baked into the
+        // stored digest, so it stays current between the nightly generations.
+        $healthHtml = $this->buildHealthDigestBlock();
+
+        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $healthHtml === '' && $tvHtml === '' && $mediaHtml === '') {
             return '';
         }
 
@@ -7903,7 +7907,7 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . $weatherHtml . $tvHtml . $mediaHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
     }
 
     /**
@@ -8149,7 +8153,7 @@ final class Extrablatt
             ];
         }
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
-        return '<section class="health"><div class="health__kpis">' . $kpiHtml . '</div>' . $lightHtml . $chartHtml
+        return '<section class="health">' . $lightHtml . $chartHtml . '<div class="health__kpis">' . $kpiHtml . '</div>'
             . '</section><script src="?asset=js/chart.min.js"></script>'
             . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
     }
@@ -8386,6 +8390,92 @@ final class Extrablatt
      * Prefers the LLM-generated prose paragraph; falls back to a minimal
      * "today" sentence built from the raw forecast.
      */
+    /**
+     * Compare the last seven recorded days against the seven before them and
+     * put the direction into words. Only days the watch actually recorded
+     * count, matching the Watch tab's tiles.
+     */
+    private function buildHealthDigestBlock(): string
+    {
+        try {
+            $rows = $this->openDatabase()
+                ->query(query: 'SELECT day, steps, sleep_minutes, sleep_period_minutes, sleep_deep_minutes,
+                        sleep_light_minutes, sleep_rem_minutes, sleep_awake_minutes
+                    FROM health_days ORDER BY day DESC LIMIT 60')
+                ->fetchAll(mode: PDO::FETCH_ASSOC);
+        } catch (PDOException $e) {
+            error_log(message: 'extrablatt health digest failed: ' . $e->getMessage());
+            return '';
+        }
+        $sentences = [];
+        $stepValues = array_values(array: array_map(
+            callback: fn(array $r): int => (int) $r['steps'],
+            array: array_filter(array: $rows, callback: fn(array $r): bool => (int) $r['steps'] > 0)
+        ));
+        $sleepValues = array_values(array: array_map(
+            callback: fn(array $r): int => (int) $r['sleep_minutes'],
+            array: array_filter(array: $rows, callback: function (array $r): bool {
+                $period = (int) $r['sleep_period_minutes'];
+                $staged = (int) $r['sleep_deep_minutes'] + (int) $r['sleep_light_minutes']
+                    + (int) $r['sleep_rem_minutes'] + (int) $r['sleep_awake_minutes'];
+                return $period > 0 && $staged >= $period * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO;
+            })
+        ));
+        // Rows arrive newest-first, so the first seven are the current week.
+        $trend = function (array $values): ?array {
+            if (count(value: $values) < 4) {
+                return null;
+            }
+            $current = array_slice(array: $values, offset: 0, length: 7);
+            $previous = array_slice(array: $values, offset: 7, length: 7);
+            $currentAverage = array_sum(array: $current) / count(value: $current);
+            $previousAverage = $previous === [] ? null : array_sum(array: $previous) / count(value: $previous);
+            $change = $previousAverage === null || $previousAverage <= 0
+                ? null
+                : (int) round(num: ($currentAverage - $previousAverage) / $previousAverage * 100);
+            return ['average' => $currentAverage, 'change' => $change, 'days' => count(value: $current)];
+        };
+        $direction = function (?int $change): string {
+            if ($change === null || abs($change) < 5) {
+                return 'unverändert';
+            }
+            return $change > 0 ? 'um <strong>' . $change . ' %</strong> gestiegen' : 'um <strong>' . abs($change) . ' %</strong> gefallen';
+        };
+        $steps = $trend($stepValues);
+        if ($steps !== null) {
+            $average = (int) round(num: $steps['average']);
+            $verdict = match (true) {
+                $average >= self::GOOGLE_HEALTH_STEP_GOAL => 'damit liegst du über deinem Tagesziel',
+                $average >= self::GOOGLE_HEALTH_STEP_AMBER => 'das Tagesziel von '
+                    . number_format(num: self::GOOGLE_HEALTH_STEP_GOAL, decimals: 0, decimal_separator: ',', thousands_separator: '.')
+                    . ' Schritten bleibt in Reichweite',
+                default => 'zum Tagesziel fehlt noch ein gutes Stück',
+            };
+            $sentences[] = 'Du gehst im Schnitt <strong>'
+                . number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.')
+                . ' Schritte</strong> pro Tag, gegenüber der Vorwoche ' . $direction($steps['change']) . ' – ' . $verdict . '.';
+        }
+        $sleep = $trend($sleepValues);
+        if ($sleep !== null) {
+            $average = (int) round(num: $sleep['average']);
+            $verdict = match (true) {
+                $average >= self::GOOGLE_HEALTH_SLEEP_GOAL => 'das reicht für erholte Tage',
+                $average >= self::GOOGLE_HEALTH_SLEEP_AMBER => 'etwas mehr täte dir gut',
+                default => 'das ist auf Dauer zu wenig',
+            };
+            $sentences[] = 'Geschlafen hast du <strong>' . intdiv($average, 60) . ':'
+                . str_pad(string: (string) ($average % 60), length: 2, pad_string: '0', pad_type: STR_PAD_LEFT)
+                . ' Stunden</strong> pro Nacht, gegenüber der Vorwoche ' . $direction($sleep['change']) . ' – ' . $verdict . '.';
+        }
+        if ($sentences === []) {
+            return '';
+        }
+        return '<div class="digest__health">'
+            . '<h2 class="digest__title">Gesundheit <span class="digest__date">7-Tage-Trend</span></h2>'
+            . '<p>' . implode(separator: ' ', array: $sentences) . '</p>'
+            . '</div>';
+    }
+
     private function buildWeatherBlock(array $weather): string
     {
         $location = trim(string: (string) ($weather['location'] ?? ''));
@@ -9419,7 +9509,7 @@ HTML : '';
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
-                .health__kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.25rem; }
+                .health__kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
                 .health__kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .health__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
                 .health__kpi-label { font: 500 11px/1.2 system-ui, sans-serif; color: #71717a; text-align: center; }
@@ -9479,7 +9569,8 @@ HTML : '';
                 .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 8px 0 0; display: inline-block; }
                 .digest__sources a:last-child { margin-right: 0; }
                 .digest__sources a:hover { color: #18181b; text-decoration: underline; }
-                .digest__weather { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
+                .digest__weather,
+                .digest__health { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
@@ -9607,7 +9698,8 @@ HTML : '';
                 html[data-theme="dark"] .digest__sources { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
-                html[data-theme="dark"] .digest__weather { border-top-color: #3f3f46; }
+                html[data-theme="dark"] .digest__weather,
+                html[data-theme="dark"] .digest__health { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
