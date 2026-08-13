@@ -8002,7 +8002,17 @@ final class Extrablatt
             $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_minutes']), 'label' => 'Schlaf in der Nacht auf ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $lastNight['day']))];
             $kpis[] = ['value' => $formatDuration($sleepAverage), 'label' => 'Ø Schlaf ' . count(value: $recentNights) . ' Nächte'];
             $kpis[] = ['value' => $efficiency . ' %', 'label' => 'Schlafeffizienz'];
-            $kpis[] = ['value' => $bedtime . ' – ' . $wakeup, 'label' => 'Bettzeit'];
+            $kpis[] = ['value' => $bedtime . ' – ' . $wakeup, 'label' => 'Bettzeit am ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $lastNight['day']))];
+            $longestNight = $sleepRows[0];
+            foreach ($sleepRows as $candidate) {
+                if ((int) $candidate['sleep_minutes'] > (int) $longestNight['sleep_minutes']) {
+                    $longestNight = $candidate;
+                }
+            }
+            $kpis[] = [
+                'value' => $formatDuration((int) $longestNight['sleep_minutes']),
+                'label' => 'Längste Nacht (' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $longestNight['day'])) . ')',
+            ];
             $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_period_minutes']), 'label' => 'Zeit im Bett'];
             $kpis[] = ['value' => $deepShare . ' %', 'label' => 'Ø Tiefschlaf-Anteil'];
             $kpis[] = ['value' => $remShare . ' %', 'label' => 'Ø REM-Anteil'];
@@ -8034,9 +8044,24 @@ final class Extrablatt
         $chartHtml = '';
         $chartConfig = [];
         foreach ($charts as $chart) {
-            // A metric the account never recorded would render as a flat zero
-            // line — drop the whole card instead.
-            if (array_sum(array: $chart['data']) <= 0) {
+            // Days the watch recorded nothing for are left out entirely rather
+            // than drawn as zero — a gap in the series would read as "walked
+            // nothing" instead of "wasn't wearing it".
+            $labels = [];
+            $values = [];
+            $stacks = array_map(callback: fn(array $s): array => ['label' => $s['label'], 'data' => []], array: $chart['stacks'] ?? []);
+            foreach ($chart['data'] as $index => $value) {
+                if ($value <= 0) {
+                    continue;
+                }
+                $labels[] = date(format: 'd.m.', timestamp: (int) strtotime(datetime: $days[$index]));
+                $values[] = $value;
+                foreach (($chart['stacks'] ?? []) as $stackIndex => $stack) {
+                    $stacks[$stackIndex]['data'][] = $stack['data'][$index];
+                }
+            }
+            // A metric the account never recorded at all gets no card.
+            if ($values === []) {
                 continue;
             }
             $chartHtml .= '<div class="health__chart"><h3 class="health__chart-title">' . $chart['title']
@@ -8046,9 +8071,9 @@ final class Extrablatt
                 'type' => $chart['type'],
                 'label' => $chart['title'],
                 'goal' => $chart['goal'],
-                'labels' => array_map(callback: fn(string $day): string => date(format: 'd.m.', timestamp: (int) strtotime(datetime: $day)), array: $days),
-                'data' => $chart['data'],
-                'stacks' => $chart['stacks'] ?? [],
+                'labels' => $labels,
+                'data' => $values,
+                'stacks' => $stacks,
             ];
         }
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
