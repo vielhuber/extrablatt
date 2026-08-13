@@ -43,7 +43,10 @@ after install, edit:
 
 - `default_image` (optional): fallback thumbnail when the RSS item carries no image.
 - `stub_markers` (optional): substrings present in the archive.ph snapshot of a PLUS article when it's only a teaser, so the snapshot is dropped instead of surfaced as if it were the full text.
-- Special `rss` schemes: `reddit://home` and `x://home` activate the cookie-authenticated JSON scrapers in place of XML parsing.
+- `following` (optional, `medium://home` only): explicit list of followed handles (`@username`) and publication slugs whose RSS feeds get aggregated. Without it the list is discovered from the cookie-authenticated `/following` page, which Cloudflare challenges from datacenter IPs — so shared hosting needs this key.
+- Special `rss` schemes: `reddit://home`, `x://home` and `hackernews://best` activate the dedicated scrapers in place of XML parsing; `medium://home` aggregates the followed authors' RSS feeds.
+
+the `Watch` tab reads the Google Health API (daily rollups of the paired watch). set `GOOGLE_HEALTH_CLIENT_ID` / `GOOGLE_HEALTH_CLIENT_SECRET` in `.env`, register the site root as the OAuth redirect URI, publish the cloud project (publishing status `Testing` makes google revoke the refresh token every 7 days), then visit `/?health=connect` once.
 
 categories, AI defaults (`temperature`, `timeout`, `max_tries`), and the archive fulltext minimum (8000 chars) are hardcoded in the package.
 

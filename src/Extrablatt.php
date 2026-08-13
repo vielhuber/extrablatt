@@ -1380,20 +1380,27 @@ final class Extrablatt
     /**
      * Aggregate the posts of everyone the logged-in account follows on Medium.
      * Medium's personalized "For you" feed is client-side GraphQL behind a
-     * Cloudflare challenge, but the profile's /following page is server
-     * rendered and the per-author RSS feeds are unprotected — so we assemble
-     * the following feed ourselves from those two unblocked surfaces.
+     * Cloudflare challenge, but the per-author RSS feeds are unprotected.
+     *
+     * The list of followed handles comes from the paper's "following" config
+     * key; only when that is absent do we discover it from the (cookie-
+     * authenticated, server-rendered) /following page. Cloudflare serves that
+     * page a challenge from datacenter IPs, so shared hosting needs the
+     * explicit list.
      *
      * @return array<int, FeedItem>
      */
     private function fetchMediumFollowingItems(string $paper): array
     {
-        $cookieHeader = $this->buildCookieHeader(targetUrl: 'https://medium.com/');
-        if ($cookieHeader === '') {
-            return [];
-        }
-        $following = $this->cacheGet(key: 'medium:following:' . $paper);
+        $configured = $this->papers()[$paper]['following'] ?? null;
+        $following = is_array(value: $configured) && $configured !== []
+            ? (string) json_encode(value: $configured)
+            : $this->cacheGet(key: 'medium:following:' . $paper);
         if ($following === null || $following === '') {
+            $cookieHeader = $this->buildCookieHeader(targetUrl: 'https://medium.com/');
+            if ($cookieHeader === '') {
+                return [];
+            }
             $home = $this->fetchWithHeaders(url: 'https://medium.com/', headers: ['Cookie: ' . $cookieHeader]);
             $viewer = $this->parseMediumApolloState(html: (string) $home);
             $username = '';
@@ -7612,14 +7619,20 @@ final class Extrablatt
         $rows = array_reverse(array: $rows);
         $days = array_column(array: $rows, column_key: 'day');
         $steps = array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'steps'));
-        $stepsByDay = array_combine(keys: $days, values: $steps);
-        $today = $stepsByDay[date(format: 'Y-m-d')] ?? 0;
+        // Google emits no rollup for a day the watch hasn't synced yet, so the
+        // headline number falls back to the most recent day on record and says
+        // which one that is.
+        $latestDay = (string) end($days);
+        $latestSteps = (int) end($steps);
+        $latestLabel = $latestDay === date(format: 'Y-m-d')
+            ? 'Schritte heute'
+            : 'Schritte am ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: $latestDay));
         $lastSeven = array_slice(array: $steps, offset: -7);
         $average = $lastSeven === [] ? 0 : (int) round(num: array_sum(array: $lastSeven) / count(value: $lastSeven));
         $best = $steps === [] ? 0 : max($steps);
         $goalDays = count(value: array_filter(array: $lastSeven, callback: fn(int $value): bool => $value >= self::GOOGLE_HEALTH_STEP_GOAL));
         $kpis = [
-            ['value' => number_format(num: $today, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Schritte heute'],
+            ['value' => number_format(num: $latestSteps, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => $latestLabel],
             ['value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Ø letzte 7 Tage'],
             ['value' => number_format(num: $best, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Bester Tag'],
             ['value' => $goalDays . ' / 7', 'label' => 'Ziel erreicht'],
