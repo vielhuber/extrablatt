@@ -223,6 +223,14 @@ final class Extrablatt
     // Sleep is a session type, not a daily rollup — it comes from the list
     // endpoint and is keyed by the civil date the session ENDED on, i.e. the
     // morning you woke up.
+    // Local hour boundaries that separate night sleep from a daytime nap: a
+    // session ending at or after 18:00 belongs to the night starting that
+    // evening, one ending before 12:00 to the night that just ended.
+    private const GOOGLE_HEALTH_NAP_FROM_HOUR = 12;
+    private const GOOGLE_HEALTH_NIGHT_FROM_HOUR = 18;
+    // A night counts as fully recorded once its stage breakdown covers this
+    // much of the time in bed; below that the watch only logged "asleep".
+    private const GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO = 0.9;
     private const GOOGLE_HEALTH_SLEEP_STAGES = [
         'DEEP' => 'sleep_deep_minutes',
         'LIGHT' => 'sleep_light_minutes',
@@ -4175,40 +4183,49 @@ final class Extrablatt
             }
             foreach ((array) ($decoded['dataPoints'] ?? []) as $point) {
                 $sleep = is_array(value: $point) ? ($point['sleep'] ?? null) : null;
-                if (!is_array(value: $sleep) || ($sleep['metadata']['nap'] ?? false) === true) {
-                    continue;
-                }
-                $endTimestamp = strtotime(datetime: (string) ($sleep['interval']['endTime'] ?? ''));
+                $endTimestamp = is_array(value: $sleep)
+                    ? strtotime(datetime: (string) ($sleep['interval']['endTime'] ?? ''))
+                    : false;
                 if ($endTimestamp === false) {
                     continue;
                 }
                 $endOffset = (int) rtrim(string: (string) ($sleep['interval']['endUtcOffset'] ?? '0s'), characters: 's');
-                $day = gmdate(format: 'Y-m-d', timestamp: $endTimestamp + $endOffset);
-                $summary = is_array(value: $sleep['summary'] ?? null) ? $sleep['summary'] : [];
-                $asleep = (int) ($summary['minutesAsleep'] ?? 0);
-                // A night can hold several sessions (interrupted sleep); the
-                // longest one is the night, the rest are fragments.
-                if ($asleep <= (int) ($nights[$day]['sleep_minutes'] ?? 0)) {
+                $localEnd = $endTimestamp + $endOffset;
+                // The `nap` flag is useless here — the watch sets it on every
+                // fragment of an interrupted night. What separates a real nap
+                // from a night is when the session ended: mornings belong to
+                // the night that just finished, evenings to the one starting,
+                // and anything ending mid-afternoon is an actual nap.
+                $endHour = (int) gmdate(format: 'G', timestamp: $localEnd);
+                if ($endHour >= self::GOOGLE_HEALTH_NAP_FROM_HOUR && $endHour < self::GOOGLE_HEALTH_NIGHT_FROM_HOUR) {
                     continue;
                 }
+                $day = $endHour >= self::GOOGLE_HEALTH_NIGHT_FROM_HOUR
+                    ? gmdate(format: 'Y-m-d', timestamp: $localEnd + 86400)
+                    : gmdate(format: 'Y-m-d', timestamp: $localEnd);
+                $summary = is_array(value: $sleep['summary'] ?? null) ? $sleep['summary'] : [];
                 $startTimestamp = strtotime(datetime: (string) ($sleep['interval']['startTime'] ?? ''));
                 $startOffset = (int) rtrim(string: (string) ($sleep['interval']['startUtcOffset'] ?? '0s'), characters: 's');
-                $night = [
-                    'sleep_minutes' => $asleep,
-                    'sleep_period_minutes' => (int) ($summary['minutesInSleepPeriod'] ?? 0),
-                    'sleep_onset_minutes' => (int) ($summary['minutesToFallAsleep'] ?? 0),
-                    'sleep_end' => gmdate(format: 'Y-m-d H:i:s', timestamp: $endTimestamp + $endOffset),
-                ];
-                if ($startTimestamp !== false) {
-                    $night['sleep_start'] = gmdate(format: 'Y-m-d H:i:s', timestamp: $startTimestamp + $startOffset);
-                }
-                // Only sessions the watch could stage carry a breakdown; the
-                // columns stay NULL otherwise so the chart drops that night
-                // instead of drawing it as zero minutes of everything.
+                $localStart = $startTimestamp === false ? null : $startTimestamp + $startOffset;
+                // Fragments add up: an interrupted night is still one night.
+                $night = $nights[$day] ?? [];
+                $night['sleep_minutes'] = (int) ($night['sleep_minutes'] ?? 0) + (int) ($summary['minutesAsleep'] ?? 0);
+                $night['sleep_period_minutes'] = (int) ($night['sleep_period_minutes'] ?? 0) + (int) ($summary['minutesInSleepPeriod'] ?? 0);
+                $night['sleep_onset_minutes'] = (int) ($night['sleep_onset_minutes'] ?? 0) + (int) ($summary['minutesToFallAsleep'] ?? 0);
                 foreach ((array) ($summary['stagesSummary'] ?? []) as $stage) {
                     $column = self::GOOGLE_HEALTH_SLEEP_STAGES[(string) ($stage['type'] ?? '')] ?? null;
                     if ($column !== null) {
-                        $night[$column] = (int) ($stage['minutes'] ?? 0);
+                        $night[$column] = (int) ($night[$column] ?? 0) + (int) ($stage['minutes'] ?? 0);
+                    }
+                }
+                $end = gmdate(format: 'Y-m-d H:i:s', timestamp: $localEnd);
+                if (($night['sleep_end'] ?? '') < $end) {
+                    $night['sleep_end'] = $end;
+                }
+                if ($localStart !== null) {
+                    $start = gmdate(format: 'Y-m-d H:i:s', timestamp: $localStart);
+                    if (!isset($night['sleep_start']) || $start < $night['sleep_start']) {
+                        $night['sleep_start'] = $start;
                     }
                 }
                 $nights[$day] = $night;
@@ -7933,26 +7950,40 @@ final class Extrablatt
         $rows = array_reverse(array: $rows);
         $days = array_column(array: $rows, column_key: 'day');
         $steps = array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'steps'));
-        // Google emits no rollup for a day the watch hasn't synced yet, so the
-        // headline number falls back to the most recent day on record and says
-        // which one that is.
-        $latestDay = (string) end($days);
-        $latestSteps = (int) end($steps);
+        // The tiles summarise only days the watch actually recorded: a day it
+        // was left on the charger would drag every average towards zero.
+        $stepRows = array_values(array: array_filter(array: $rows, callback: fn(array $r): bool => (int) $r['steps'] > 0));
+        $stepDays = array_map(callback: fn(array $r): int => (int) $r['steps'], array: $stepRows);
+        $latestDay = $stepRows === [] ? (string) end($days) : (string) end($stepRows)['day'];
+        $latestSteps = $stepDays === [] ? 0 : (int) end($stepDays);
         $latestLabel = $latestDay === date(format: 'Y-m-d')
             ? 'Schritte heute'
             : 'Schritte am ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: $latestDay));
-        $lastSeven = array_slice(array: $steps, offset: -7);
+        $lastSeven = array_slice(array: $stepDays, offset: -7);
         $average = $lastSeven === [] ? 0 : (int) round(num: array_sum(array: $lastSeven) / count(value: $lastSeven));
-        $best = $steps === [] ? 0 : max($steps);
+        $best = $stepDays === [] ? 0 : max($stepDays);
         $goalDays = count(value: array_filter(array: $lastSeven, callback: fn(int $value): bool => $value >= self::GOOGLE_HEALTH_STEP_GOAL));
         $kpis = [
             ['value' => number_format(num: $latestSteps, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => $latestLabel],
-            ['value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Ø Schritte 7 Tage'],
+            ['value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Ø Schritte ' . count(value: $lastSeven) . ' Tage'],
             ['value' => number_format(num: $best, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Bester Tag'],
-            ['value' => $goalDays . ' / 7', 'label' => 'Ziel erreicht'],
+            ['value' => $goalDays . ' / ' . count(value: $lastSeven), 'label' => 'Ziel erreicht'],
         ];
-        // Sleep KPIs only appear once the sleep scope actually delivered data.
-        $sleepRows = array_values(array: array_filter(array: $rows, callback: fn(array $r): bool => (int) $r['sleep_minutes'] > 0));
+        // Same for sleep, plus: a night the watch only logged as "asleep"
+        // without a stage breakdown is an incomplete recording and would skew
+        // the phase percentages, so it doesn't count either.
+        $sleepRows = array_values(array: array_filter(
+            array: $rows,
+            callback: function (array $r): bool {
+                $period = (int) $r['sleep_period_minutes'];
+                if ($period <= 0) {
+                    return false;
+                }
+                $staged = (int) $r['sleep_deep_minutes'] + (int) $r['sleep_light_minutes']
+                    + (int) $r['sleep_rem_minutes'] + (int) $r['sleep_awake_minutes'];
+                return $staged >= $period * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO;
+            }
+        ));
         if ($sleepRows !== []) {
             $lastNight = end($sleepRows);
             $recentNights = array_slice(array: $sleepRows, offset: -7);
@@ -7969,7 +8000,7 @@ final class Extrablatt
             $wakeup = $lastNight['sleep_end'] !== null ? date(format: 'H:i', timestamp: (int) strtotime(datetime: (string) $lastNight['sleep_end'])) : '–';
             $formatDuration = fn(int $minutes): string => intdiv($minutes, 60) . ':' . str_pad(string: (string) ($minutes % 60), length: 2, pad_string: '0', pad_type: STR_PAD_LEFT) . ' h';
             $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_minutes']), 'label' => 'Schlaf in der Nacht auf ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $lastNight['day']))];
-            $kpis[] = ['value' => $formatDuration($sleepAverage), 'label' => 'Ø Schlaf 7 Nächte'];
+            $kpis[] = ['value' => $formatDuration($sleepAverage), 'label' => 'Ø Schlaf ' . count(value: $recentNights) . ' Nächte'];
             $kpis[] = ['value' => $efficiency . ' %', 'label' => 'Schlafeffizienz'];
             $kpis[] = ['value' => $bedtime . ' – ' . $wakeup, 'label' => 'Bettzeit'];
             $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_period_minutes']), 'label' => 'Zeit im Bett'];
