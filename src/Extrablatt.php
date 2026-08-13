@@ -4132,9 +4132,13 @@ final class Extrablatt
     }
 
     /**
-     * Merge the nightly sleep sessions into the per-day buckets. Naps are
-     * skipped — only the session Google flags as the main sleep counts, so a
-     * daytime nap can't distort the night's stage breakdown.
+     * Merge the nightly sleep sessions into the per-day buckets, keyed by the
+     * local date the session ended on — i.e. the morning you woke up.
+     *
+     * Three quirks of the live API drive the shape of this: responses carry
+     * only UTC timestamps plus an offset (no civil time), `mainSleep` is set on
+     * naps too so `nap` is the reliable discriminator, and the result is paged
+     * far below the requested page size.
      *
      * @param array<string, array<string, int|string>> $days
      */
@@ -4142,60 +4146,80 @@ final class Extrablatt
     {
         $from = $today->modify(modifier: '-' . self::GOOGLE_HEALTH_HISTORY_DAYS . ' days')->format(format: 'Y-m-d');
         $until = $today->modify(modifier: '+1 day')->format(format: 'Y-m-d');
-        $decoded = $this->getGoogle(
-            url: self::GOOGLE_HEALTH_BASE_URL . '/users/me/dataTypes/sleep/dataPoints?' . http_build_query(data: [
+        $nights = [];
+        $pageToken = '';
+        $page = 0;
+        do {
+            $query = [
                 'pageSize' => 1000,
                 'filter' => 'sleep.interval.civil_end_time >= "' . $from . '" AND sleep.interval.civil_end_time < "' . $until . '"',
-            ]),
-            bearer: $accessToken
-        );
-        if (!is_array(value: $decoded)) {
-            $emit('  sleep: keine Daten');
-            return;
-        }
-        // A token minted before the sleep scope existed fails here, and the
-        // only cure is a fresh consent — so say that instead of a bare error.
-        $apiError = (string) ($decoded['error']['message'] ?? '');
-        if ($apiError !== '') {
-            $missingScope = ($decoded['error']['details'][0]['reason'] ?? '') === 'MISSING_OAUTH_SCOPE';
-            $emit('  sleep: ' . $apiError . ($missingScope ? ' → /?health=connect erneut aufrufen (Schlaf-Scope fehlt im Token)' : ''));
-            return;
-        }
-        $nights = 0;
-        foreach ((array) ($decoded['dataPoints'] ?? []) as $point) {
-            $sleep = is_array(value: $point) ? ($point['sleep'] ?? null) : null;
-            if (!is_array(value: $sleep) || ($sleep['metadata']['mainSleep'] ?? false) !== true) {
-                continue;
+            ];
+            if ($pageToken !== '') {
+                $query['pageToken'] = $pageToken;
             }
-            $date = $sleep['interval']['civilEndTime']['date'] ?? null;
-            if (!is_array(value: $date)) {
-                continue;
+            $decoded = $this->getGoogle(
+                url: self::GOOGLE_HEALTH_BASE_URL . '/users/me/dataTypes/sleep/dataPoints?' . http_build_query(data: $query),
+                bearer: $accessToken
+            );
+            if (!is_array(value: $decoded)) {
+                $emit('  sleep: keine Antwort');
+                return;
             }
-            $day = sprintf('%04d-%02d-%02d', (int) ($date['year'] ?? 0), (int) ($date['month'] ?? 0), (int) ($date['day'] ?? 0));
-            $summary = is_array(value: $sleep['summary'] ?? null) ? $sleep['summary'] : [];
-            $days[$day]['sleep_minutes'] = (int) ($summary['minutesAsleep'] ?? 0);
-            $days[$day]['sleep_period_minutes'] = (int) ($summary['minutesInSleepPeriod'] ?? 0);
-            $days[$day]['sleep_onset_minutes'] = (int) ($summary['minutesToFallAsleep'] ?? 0);
-            foreach (self::GOOGLE_HEALTH_SLEEP_STAGES as $column) {
-                $days[$day][$column] = 0;
+            // A token minted before the sleep scope existed fails here, and the
+            // only cure is a fresh consent — so say that instead of a bare error.
+            $apiError = (string) ($decoded['error']['message'] ?? '');
+            if ($apiError !== '') {
+                $missingScope = ($decoded['error']['details'][0]['reason'] ?? '') === 'MISSING_OAUTH_SCOPE';
+                $emit('  sleep: ' . $apiError . ($missingScope ? ' → /?health=connect erneut aufrufen (Schlaf-Scope fehlt im Token)' : ''));
+                return;
             }
-            foreach ((array) ($summary['stagesSummary'] ?? []) as $stage) {
-                $column = self::GOOGLE_HEALTH_SLEEP_STAGES[(string) ($stage['type'] ?? '')] ?? null;
-                if ($column !== null) {
-                    $days[$day][$column] = (int) ($stage['minutes'] ?? 0);
+            foreach ((array) ($decoded['dataPoints'] ?? []) as $point) {
+                $sleep = is_array(value: $point) ? ($point['sleep'] ?? null) : null;
+                if (!is_array(value: $sleep) || ($sleep['metadata']['nap'] ?? false) === true) {
+                    continue;
                 }
+                $endTimestamp = strtotime(datetime: (string) ($sleep['interval']['endTime'] ?? ''));
+                if ($endTimestamp === false) {
+                    continue;
+                }
+                $endOffset = (int) rtrim(string: (string) ($sleep['interval']['endUtcOffset'] ?? '0s'), characters: 's');
+                $day = gmdate(format: 'Y-m-d', timestamp: $endTimestamp + $endOffset);
+                $summary = is_array(value: $sleep['summary'] ?? null) ? $sleep['summary'] : [];
+                $asleep = (int) ($summary['minutesAsleep'] ?? 0);
+                // A night can hold several sessions (interrupted sleep); the
+                // longest one is the night, the rest are fragments.
+                if ($asleep <= (int) ($nights[$day]['sleep_minutes'] ?? 0)) {
+                    continue;
+                }
+                $startTimestamp = strtotime(datetime: (string) ($sleep['interval']['startTime'] ?? ''));
+                $startOffset = (int) rtrim(string: (string) ($sleep['interval']['startUtcOffset'] ?? '0s'), characters: 's');
+                $night = [
+                    'sleep_minutes' => $asleep,
+                    'sleep_period_minutes' => (int) ($summary['minutesInSleepPeriod'] ?? 0),
+                    'sleep_onset_minutes' => (int) ($summary['minutesToFallAsleep'] ?? 0),
+                    'sleep_end' => gmdate(format: 'Y-m-d H:i:s', timestamp: $endTimestamp + $endOffset),
+                ];
+                if ($startTimestamp !== false) {
+                    $night['sleep_start'] = gmdate(format: 'Y-m-d H:i:s', timestamp: $startTimestamp + $startOffset);
+                }
+                // Only sessions the watch could stage carry a breakdown; the
+                // columns stay NULL otherwise so the chart drops that night
+                // instead of drawing it as zero minutes of everything.
+                foreach ((array) ($summary['stagesSummary'] ?? []) as $stage) {
+                    $column = self::GOOGLE_HEALTH_SLEEP_STAGES[(string) ($stage['type'] ?? '')] ?? null;
+                    if ($column !== null) {
+                        $night[$column] = (int) ($stage['minutes'] ?? 0);
+                    }
+                }
+                $nights[$day] = $night;
             }
-            $start = (string) ($sleep['interval']['startTime'] ?? '');
-            $end = (string) ($sleep['interval']['endTime'] ?? '');
-            if ($start !== '') {
-                $days[$day]['sleep_start'] = $start;
-            }
-            if ($end !== '') {
-                $days[$day]['sleep_end'] = $end;
-            }
-            $nights++;
+            $pageToken = (string) ($decoded['nextPageToken'] ?? '');
+            $page++;
+        } while ($pageToken !== '' && $page < 50);
+        foreach ($nights as $day => $night) {
+            $days[$day] = ($days[$day] ?? []) + $night;
         }
-        $emit(sprintf('  sleep: %d Nächte', $nights));
+        $emit(sprintf('  sleep: %d Nächte', count(value: $nights)));
     }
 
     /**
@@ -7947,11 +7971,15 @@ final class Extrablatt
             $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_minutes']), 'label' => 'Schlaf in der Nacht auf ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $lastNight['day']))];
             $kpis[] = ['value' => $formatDuration($sleepAverage), 'label' => 'Ø Schlaf 7 Nächte'];
             $kpis[] = ['value' => $efficiency . ' %', 'label' => 'Schlafeffizienz'];
-            $kpis[] = ['value' => $bedtime . ' – ' . $wakeup, 'label' => 'Bettzeit letzte Nacht'];
+            $kpis[] = ['value' => $bedtime . ' – ' . $wakeup, 'label' => 'Bettzeit'];
+            $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_period_minutes']), 'label' => 'Zeit im Bett'];
             $kpis[] = ['value' => $deepShare . ' %', 'label' => 'Ø Tiefschlaf-Anteil'];
             $kpis[] = ['value' => $remShare . ' %', 'label' => 'Ø REM-Anteil'];
-            $kpis[] = ['value' => $onsetAverage . ' min', 'label' => 'Ø Einschlafdauer'];
-            $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_period_minutes']), 'label' => 'Zeit im Bett'];
+            // Fitbit-derived sessions report no onset time — skip the tile
+            // rather than showing a permanent zero.
+            if ($onsetAverage > 0) {
+                $kpis[] = ['value' => $onsetAverage . ' min', 'label' => 'Ø Einschlafdauer'];
+            }
         }
         $kpiHtml = '';
         foreach ($kpis as $kpi) {
