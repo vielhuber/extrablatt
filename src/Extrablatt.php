@@ -8054,6 +8054,15 @@ final class Extrablatt
                 if ($value <= 0) {
                     continue;
                 }
+                // Stacked series live off their segments: a night the watch
+                // logged without a stage breakdown would draw an empty column,
+                // and a partial one a stump. Same completeness bar as the tiles.
+                if ($chart['stacks'] ?? [] !== []) {
+                    $covered = array_sum(array: array_map(callback: fn(array $s): float => (float) $s['data'][$index], array: $chart['stacks']));
+                    if ($covered < $value * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO) {
+                        continue;
+                    }
+                }
                 $labels[] = date(format: 'd.m.', timestamp: (int) strtotime(datetime: $days[$index]));
                 $values[] = $value;
                 foreach (($chart['stacks'] ?? []) as $stackIndex => $stack) {
