@@ -7214,6 +7214,17 @@ final class Extrablatt
             );
         }
 
+        $healthStats = $this->healthDigestStats();
+        $health = null;
+        if ($healthStats !== []) {
+            $health = $healthStats;
+            $health['prose'] = $this->generateHealthProse(
+                stats: $healthStats,
+                aiConfig: $aiConfig,
+                apiKey: $apiKey
+            );
+        }
+
         $tv = $this->buildTalkshowBlock(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, cutoff: $cutoff);
 
         // Media blocks (Streaming, Kino, Musik, Gaming) — same mechanics as
@@ -7242,6 +7253,7 @@ final class Extrablatt
             'top_today' => $topToday,
             'items' => $items,
             'weather' => $weather,
+            'health' => $health,
             'tv' => $tv,
             'media' => $media,
         ];
@@ -7250,12 +7262,13 @@ final class Extrablatt
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
         $emit(sprintf(
-            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s, TV: %s, Medien: %d/%d Blöcke)',
+            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s, Gesundheit: %s, TV: %s, Medien: %d/%d Blöcke)',
             count(value: $items),
             count(value: $articles),
             $todayCount,
             $topToday !== null ? 'ja' : 'nein',
             $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein',
+            $health !== null ? (($health['prose'] ?? null) !== null ? 'Prosa' : 'nur Zahlen') : 'nein',
             $tv !== null ? sprintf('%d Sendungen', (int) ($tv['count'] ?? 0)) : 'nein',
             count(value: $media),
             count(value: $this->mediaSections())
@@ -7895,9 +7908,11 @@ final class Extrablatt
             $mediaHtml .= $this->buildProseSection(block: $block, heading: $section['heading'], subtitle: $section['subtitle']);
         }
 
-        // Derived from health_days at render time rather than baked into the
-        // stored digest, so it stays current between the nightly generations.
-        $healthHtml = $this->buildHealthDigestBlock();
+        $healthHtml = '';
+        $health = isset($data['health']) && is_array(value: $data['health']) ? $data['health'] : null;
+        if ($health !== null) {
+            $healthHtml = $this->buildHealthDigestBlock(health: $health);
+        }
 
         if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $healthHtml === '' && $tvHtml === '' && $mediaHtml === '') {
             return '';
@@ -8391,11 +8406,13 @@ final class Extrablatt
      * "today" sentence built from the raw forecast.
      */
     /**
-     * Compare the last seven recorded days against the seven before them and
-     * put the direction into words. Only days the watch actually recorded
-     * count, matching the Watch tab's tiles.
+     * Last seven recorded days against the seven before them, for steps and
+     * sleep. Only days the watch actually recorded count, matching the Watch
+     * tab's tiles.
+     *
+     * @return array{steps?: array{average: int, change: ?int, days: int}, sleep?: array{average: int, change: ?int, days: int}}
      */
-    private function buildHealthDigestBlock(): string
+    private function healthDigestStats(): array
     {
         try {
             $rows = $this->openDatabase()
@@ -8405,9 +8422,8 @@ final class Extrablatt
                 ->fetchAll(mode: PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
             error_log(message: 'extrablatt health digest failed: ' . $e->getMessage());
-            return '';
+            return [];
         }
-        $sentences = [];
         $stepValues = array_values(array: array_map(
             callback: fn(array $r): int => (int) $r['steps'],
             array: array_filter(array: $rows, callback: fn(array $r): bool => (int) $r['steps'] > 0)
@@ -8435,44 +8451,128 @@ final class Extrablatt
                 : (int) round(num: ($currentAverage - $previousAverage) / $previousAverage * 100);
             return ['average' => $currentAverage, 'change' => $change, 'days' => count(value: $current)];
         };
-        $direction = function (?int $change): string {
-            if ($change === null || abs($change) < 5) {
-                return 'unverändert';
-            }
-            return $change > 0 ? 'um <strong>' . $change . ' %</strong> gestiegen' : 'um <strong>' . abs($change) . ' %</strong> gefallen';
-        };
+        $stats = [];
         $steps = $trend($stepValues);
         if ($steps !== null) {
-            $average = (int) round(num: $steps['average']);
-            $verdict = match (true) {
-                $average >= self::GOOGLE_HEALTH_STEP_GOAL => 'damit liegst du über deinem Tagesziel',
-                $average >= self::GOOGLE_HEALTH_STEP_AMBER => 'das Tagesziel von '
-                    . number_format(num: self::GOOGLE_HEALTH_STEP_GOAL, decimals: 0, decimal_separator: ',', thousands_separator: '.')
-                    . ' Schritten bleibt in Reichweite',
-                default => 'zum Tagesziel fehlt noch ein gutes Stück',
-            };
-            $sentences[] = 'Du gehst im Schnitt <strong>'
-                . number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.')
-                . ' Schritte</strong> pro Tag, gegenüber der Vorwoche ' . $direction($steps['change']) . ' – ' . $verdict . '.';
+            $stats['steps'] = ['average' => (int) round(num: $steps['average']), 'change' => $steps['change'], 'days' => $steps['days']];
         }
         $sleep = $trend($sleepValues);
         if ($sleep !== null) {
-            $average = (int) round(num: $sleep['average']);
-            $verdict = match (true) {
-                $average >= self::GOOGLE_HEALTH_SLEEP_GOAL => 'das reicht für erholte Tage',
-                $average >= self::GOOGLE_HEALTH_SLEEP_AMBER => 'etwas mehr täte dir gut',
-                default => 'das ist auf Dauer zu wenig',
-            };
-            $sentences[] = 'Geschlafen hast du <strong>' . intdiv($average, 60) . ':'
-                . str_pad(string: (string) ($average % 60), length: 2, pad_string: '0', pad_type: STR_PAD_LEFT)
-                . ' Stunden</strong> pro Nacht, gegenüber der Vorwoche ' . $direction($sleep['change']) . ' – ' . $verdict . '.';
+            $stats['sleep'] = ['average' => (int) round(num: $sleep['average']), 'change' => $sleep['change'], 'days' => $sleep['days']];
         }
-        if ($sentences === []) {
-            return '';
+        return $stats;
+    }
+
+    /**
+     * Turn the health trend into a prose paragraph via the LLM — same shape as
+     * the weather block.
+     *
+     * @param array{steps?: array{average: int, change: ?int, days: int}, sleep?: array{average: int, change: ?int, days: int}} $stats
+     */
+    private function generateHealthProse(array $stats, array $aiConfig, string $apiKey): ?string
+    {
+        if ($stats === [] || !class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
+            return null;
+        }
+        $provider = (string) ($aiConfig['provider'] ?? '');
+        $model = (string) ($aiConfig['model'] ?? '');
+        if ($provider === '' || $model === '' || $apiKey === '') {
+            return null;
+        }
+        $describeChange = fn(?int $change): string => $change === null
+            ? 'kein Vorwochenwert vorhanden'
+            : ($change === 0 ? 'unverändert' : ($change > 0 ? '+' . $change . ' % gegenüber der Vorwoche' : $change . ' % gegenüber der Vorwoche'));
+        $lines = [];
+        if (isset($stats['steps'])) {
+            $lines[] = sprintf(
+                'Schritte: %d pro Tag im Schnitt (%d Tage gewertet), %s. Tagesziel: %d.',
+                $stats['steps']['average'],
+                $stats['steps']['days'],
+                $describeChange($stats['steps']['change']),
+                self::GOOGLE_HEALTH_STEP_GOAL
+            );
+        }
+        if (isset($stats['sleep'])) {
+            $lines[] = sprintf(
+                'Schlaf: %d:%02d Stunden pro Nacht im Schnitt (%d Nächte gewertet), %s. Zielwert: %d:00 Stunden.',
+                intdiv($stats['sleep']['average'], 60),
+                $stats['sleep']['average'] % 60,
+                $stats['sleep']['days'],
+                $describeChange($stats['sleep']['change']),
+                intdiv(self::GOOGLE_HEALTH_SLEEP_GOAL, 60)
+            );
+        }
+        $prompt = "Schreibe einen flüssigen, prägnanten Absatz auf Deutsch (2 bis 3 Sätze) über die " .
+            "Fitness-Woche des Lesers, basierend auf diesen Messwerten seiner Smartwatch:\n\n" .
+            implode(separator: "\n", array: $lines) . "\n\n" .
+            "Anforderungen:\n" .
+            "- Sprich den Leser mit \"du\" an.\n" .
+            "- Keine Aufzählung, keine Tabelle, keine Wiederholung der Rohwerte als Liste.\n" .
+            "- Interpretiere den Trend: mehr/weniger Bewegung, besserer/schlechterer Schlaf, " .
+            "und ob die Zielwerte erreicht werden.\n" .
+            "- Wenn Schlaf und Bewegung gegenläufig sind, benenne das als Spannung.\n" .
+            "- Bleib sachlich und ohne medizinische Ratschläge; keine Diagnosen, keine Warnungen vor Krankheiten.\n" .
+            "- Hebe 1 bis 2 zentrale Zahlen mit Markdown-Bold (**…**) hervor.\n" .
+            "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
+            $ai = $aiClass::create(
+                provider: $provider,
+                model: $model,
+                temperature: (float) ($aiConfig['temperature'] ?? 0.4),
+                api_key: $apiKey,
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 60),
+                url: $aiUrl !== '' ? $aiUrl : null
+            );
+            $resp = $ai->ask(prompt: $prompt)['response'] ?? null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (is_object(value: $resp) || is_array(value: $resp)) {
+            $resp = json_encode(value: $resp);
+        }
+        $text = trim(string: (string) $resp);
+        $text = (string) preg_replace(pattern: '~^\s*```(?:\w+)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
+        $text = trim(string: $text, characters: " \t\n\r\0\x0B\"'");
+        return $text !== '' ? $text : null;
+    }
+
+    /**
+     * Prefers the LLM prose stored with the digest; falls back to a minimal
+     * generated sentence pair so the section survives an AI outage.
+     *
+     * @param array{prose?: string} $health
+     */
+    private function buildHealthDigestBlock(array $health): string
+    {
+        $prose = trim(string: (string) ($health['prose'] ?? ''));
+        if ($prose !== '') {
+            $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
+            $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
+            $body = '<p>' . $escaped . '</p>';
+        } else {
+            $stats = $this->healthDigestStats();
+            $sentences = [];
+            if (isset($stats['steps'])) {
+                $sentences[] = 'Du gehst im Schnitt <strong>'
+                    . number_format(num: $stats['steps']['average'], decimals: 0, decimal_separator: ',', thousands_separator: '.')
+                    . ' Schritte</strong> pro Tag.';
+            }
+            if (isset($stats['sleep'])) {
+                $sentences[] = 'Geschlafen hast du <strong>' . intdiv($stats['sleep']['average'], 60) . ':'
+                    . str_pad(string: (string) ($stats['sleep']['average'] % 60), length: 2, pad_string: '0', pad_type: STR_PAD_LEFT)
+                    . ' Stunden</strong> pro Nacht.';
+            }
+            if ($sentences === []) {
+                return '';
+            }
+            $body = '<p>' . implode(separator: ' ', array: $sentences) . '</p>';
         }
         return '<div class="digest__health">'
             . '<h2 class="digest__title">Gesundheit <span class="digest__date">7-Tage-Trend</span></h2>'
-            . '<p>' . implode(separator: ' ', array: $sentences) . '</p>'
+            . $body
             . '</div>';
     }
 
