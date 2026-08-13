@@ -253,6 +253,12 @@ final class Extrablatt
     // indistinguishable from a normal dashboard request.
     private const GOOGLE_HEALTH_OAUTH_STATE = 'extrablatt-health';
     private const GOOGLE_HEALTH_STEP_GOAL = 10000;
+    private const GOOGLE_HEALTH_STEP_AMBER = 7500;
+    // Sleep traffic light, in minutes: 7 h is the target, below 6 h is red.
+    private const GOOGLE_HEALTH_SLEEP_GOAL = 420;
+    private const GOOGLE_HEALTH_SLEEP_AMBER = 360;
+    // Days averaged into the trend line drawn over each chart.
+    private const GOOGLE_HEALTH_TREND_WINDOW = 7;
 
     /**
      * Per-deployment HMAC key for the auth cookie, derived from AUTH_PASSWORD
@@ -7984,6 +7990,7 @@ final class Extrablatt
                 return $staged >= $period * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO;
             }
         ));
+        $sleepAverage = null;
         if ($sleepRows !== []) {
             $lastNight = end($sleepRows);
             $recentNights = array_slice(array: $sleepRows, offset: -7);
@@ -8027,12 +8034,57 @@ final class Extrablatt
             $kpiHtml .= '<div class="health__kpi"><span class="health__kpi-value">' . $kpi['value']
                 . '</span><span class="health__kpi-label">' . $kpi['label'] . '</span></div>';
         }
+        // Traffic lights: the two metrics worth acting on, reduced to a
+        // red/amber/green verdict on the last seven recorded days.
+        $lights = [];
+        if ($lastSeven !== []) {
+            $lights[] = [
+                'title' => 'Schritte',
+                'caption' => 'Ø ' . count(value: $lastSeven) . ' Tage · Ziel ' . number_format(num: self::GOOGLE_HEALTH_STEP_GOAL, decimals: 0, decimal_separator: ',', thousands_separator: '.'),
+                'value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'),
+                'level' => match (true) {
+                    $average >= self::GOOGLE_HEALTH_STEP_GOAL => 'green',
+                    $average >= self::GOOGLE_HEALTH_STEP_AMBER => 'amber',
+                    default => 'red',
+                },
+            ];
+        }
+        if ($sleepAverage !== null) {
+            $lights[] = [
+                'title' => 'Schlaf',
+                'caption' => 'Ø ' . count(value: $recentNights) . ' Nächte · Ziel ' . intdiv(self::GOOGLE_HEALTH_SLEEP_GOAL, 60) . ' h',
+                'value' => intdiv($sleepAverage, 60) . ':' . str_pad(string: (string) ($sleepAverage % 60), length: 2, pad_string: '0', pad_type: STR_PAD_LEFT) . ' h',
+                'level' => match (true) {
+                    $sleepAverage >= self::GOOGLE_HEALTH_SLEEP_GOAL => 'green',
+                    $sleepAverage >= self::GOOGLE_HEALTH_SLEEP_AMBER => 'amber',
+                    default => 'red',
+                },
+            ];
+        }
+        $lightHtml = '';
+        foreach ($lights as $light) {
+            $lamps = '';
+            foreach (['red', 'amber', 'green'] as $level) {
+                $lamps .= '<span class="health__lamp health__lamp--' . $level
+                    . ($light['level'] === $level ? ' health__lamp--on' : '') . '"></span>';
+            }
+            $lightHtml .= '<div class="health__light">'
+                . '<div class="health__lamps" role="img" aria-label="' . $light['title'] . ': ' . $light['level'] . '">' . $lamps . '</div>'
+                . '<div class="health__light-text">'
+                . '<span class="health__light-value">' . $light['value'] . '</span>'
+                . '<span class="health__light-title">' . $light['title'] . '</span>'
+                . '<span class="health__light-caption">' . $light['caption'] . '</span>'
+                . '</div></div>';
+        }
+        if ($lightHtml !== '') {
+            $lightHtml = '<div class="health__lights">' . $lightHtml . '</div>';
+        }
         $charts = [
             ['id' => 'healthSteps', 'title' => 'Schritte', 'type' => 'bar', 'goal' => self::GOOGLE_HEALTH_STEP_GOAL,
                 'data' => $steps],
-            ['id' => 'healthCalories', 'title' => 'Kalorien (kcal)', 'type' => 'bar', 'goal' => 0,
+            ['id' => 'healthCalories', 'title' => 'Verbrannte Kalorien (kcal)', 'type' => 'bar', 'goal' => 0,
                 'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'calories'))],
-            ['id' => 'healthSleep', 'title' => 'Schlaf nach Phasen (Stunden)', 'type' => 'bar', 'goal' => 0,
+            ['id' => 'healthSleep', 'title' => 'Schlaf', 'type' => 'bar', 'goal' => 0,
                 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_minutes']) / 60, precision: 2), array: $rows),
                 'stacks' => [
                     ['label' => 'Tief', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_deep_minutes']) / 60, precision: 2), array: $rows)],
@@ -8073,6 +8125,16 @@ final class Extrablatt
             if ($values === []) {
                 continue;
             }
+            // Centred moving average — the daily series is far too noisy to
+            // read a direction off, the trend line is what the chart is for.
+            $trend = [];
+            $span = (int) floor(num: self::GOOGLE_HEALTH_TREND_WINDOW / 2);
+            foreach ($values as $index => $ignored) {
+                $from = max(0, $index - $span);
+                $to = min(count(value: $values) - 1, $index + $span);
+                $window = array_slice(array: $values, offset: $from, length: $to - $from + 1);
+                $trend[] = round(num: array_sum(array: $window) / count(value: $window), precision: 2);
+            }
             $chartHtml .= '<div class="health__chart"><h3 class="health__chart-title">' . $chart['title']
                 . '</h3><div class="health__canvas"><canvas id="' . $chart['id'] . '"></canvas></div></div>';
             $chartConfig[] = [
@@ -8083,10 +8145,11 @@ final class Extrablatt
                 'labels' => $labels,
                 'data' => $values,
                 'stacks' => $stacks,
+                'trend' => $trend,
             ];
         }
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
-        return '<section class="health"><div class="health__kpis">' . $kpiHtml . '</div>' . $chartHtml
+        return '<section class="health"><div class="health__kpis">' . $kpiHtml . '</div>' . $lightHtml . $chartHtml
             . '</section><script src="?asset=js/chart.min.js"></script>'
             . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
     }
@@ -9360,6 +9423,25 @@ HTML : '';
                 .health__kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .health__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
                 .health__kpi-label { font: 500 11px/1.2 system-ui, sans-serif; color: #71717a; text-align: center; }
+                .health__lights { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 1.25rem; }
+                .health__light { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
+                .health__lamps { display: flex; flex-direction: column; gap: 5px; padding: 6px; border-radius: 7px; background: #27272a; }
+                .health__lamp { display: block; width: 13px; height: 13px; border-radius: 50%; opacity: 0.22; }
+                .health__lamp--red { background: #ef4444; }
+                .health__lamp--amber { background: #f59e0b; }
+                .health__lamp--green { background: #22c55e; }
+                .health__lamp--on { opacity: 1; box-shadow: 0 0 7px currentColor; }
+                .health__lamp--red.health__lamp--on { color: #ef4444; }
+                .health__lamp--amber.health__lamp--on { color: #f59e0b; }
+                .health__lamp--green.health__lamp--on { color: #22c55e; }
+                .health__light-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+                .health__light-value { font: 700 19px/1 system-ui, sans-serif; color: #18181b; }
+                .health__light-title { font: 600 12px/1 system-ui, sans-serif; color: #52525b; }
+                .health__light-caption { font: 500 11px/1.2 system-ui, sans-serif; color: #a1a1aa; }
+                html[data-theme="dark"] .health__light { border-color: #3f3f46; }
+                html[data-theme="dark"] .health__lamps { background: #09090b; }
+                html[data-theme="dark"] .health__light-value { color: #fafafa; }
+                html[data-theme="dark"] .health__light-title { color: #d4d4d8; }
                 .health__chart { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
                 .health__chart-title { margin: 0 0 10px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
                 .health__canvas { position: relative; height: 220px; }
@@ -9369,6 +9451,7 @@ HTML : '';
                 html[data-theme="dark"] .health__chart { border-color: #3f3f46; }
                 @media (max-width: 560px) {
                     .health__kpis { grid-template-columns: repeat(2, 1fr); }
+                    .health__lights { grid-template-columns: 1fr; }
                 }
                 .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; }
                 .pager__page { display: flex; flex-direction: column; align-items: center; gap: 6px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
@@ -9918,6 +10001,7 @@ HTML : '';
                     var ink = dark ? '#e4e4e7' : '#18181b';
                     var muted = dark ? '#71717a' : '#a1a1aa';
                     var grid = dark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+                    var accent = dark ? '#f97316' : '#ea580c';
                     charts.forEach(function (chart) {
                         var \$canvas = document.getElementById(chart.id);
                         if (!\$canvas) { return; }
@@ -9959,6 +10043,20 @@ HTML : '';
                                 pointRadius: 0
                             });
                         }
+                        if ((chart.trend || []).length > 0) {
+                            sets.push({
+                                label: 'Trend',
+                                data: chart.trend,
+                                type: 'line',
+                                borderColor: accent,
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                tension: 0.4,
+                                // Keeps the line above the stacked segments
+                                // instead of being summed into the stack.
+                                stack: 'trend'
+                            });
+                        }
                         new Chart(\$canvas, {
                             type: chart.type,
                             data: { labels: chart.labels, datasets: sets },
@@ -9967,9 +10065,17 @@ HTML : '';
                                 maintainAspectRatio: false,
                                 plugins: {
                                     legend: {
-                                        display: stacked,
+                                        display: true,
                                         position: 'bottom',
-                                        labels: { color: muted, boxWidth: 10, boxHeight: 10, font: { size: 10 } }
+                                        labels: {
+                                            color: muted,
+                                            boxWidth: 10,
+                                            boxHeight: 10,
+                                            font: { size: 10 },
+                                            // Single-series charts only need
+                                            // the trend explained, not the bars.
+                                            filter: function (item) { return stacked || item.text === 'Trend'; }
+                                        }
                                     }
                                 },
                                 scales: {
