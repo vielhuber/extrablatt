@@ -208,7 +208,8 @@ final class Extrablatt
     // on publishing status "In production" (unverified is fine, 100-user cap):
     // "Testing" makes Google revoke the refresh token every 7 days.
     private const GOOGLE_HEALTH_BASE_URL = 'https://health.googleapis.com/v4';
-    private const GOOGLE_HEALTH_SCOPE = 'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly';
+    private const GOOGLE_HEALTH_SCOPE = 'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly'
+        . ' https://www.googleapis.com/auth/googlehealth.sleep.readonly';
     private const GOOGLE_HEALTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
     private const GOOGLE_HEALTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
     // Data types we roll up daily, mapped to the per-type API window cap. The
@@ -216,12 +217,30 @@ final class Extrablatt
     // 90 days for the plain counters.
     private const GOOGLE_HEALTH_DATA_TYPES = [
         'steps' => 90,
-        'distance' => 90,
         'floors' => 90,
         'total-calories' => 14,
-        'active-zone-minutes' => 14,
+    ];
+    // Sleep is a session type, not a daily rollup — it comes from the list
+    // endpoint and is keyed by the civil date the session ENDED on, i.e. the
+    // morning you woke up.
+    private const GOOGLE_HEALTH_SLEEP_STAGES = [
+        'DEEP' => 'sleep_deep_minutes',
+        'LIGHT' => 'sleep_light_minutes',
+        'REM' => 'sleep_rem_minutes',
+        'AWAKE' => 'sleep_awake_minutes',
     ];
     private const GOOGLE_HEALTH_HISTORY_DAYS = 90;
+    // Issue pages fetched per scrape while the c't archive backfills. ~960
+    // issues since 1990, so the index completes over a few weeks of scrapes
+    // without any single run dragging the whole pipeline down.
+    private const CT_ISSUES_PER_SCRAPE = 15;
+    // c't switched from monthly to fortnightly in 1997.
+    private const CT_FORTNIGHTLY_SINCE = 1997;
+    // Ceiling for the per-scrape media cover backfill. The classic media
+    // papers hold a few hundred rows and still reach full coverage in one run;
+    // it exists so the tens of thousands of c't archive rows fill in over
+    // consecutive scrapes instead of stalling a single one.
+    private const MEDIA_BACKFILL_MAX_ROWS = 1500;
     // Marks the OAuth callback on the root path, where it would otherwise be
     // indistinguishable from a normal dashboard request.
     private const GOOGLE_HEALTH_OAUTH_STATE = 'extrablatt-health';
@@ -1320,6 +1339,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'zdfmediathek://')) {
             return $this->fetchZdfMediathekItems(paper: $paper, feedUrl: $feedUrl);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'ct://')) {
+            return $this->fetchCtArchiveItems(paper: $paper);
+        }
         if (str_starts_with(haystack: $feedUrl, needle: 'medium://')) {
             return $this->fetchMediumFollowingItems(paper: $paper);
         }
@@ -1375,6 +1397,129 @@ final class Extrablatt
             $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
         return $this->parseXTimeline(json: $body);
+    }
+
+    /**
+     * Index the complete c't article archive, issue by issue. Heise publishes
+     * no feed for it, so we walk archiv → year → issue and read the article
+     * list each issue page carries.
+     *
+     * Issue pages never change once published, so they are cached forever and
+     * re-parsed for free; only issues we've never seen cost a fetch, capped
+     * per run so a scrape stays predictable. The archive therefore fills in
+     * over consecutive scrapes instead of in one multi-hour run.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchCtArchiveItems(string $paper): array
+    {
+        $index = $this->cacheGet(key: 'ct:index');
+        if ($index === null || $index === '') {
+            $result = $this->fetchViaImpersonate(url: 'https://www.heise.de/select/ct/archiv');
+            if ($result->body === null) {
+                return [];
+            }
+            $index = $result->body;
+            $this->cacheSet(key: 'ct:index', value: $index);
+        }
+        preg_match_all(pattern: '~/select/ct/archiv/(\d{4})"~', subject: $index, matches: $yearMatches);
+        $years = array_unique(array: $yearMatches[1]);
+        rsort(array: $years);
+        $budget = self::CT_ISSUES_PER_SCRAPE;
+        $items = [];
+        foreach ($years as $year) {
+            $yearPage = $this->cacheGet(key: 'ct:year:' . $year);
+            if ($yearPage === null || $yearPage === '') {
+                if ($budget <= 0) {
+                    continue;
+                }
+                $result = $this->fetchViaImpersonate(url: 'https://www.heise.de/select/ct/archiv/' . $year);
+                if ($result->body === null) {
+                    continue;
+                }
+                $budget--;
+                $yearPage = $result->body;
+                $this->cacheSet(key: 'ct:year:' . $year, value: $yearPage);
+            }
+            preg_match_all(pattern: '~/select/ct/archiv/' . $year . '/(\d+)"~', subject: $yearPage, matches: $issueMatches);
+            $issues = array_unique(array: $issueMatches[1]);
+            rsort(array: $issues, flags: SORT_NUMERIC);
+            $issueCount = count(value: $issues);
+            foreach ($issues as $issue) {
+                $key = 'ct:issue:' . $year . ':' . $issue;
+                $issuePage = $this->cacheGet(key: $key);
+                if ($issuePage === null || $issuePage === '') {
+                    if ($budget <= 0) {
+                        continue;
+                    }
+                    $result = $this->fetchViaImpersonate(url: 'https://www.heise.de/select/ct/archiv/' . $year . '/' . $issue);
+                    if ($result->body === null) {
+                        continue;
+                    }
+                    $budget--;
+                    $issuePage = $result->body;
+                    $this->cacheSet(key: $key, value: $issuePage);
+                }
+                foreach (
+                    $this->parseCtIssue(
+                        html: $issuePage,
+                        year: (int) $year,
+                        issue: (int) $issue,
+                        issuesInYear: $issueCount
+                    ) as $item
+                ) {
+                    $items[] = $item;
+                }
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * @return array<int, FeedItem>
+     */
+    private function parseCtIssue(string $html, int $year, int $issue, int $issuesInYear): array
+    {
+        // Heise prints no publication date on the archive pages. Issues are
+        // evenly spaced across their year instead. The nominal issue count of
+        // the era is the floor, otherwise the running year — of which only the
+        // issues published so far are listed — would stretch to December.
+        $nominalIssues = $year >= self::CT_FORTNIGHTLY_SINCE ? 26 : 12;
+        $dayOfYear = (int) round(num: ($issue - 0.5) / max($issuesInYear, $nominalIssues) * 365);
+        $publishedAt = mktime(hour: 6, minute: 0, second: 0, month: 1, day: max(1, $dayOfYear), year: $year);
+        $items = [];
+        foreach (explode(separator: '<li class="issue__files__item">', string: $html) as $chunk) {
+            if (
+                preg_match(pattern: '~issue__files__info__page"[^>]*>\s*([^<]+?)\s*</a>~', subject: $chunk, matches: $titleMatch) !== 1
+                || preg_match(pattern: '~href="(/select/ct/' . $year . '/' . $issue . '/\d+)"~', subject: $chunk, matches: $linkMatch) !== 1
+            ) {
+                continue;
+            }
+            $title = html_entity_decode(string: $titleMatch[1], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+            if ($title === '') {
+                continue;
+            }
+            $page = preg_match(pattern: '~Seite (\d+)~', subject: $chunk, matches: $pageMatch) === 1 ? (int) $pageMatch[1] : 0;
+            // "ca. eine redaktionelle Seite" for single-pagers, a numeral
+            // otherwise. The extent doubles as the rating: longer articles are
+            // the issue's features, one-pagers are notes and briefs.
+            $extent = 1;
+            if (preg_match(pattern: '~ca\.\s*(\d+)\s*redaktionelle~', subject: $chunk, matches: $extentMatch) === 1) {
+                $extent = (int) $extentMatch[1];
+            }
+            $items[] = new FeedItem(
+                title: "c't " . $issue . '/' . $year . ($page > 0 ? ', S. ' . $page : '') . ': ' . $title,
+                link: 'https://www.heise.de' . $linkMatch[1],
+                // Every article of an issue shares its date, so the page number
+                // is folded in as a sub-second-scale offset: newest-first then
+                // reads an issue front to back instead of starting at the
+                // masthead on the last page.
+                publishedAt: $publishedAt === false ? null : $publishedAt - $page,
+                imageUrl: null,
+                rating: $extent
+            );
+        }
+        return $items;
     }
 
     /**
@@ -3371,9 +3516,28 @@ final class Extrablatt
                 floors INTEGER DEFAULT NULL,
                 calories INTEGER DEFAULT NULL,
                 active_minutes INTEGER DEFAULT NULL,
+                sleep_minutes INTEGER DEFAULT NULL,
+                sleep_period_minutes INTEGER DEFAULT NULL,
+                sleep_onset_minutes INTEGER DEFAULT NULL,
+                sleep_deep_minutes INTEGER DEFAULT NULL,
+                sleep_light_minutes INTEGER DEFAULT NULL,
+                sleep_rem_minutes INTEGER DEFAULT NULL,
+                sleep_awake_minutes INTEGER DEFAULT NULL,
+                sleep_start TEXT DEFAULT NULL,
+                sleep_end TEXT DEFAULT NULL,
                 updated_at INTEGER NOT NULL
             );'
         );
+        foreach (
+            [
+                'sleep_minutes', 'sleep_period_minutes', 'sleep_onset_minutes', 'sleep_deep_minutes',
+                'sleep_light_minutes', 'sleep_rem_minutes', 'sleep_awake_minutes'
+            ] as $sleepColumn
+        ) {
+            $this->addColumnIfMissing(db: $db, table: 'health_days', column: $sleepColumn, definition: 'INTEGER DEFAULT NULL');
+        }
+        $this->addColumnIfMissing(db: $db, table: 'health_days', column: 'sleep_start', definition: 'TEXT DEFAULT NULL');
+        $this->addColumnIfMissing(db: $db, table: 'health_days', column: 'sleep_end', definition: 'TEXT DEFAULT NULL');
         $this->runMigrations(db: $db);
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_category ON articles(category);');
         return $db;
@@ -3428,6 +3592,18 @@ final class Extrablatt
         }
         $stmt = $this->openDatabase()->prepare(query: 'DELETE FROM cache WHERE key LIKE :p');
         $stmt->execute(params: [':p' => $prefix . '%']);
+    }
+
+    private function addColumnIfMissing(PDO $db, string $table, string $column, string $definition): void
+    {
+        $columns = array_column(
+            array: $db->query(query: 'PRAGMA table_info(' . $table . ')')->fetchAll(mode: PDO::FETCH_ASSOC),
+            column_key: 'name'
+        );
+        if (in_array(needle: $column, haystack: $columns, strict: true)) {
+            return;
+        }
+        $db->exec(statement: 'ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
     }
 
     private function runMigrations(PDO $db): void
@@ -3636,6 +3812,9 @@ final class Extrablatt
             // Wider window than the other social tabs: the followed Medium
             // authors publish rarely, a 7-day cut would leave the tab empty.
             'medium' => ['label' => 'Medium', 'papers' => ['medium'], 'window_days' => 180, 'sort' => 'hot', 'limit' => 10],
+            // No window: the point of the c't tab is the full archive back to
+            // 1990, browsable and searchable like any other source.
+            'ct' => ['label' => "c't", 'papers' => ['ct'], 'sort' => 'published_desc'],
         ];
     }
 
@@ -3881,19 +4060,13 @@ final class Extrablatt
                     $day = sprintf('%04d-%02d-%02d', (int) ($date['year'] ?? 0), (int) ($date['month'] ?? 0), (int) ($date['day'] ?? 0));
                     $value = match ($dataType) {
                         'steps' => (int) ($point['steps']['countSum'] ?? 0),
-                        'distance' => (int) round(num: ((float) ($point['distance']['millimetersSum'] ?? 0)) / 1000),
                         'floors' => (int) ($point['floors']['countSum'] ?? 0),
-                        'total-calories' => (int) round(num: (float) ($point['totalCalories']['kcalSum'] ?? 0)),
-                        default => (int) ($point['activeZoneMinutes']['sumInFatBurnHeartZone'] ?? 0)
-                            + (int) ($point['activeZoneMinutes']['sumInCardioHeartZone'] ?? 0)
-                            + (int) ($point['activeZoneMinutes']['sumInPeakHeartZone'] ?? 0),
+                        default => (int) round(num: (float) ($point['totalCalories']['kcalSum'] ?? 0)),
                     };
                     $column = match ($dataType) {
                         'steps' => 'steps',
-                        'distance' => 'distance_meters',
                         'floors' => 'floors',
-                        'total-calories' => 'calories',
-                        default => 'active_minutes',
+                        default => 'calories',
                     };
                     $days[$day][$column] = $value;
                     $fetched++;
@@ -3901,32 +4074,95 @@ final class Extrablatt
             }
             $emit(sprintf('  %s: %d Tage', $dataType, $fetched));
         }
+        $this->collectGoogleHealthSleep(accessToken: $accessToken, today: $today, days: $days, emit: $emit);
         if ($days === []) {
             $emit('  → keine Daten erhalten');
             return;
         }
+        $columns = [
+            'steps', 'floors', 'calories',
+            'sleep_minutes', 'sleep_period_minutes', 'sleep_onset_minutes',
+            'sleep_deep_minutes', 'sleep_light_minutes', 'sleep_rem_minutes', 'sleep_awake_minutes',
+            'sleep_start', 'sleep_end',
+        ];
+        // COALESCE keeps a previously stored value when this run didn't fetch
+        // that metric — a partial API failure must not blank out history.
+        $updates = array_map(
+            callback: fn(string $c): string => $c . ' = COALESCE(excluded.' . $c . ', health_days.' . $c . ')',
+            array: $columns
+        );
+        $stmt = $db->prepare(query: 'INSERT INTO health_days (day, ' . implode(separator: ', ', array: $columns) . ', updated_at)
+            VALUES (:day, :' . implode(separator: ', :', array: $columns) . ', :updated)
+            ON CONFLICT(day) DO UPDATE SET ' . implode(separator: ', ', array: $updates) . ', updated_at = excluded.updated_at');
         $now = time();
-        $stmt = $db->prepare(query: 'INSERT INTO health_days (day, steps, distance_meters, floors, calories, active_minutes, updated_at)
-            VALUES (:day, :steps, :distance, :floors, :calories, :active, :updated)
-            ON CONFLICT(day) DO UPDATE SET
-                steps = COALESCE(excluded.steps, health_days.steps),
-                distance_meters = COALESCE(excluded.distance_meters, health_days.distance_meters),
-                floors = COALESCE(excluded.floors, health_days.floors),
-                calories = COALESCE(excluded.calories, health_days.calories),
-                active_minutes = COALESCE(excluded.active_minutes, health_days.active_minutes),
-                updated_at = excluded.updated_at');
         foreach ($days as $day => $values) {
-            $stmt->execute(params: [
-                ':day' => $day,
-                ':steps' => $values['steps'] ?? null,
-                ':distance' => $values['distance_meters'] ?? null,
-                ':floors' => $values['floors'] ?? null,
-                ':calories' => $values['calories'] ?? null,
-                ':active' => $values['active_minutes'] ?? null,
-                ':updated' => $now,
-            ]);
+            $params = [':day' => $day, ':updated' => $now];
+            foreach ($columns as $column) {
+                $params[':' . $column] = $values[$column] ?? null;
+            }
+            $stmt->execute(params: $params);
         }
         $emit(sprintf('  → %d Tage gespeichert', count(value: $days)));
+    }
+
+    /**
+     * Merge the nightly sleep sessions into the per-day buckets. Naps are
+     * skipped — only the session Google flags as the main sleep counts, so a
+     * daytime nap can't distort the night's stage breakdown.
+     *
+     * @param array<string, array<string, int|string>> $days
+     */
+    private function collectGoogleHealthSleep(string $accessToken, DateTimeImmutable $today, array &$days, callable $emit): void
+    {
+        $from = $today->modify(modifier: '-' . self::GOOGLE_HEALTH_HISTORY_DAYS . ' days')->format(format: 'Y-m-d');
+        $until = $today->modify(modifier: '+1 day')->format(format: 'Y-m-d');
+        $response = $this->fetchWithHeaders(
+            url: self::GOOGLE_HEALTH_BASE_URL . '/users/me/dataTypes/sleep/dataPoints?' . http_build_query(data: [
+                'pageSize' => 1000,
+                'filter' => 'sleep.interval.civil_end_time >= "' . $from . '" AND sleep.interval.civil_end_time < "' . $until . '"',
+            ]),
+            headers: ['Authorization: Bearer ' . $accessToken, 'Accept: application/json']
+        );
+        $decoded = json_decode(json: (string) $response, associative: true);
+        if (!is_array(value: $decoded)) {
+            $emit('  sleep: keine Daten (Scope erteilt? /?health=connect erneut aufrufen)');
+            return;
+        }
+        $nights = 0;
+        foreach ((array) ($decoded['dataPoints'] ?? []) as $point) {
+            $sleep = is_array(value: $point) ? ($point['sleep'] ?? null) : null;
+            if (!is_array(value: $sleep) || ($sleep['metadata']['mainSleep'] ?? false) !== true) {
+                continue;
+            }
+            $date = $sleep['interval']['civilEndTime']['date'] ?? null;
+            if (!is_array(value: $date)) {
+                continue;
+            }
+            $day = sprintf('%04d-%02d-%02d', (int) ($date['year'] ?? 0), (int) ($date['month'] ?? 0), (int) ($date['day'] ?? 0));
+            $summary = is_array(value: $sleep['summary'] ?? null) ? $sleep['summary'] : [];
+            $days[$day]['sleep_minutes'] = (int) ($summary['minutesAsleep'] ?? 0);
+            $days[$day]['sleep_period_minutes'] = (int) ($summary['minutesInSleepPeriod'] ?? 0);
+            $days[$day]['sleep_onset_minutes'] = (int) ($summary['minutesToFallAsleep'] ?? 0);
+            foreach (self::GOOGLE_HEALTH_SLEEP_STAGES as $column) {
+                $days[$day][$column] = 0;
+            }
+            foreach ((array) ($summary['stagesSummary'] ?? []) as $stage) {
+                $column = self::GOOGLE_HEALTH_SLEEP_STAGES[(string) ($stage['type'] ?? '')] ?? null;
+                if ($column !== null) {
+                    $days[$day][$column] = (int) ($stage['minutes'] ?? 0);
+                }
+            }
+            $start = (string) ($sleep['interval']['startTime'] ?? '');
+            $end = (string) ($sleep['interval']['endTime'] ?? '');
+            if ($start !== '') {
+                $days[$day]['sleep_start'] = $start;
+            }
+            if ($end !== '') {
+                $days[$day]['sleep_end'] = $end;
+            }
+            $nights++;
+        }
+        $emit(sprintf('  sleep: %d Nächte', $nights));
     }
 
     /**
@@ -4995,6 +5231,8 @@ final class Extrablatt
                 WHERE paper IN ({$list})
                   AND thumbnail IS NULL
                   AND COALESCE(thumbnail_fail_count, 0) < 3
+                ORDER BY published_at DESC
+                LIMIT " . self::MEDIA_BACKFILL_MAX_ROWS . "
             ")->fetchAll(mode: PDO::FETCH_ASSOC);
             $mediaImages = [];
             $mediaCandidates = [];
@@ -5072,10 +5310,27 @@ final class Extrablatt
         // their published_at is a RELEASE date (games/albums up to three
         // months back), not a news age — pruning them here re-nulled every
         // freshly backfilled cover on each scrape.
-        $articleCutoff = time() - 30 * 86400;
+        $pruneAgeDays = 30;
+        $articleCutoff = time() - $pruneAgeDays * 86400;
+        // Same reasoning as the media papers above, one step further: a tab
+        // showing a window wider than the prune age would have every cover
+        // re-nulled on each scrape. Narrow tabs stay prunable so the social
+        // sources don't hoard thumbnails forever.
+        $pruneExemptPapers = $mediaPapers;
+        foreach ($this->mediaTabs() as $tab) {
+            if ((int) ($tab['window_days'] ?? 0) > $pruneAgeDays) {
+                $pruneExemptPapers = array_merge($pruneExemptPapers, $tab['papers']);
+            }
+        }
         $pruneExempt = '';
-        if ($mediaPapers !== []) {
-            $pruneExempt = ' AND paper NOT IN (' . $list . ')';
+        if ($pruneExemptPapers !== []) {
+            $pruneExempt = ' AND paper NOT IN (' . implode(
+                separator: ',',
+                array: array_map(
+                    callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'",
+                    array: array_unique(array: $pruneExemptPapers)
+                )
+            ) . ')';
         }
         $bytesBefore = (int) $db->query(query: "
             SELECT COALESCE(SUM(LENGTH(thumbnail)) + SUM(LENGTH(image_url)), 0)
@@ -7606,7 +7861,9 @@ final class Extrablatt
     private function buildHealthBlock(): string
     {
         $rows = $this->openDatabase()
-            ->query(query: 'SELECT day, steps, distance_meters, floors, calories, active_minutes
+            ->query(query: 'SELECT day, steps, floors, calories, sleep_minutes, sleep_period_minutes,
+                    sleep_onset_minutes, sleep_deep_minutes, sleep_light_minutes, sleep_rem_minutes,
+                    sleep_awake_minutes, sleep_start, sleep_end
                 FROM health_days ORDER BY day DESC LIMIT ' . self::GOOGLE_HEALTH_HISTORY_DAYS)
             ->fetchAll(mode: PDO::FETCH_ASSOC);
         if ($rows === []) {
@@ -7633,10 +7890,36 @@ final class Extrablatt
         $goalDays = count(value: array_filter(array: $lastSeven, callback: fn(int $value): bool => $value >= self::GOOGLE_HEALTH_STEP_GOAL));
         $kpis = [
             ['value' => number_format(num: $latestSteps, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => $latestLabel],
-            ['value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Ø letzte 7 Tage'],
+            ['value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Ø Schritte 7 Tage'],
             ['value' => number_format(num: $best, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Bester Tag'],
             ['value' => $goalDays . ' / 7', 'label' => 'Ziel erreicht'],
         ];
+        // Sleep KPIs only appear once the sleep scope actually delivered data.
+        $sleepRows = array_values(array: array_filter(array: $rows, callback: fn(array $r): bool => (int) $r['sleep_minutes'] > 0));
+        if ($sleepRows !== []) {
+            $lastNight = end($sleepRows);
+            $recentNights = array_slice(array: $sleepRows, offset: -7);
+            $sleepAverage = (int) round(num: array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_minutes'], array: $recentNights)) / count(value: $recentNights));
+            $periodSum = array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_period_minutes'], array: $recentNights));
+            $asleepSum = array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_minutes'], array: $recentNights));
+            $efficiency = $periodSum > 0 ? (int) round(num: $asleepSum / $periodSum * 100) : 0;
+            $deepSum = array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_deep_minutes'], array: $recentNights));
+            $deepShare = $asleepSum > 0 ? (int) round(num: $deepSum / $asleepSum * 100) : 0;
+            $remSum = array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_rem_minutes'], array: $recentNights));
+            $remShare = $asleepSum > 0 ? (int) round(num: $remSum / $asleepSum * 100) : 0;
+            $onsetAverage = (int) round(num: array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_onset_minutes'], array: $recentNights)) / count(value: $recentNights));
+            $bedtime = $lastNight['sleep_start'] !== null ? date(format: 'H:i', timestamp: (int) strtotime(datetime: (string) $lastNight['sleep_start'])) : '–';
+            $wakeup = $lastNight['sleep_end'] !== null ? date(format: 'H:i', timestamp: (int) strtotime(datetime: (string) $lastNight['sleep_end'])) : '–';
+            $formatDuration = fn(int $minutes): string => intdiv($minutes, 60) . ':' . str_pad(string: (string) ($minutes % 60), length: 2, pad_string: '0', pad_type: STR_PAD_LEFT) . ' h';
+            $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_minutes']), 'label' => 'Schlaf in der Nacht auf ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $lastNight['day']))];
+            $kpis[] = ['value' => $formatDuration($sleepAverage), 'label' => 'Ø Schlaf 7 Nächte'];
+            $kpis[] = ['value' => $efficiency . ' %', 'label' => 'Schlafeffizienz'];
+            $kpis[] = ['value' => $bedtime . ' – ' . $wakeup, 'label' => 'Bettzeit letzte Nacht'];
+            $kpis[] = ['value' => $deepShare . ' %', 'label' => 'Ø Tiefschlaf-Anteil'];
+            $kpis[] = ['value' => $remShare . ' %', 'label' => 'Ø REM-Anteil'];
+            $kpis[] = ['value' => $onsetAverage . ' min', 'label' => 'Ø Einschlafdauer'];
+            $kpis[] = ['value' => $formatDuration((int) $lastNight['sleep_period_minutes']), 'label' => 'Zeit im Bett'];
+        }
         $kpiHtml = '';
         foreach ($kpis as $kpi) {
             $kpiHtml .= '<div class="health__kpi"><span class="health__kpi-value">' . $kpi['value']
@@ -7645,12 +7928,16 @@ final class Extrablatt
         $charts = [
             ['id' => 'healthSteps', 'title' => 'Schritte', 'type' => 'bar', 'goal' => self::GOOGLE_HEALTH_STEP_GOAL,
                 'data' => $steps],
-            ['id' => 'healthDistance', 'title' => 'Distanz (km)', 'type' => 'line', 'goal' => 0,
-                'data' => array_map(callback: fn($row): float => round(num: ((int) $row['distance_meters']) / 1000, precision: 2), array: $rows)],
             ['id' => 'healthCalories', 'title' => 'Kalorien (kcal)', 'type' => 'bar', 'goal' => 0,
                 'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'calories'))],
-            ['id' => 'healthActive', 'title' => 'Aktive Zonenminuten', 'type' => 'bar', 'goal' => 0,
-                'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'active_minutes'))],
+            ['id' => 'healthSleep', 'title' => 'Schlaf nach Phasen (Stunden)', 'type' => 'bar', 'goal' => 0,
+                'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_minutes']) / 60, precision: 2), array: $rows),
+                'stacks' => [
+                    ['label' => 'Tief', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_deep_minutes']) / 60, precision: 2), array: $rows)],
+                    ['label' => 'REM', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_rem_minutes']) / 60, precision: 2), array: $rows)],
+                    ['label' => 'Leicht', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_light_minutes']) / 60, precision: 2), array: $rows)],
+                    ['label' => 'Wach', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_awake_minutes']) / 60, precision: 2), array: $rows)],
+                ]],
         ];
         $chartHtml = '';
         $chartConfig = [];
@@ -7669,6 +7956,7 @@ final class Extrablatt
                 'goal' => $chart['goal'],
                 'labels' => array_map(callback: fn(string $day): string => date(format: 'd.m.', timestamp: (int) strtotime(datetime: $day)), array: $days),
                 'data' => $chart['data'],
+                'stacks' => $chart['stacks'] ?? [],
             ];
         }
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
@@ -8768,7 +9056,7 @@ final class Extrablatt
         // Only the first five tabs form the "Zeitung" — beyond Meldungen
         // there is no pager. Order must match the tab row in the template
         // below; search mode has no active tab and gets no pager either.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'watch', 'meldungen'];
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'ct', 'watch', 'meldungen'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -9186,6 +9474,7 @@ HTML : '';
                         {$mediaTabHtml['reddit']}
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}
+                        {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$watchActive}" href="/?view=watch">Watch</a>
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
@@ -9506,16 +9795,33 @@ HTML : '';
                     charts.forEach(function (chart) {
                         var \$canvas = document.getElementById(chart.id);
                         if (!\$canvas) { return; }
-                        var sets = [{
-                            label: chart.label,
-                            data: chart.data,
-                            backgroundColor: chart.type === 'bar' ? ink : 'transparent',
-                            borderColor: ink,
-                            borderWidth: 2,
-                            borderRadius: 3,
-                            pointRadius: 0,
-                            tension: 0.3
-                        }];
+                        // Stacked charts (sleep stages) carry their series in
+                        // chart.stacks and shade them from ink to muted so the
+                        // phases stay distinguishable in both themes.
+                        var stacked = (chart.stacks || []).length > 0;
+                        var shades = dark
+                            ? ['#e4e4e7', '#a1a1aa', '#71717a', '#3f3f46']
+                            : ['#18181b', '#52525b', '#a1a1aa', '#d4d4d8'];
+                        var sets = stacked
+                            ? chart.stacks.map(function (stack, index) {
+                                return {
+                                    label: stack.label,
+                                    data: stack.data,
+                                    backgroundColor: shades[index % shades.length],
+                                    borderWidth: 0,
+                                    borderRadius: 2
+                                };
+                            })
+                            : [{
+                                label: chart.label,
+                                data: chart.data,
+                                backgroundColor: chart.type === 'bar' ? ink : 'transparent',
+                                borderColor: ink,
+                                borderWidth: 2,
+                                borderRadius: 3,
+                                pointRadius: 0,
+                                tension: 0.3
+                            }];
                         if (chart.goal > 0) {
                             sets.push({
                                 label: 'Ziel',
@@ -9533,10 +9839,16 @@ HTML : '';
                             options: {
                                 responsive: true,
                                 maintainAspectRatio: false,
-                                plugins: { legend: { display: false } },
+                                plugins: {
+                                    legend: {
+                                        display: stacked,
+                                        position: 'bottom',
+                                        labels: { color: muted, boxWidth: 10, boxHeight: 10, font: { size: 10 } }
+                                    }
+                                },
                                 scales: {
-                                    x: { grid: { display: false }, ticks: { color: muted, maxTicksLimit: 10, font: { size: 10 } } },
-                                    y: { beginAtZero: true, grid: { color: grid }, ticks: { color: muted, font: { size: 10 } } }
+                                    x: { stacked: stacked, grid: { display: false }, ticks: { color: muted, maxTicksLimit: 10, font: { size: 10 } } },
+                                    y: { stacked: stacked, beginAtZero: true, grid: { color: grid }, ticks: { color: muted, font: { size: 10 } } }
                                 }
                             }
                         });
