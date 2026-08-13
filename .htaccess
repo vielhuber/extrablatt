@@ -5,10 +5,6 @@
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule "(^|/)\.(?!well-known)" - [F,L]
-
-    # Google rejects OAuth redirect URIs that carry a query string, so the
-    # Health callback needs a clean path of its own.
-    RewriteRule "^oauth/google$" "index.php?health=callback" [QSA,L]
 </IfModule>
 
 # Belt-and-braces: deny direct access to config.json which is technically

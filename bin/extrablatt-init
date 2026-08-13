@@ -22,21 +22,9 @@ file_put_contents(
 );
 echo "✓ index.php written\n";
 
-// 2. .htaccess (overwrite — server config, package-owned).
-file_put_contents(filename: $projectRoot . '/.htaccess', data: <<<HT
-<IfModule mod_rewrite.c>
-    RewriteEngine On
-    RewriteRule "(^|/)\\.(?!well-known)" - [F,L]
-    RewriteRule "^oauth/google\$" "index.php?health=callback" [QSA,L]
-</IfModule>
-<FilesMatch "^(config\\.json|.*\\.sqlite)\$">
-    Require all denied
-</FilesMatch>
-<IfModule mod_deflate.c>
-    SetEnvIf Request_URI ".*" no-gzip=1
-</IfModule>
-
-HT);
+// 2. .htaccess (overwrite — server config, package-owned). Copied from the
+// package so the shipped file stays the single source of truth.
+copy(from: $packageRoot . '/.htaccess', to: $projectRoot . '/.htaccess');
 echo "✓ .htaccess written\n";
 
 // 3. runtime directories (must exist before we copy templates into .data/)

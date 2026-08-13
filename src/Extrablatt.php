@@ -222,6 +222,9 @@ final class Extrablatt
         'active-zone-minutes' => 14,
     ];
     private const GOOGLE_HEALTH_HISTORY_DAYS = 90;
+    // Marks the OAuth callback on the root path, where it would otherwise be
+    // indistinguishable from a normal dashboard request.
+    private const GOOGLE_HEALTH_OAUTH_STATE = 'extrablatt-health';
     private const GOOGLE_HEALTH_STEP_GOAL = 10000;
 
     /**
@@ -498,8 +501,13 @@ final class Extrablatt
             $this->handleLogout();
             return;
         }
-        if (isset($_GET['health'])) {
-            $this->handleGoogleHealthOauth(step: (string) $_GET['health'] === 'connect' ? 'connect' : 'callback');
+        // Google rejects redirect URIs carrying a query string, so the callback
+        // lands on the bare root and identifies itself through the state param
+        // we sent along with the consent request.
+        if (isset($_GET['health']) || ((string) ($_GET['state'] ?? '')) === self::GOOGLE_HEALTH_OAUTH_STATE) {
+            $this->handleGoogleHealthOauth(
+                step: ((string) ($_GET['health'] ?? '')) === 'connect' ? 'connect' : 'callback'
+            );
             return;
         }
 
@@ -3687,14 +3695,13 @@ final class Extrablatt
 
     /**
      * Absolute callback URL — must be registered verbatim as an authorized
-     * redirect URI in the Cloud console. Google rejects query strings there,
-     * hence the .htaccess rewrite from /oauth/google.
+     * redirect URI in the Cloud console.
      */
     private function googleHealthRedirectUri(): string
     {
         $https = (string) ($_SERVER['HTTPS'] ?? '');
         $scheme = $https !== '' && $https !== 'off' ? 'https' : 'http';
-        return $scheme . '://' . (string) ($_SERVER['HTTP_HOST'] ?? '') . '/oauth/google';
+        return $scheme . '://' . (string) ($_SERVER['HTTP_HOST'] ?? '') . '/';
     }
 
     /**
@@ -3787,6 +3794,7 @@ final class Extrablatt
                 'access_type' => 'offline',
                 'prompt' => 'consent',
                 'include_granted_scopes' => 'true',
+                'state' => self::GOOGLE_HEALTH_OAUTH_STATE,
             ]), response_code: 302);
             return;
         }
