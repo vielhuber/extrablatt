@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace vielhuber\extrablatt;
 
+use DateTimeImmutable;
 use PDO;
 use PDOException;
 use SimpleXMLElement;
@@ -98,6 +99,7 @@ final class Extrablatt
     // webroot. Served on-demand via the ?asset=... route below.
     private string $cssDir;
     private string $pwaDir;
+    private string $jsDir;
     // Pinned to chrome123 — newer Chrome variants (124+) trip Reddit's bot
     // detection (TLS/header fingerprint check), returning 403 even with valid
     // cookies and from a non-blocked IP. chrome123 stays under Reddit's radar
@@ -114,6 +116,7 @@ final class Extrablatt
         $this->cookieDir = $rootDir . '/.data/cookies';
         $this->cssDir = __DIR__ . '/../css';
         $this->pwaDir = __DIR__ . '/../pwa';
+        $this->jsDir = __DIR__ . '/../js';
         $this->curlImpersonateBin = $rootDir . '/.bin/curl_chrome123';
         $this->dataDir = $rootDir . '/.data';
         $this->logDir = $rootDir . '/.logs';
@@ -129,14 +132,18 @@ final class Extrablatt
     private function serveAsset(string $relPath): void
     {
         if (
-            preg_match(pattern: '~^(css|pwa)/[A-Za-z0-9._-]+$~', subject: $relPath) !== 1
+            preg_match(pattern: '~^(css|pwa|js)/[A-Za-z0-9._-]+$~', subject: $relPath) !== 1
             || str_contains(haystack: $relPath, needle: '..')
         ) {
             http_response_code(response_code: 404);
             return;
         }
         [$subdir, $file] = explode(separator: '/', string: $relPath, limit: 2);
-        $absolute = ($subdir === 'css' ? $this->cssDir : $this->pwaDir) . '/' . $file;
+        $absolute = match ($subdir) {
+            'css' => $this->cssDir,
+            'js' => $this->jsDir,
+            default => $this->pwaDir,
+        } . '/' . $file;
         if (!is_file(filename: $absolute)) {
             http_response_code(response_code: 404);
             return;
@@ -196,6 +203,26 @@ final class Extrablatt
     // authCookieKey(), so a valid cookie cannot be forged without knowing the
     // password. Changing this salt (or the password) invalidates all sessions.
     private const AUTH_COOKIE_KEY = 'extrablatt-cookie-key-v1';
+    // Google Health API (successor of the Fitbit Web API) — reads the watch's
+    // daily rollups. The scope is "restricted", so the Cloud project must sit
+    // on publishing status "In production" (unverified is fine, 100-user cap):
+    // "Testing" makes Google revoke the refresh token every 7 days.
+    private const GOOGLE_HEALTH_BASE_URL = 'https://health.googleapis.com/v4';
+    private const GOOGLE_HEALTH_SCOPE = 'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly';
+    private const GOOGLE_HEALTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+    private const GOOGLE_HEALTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+    // Data types we roll up daily, mapped to the per-type API window cap. The
+    // API rejects wider ranges: 14 days for the calorie/minute aggregates,
+    // 90 days for the plain counters.
+    private const GOOGLE_HEALTH_DATA_TYPES = [
+        'steps' => 90,
+        'distance' => 90,
+        'floors' => 90,
+        'total-calories' => 14,
+        'active-zone-minutes' => 14,
+    ];
+    private const GOOGLE_HEALTH_HISTORY_DAYS = 90;
+    private const GOOGLE_HEALTH_STEP_GOAL = 10000;
 
     /**
      * Per-deployment HMAC key for the auth cookie, derived from AUTH_PASSWORD
@@ -471,6 +498,10 @@ final class Extrablatt
             $this->handleLogout();
             return;
         }
+        if (isset($_GET['health'])) {
+            $this->handleGoogleHealthOauth(step: (string) $_GET['health'] === 'connect' ? 'connect' : 'callback');
+            return;
+        }
 
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
@@ -548,7 +579,7 @@ final class Extrablatt
                 $thumbFilter = '';
             }
             $mediaViews = array_keys(array: $this->mediaTabs());
-            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild'], $mediaViews), strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'watch'], $mediaViews), strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -1281,6 +1312,9 @@ final class Extrablatt
         if (str_starts_with(haystack: $feedUrl, needle: 'zdfmediathek://')) {
             return $this->fetchZdfMediathekItems(paper: $paper, feedUrl: $feedUrl);
         }
+        if (str_starts_with(haystack: $feedUrl, needle: 'medium://')) {
+            return $this->fetchMediumFollowingItems(paper: $paper);
+        }
         if (str_starts_with(haystack: $feedUrl, needle: 'wikipedia://')) {
             return $this->fetchWikipediaCurrentEventsItems(paper: $paper);
         }
@@ -1333,6 +1367,115 @@ final class Extrablatt
             $this->cacheSet(key: 'feed:' . $paper, value: $body);
         }
         return $this->parseXTimeline(json: $body);
+    }
+
+    /**
+     * Aggregate the posts of everyone the logged-in account follows on Medium.
+     * Medium's personalized "For you" feed is client-side GraphQL behind a
+     * Cloudflare challenge, but the profile's /following page is server
+     * rendered and the per-author RSS feeds are unprotected — so we assemble
+     * the following feed ourselves from those two unblocked surfaces.
+     *
+     * @return array<int, FeedItem>
+     */
+    private function fetchMediumFollowingItems(string $paper): array
+    {
+        $cookieHeader = $this->buildCookieHeader(targetUrl: 'https://medium.com/');
+        if ($cookieHeader === '') {
+            return [];
+        }
+        $following = $this->cacheGet(key: 'medium:following:' . $paper);
+        if ($following === null || $following === '') {
+            $home = $this->fetchWithHeaders(url: 'https://medium.com/', headers: ['Cookie: ' . $cookieHeader]);
+            $viewer = $this->parseMediumApolloState(html: (string) $home);
+            $username = '';
+            foreach ($viewer as $key => $entity) {
+                if (str_starts_with(haystack: $key, needle: 'User:') && ($entity['username'] ?? '') !== '') {
+                    $username = (string) $entity['username'];
+                    break;
+                }
+            }
+            if ($username === '') {
+                return [];
+            }
+            $profile = $this->fetchWithHeaders(
+                url: 'https://medium.com/@' . rawurlencode(string: $username) . '/following',
+                headers: ['Cookie: ' . $cookieHeader]
+            );
+            $entities = $this->parseMediumApolloState(html: (string) $profile);
+            $feeds = [];
+            foreach ($entities as $key => $entity) {
+                if (str_starts_with(haystack: $key, needle: 'User:') && ($entity['username'] ?? '') !== '' && $entity['username'] !== $username) {
+                    $feeds[] = '@' . $entity['username'];
+                }
+                if (str_starts_with(haystack: $key, needle: 'Collection:') && ($entity['slug'] ?? '') !== '') {
+                    $feeds[] = (string) $entity['slug'];
+                }
+            }
+            if ($feeds === []) {
+                return [];
+            }
+            $following = (string) json_encode(value: array_values(array: array_unique(array: $feeds)));
+            $this->cacheSet(key: 'medium:following:' . $paper, value: $following);
+        }
+        $items = [];
+        $seen = [];
+        foreach ((array) json_decode(json: $following, associative: true) as $handle) {
+            $body = $this->cacheGet(key: 'feed:' . $paper . ':' . $handle);
+            if ($body === null || $body === '') {
+                $result = $this->fetchViaImpersonate(url: 'https://medium.com/feed/' . $handle);
+                if ($result->body === null) {
+                    continue;
+                }
+                $body = $result->body;
+                $this->cacheSet(key: 'feed:' . $paper . ':' . $handle, value: $body);
+            }
+            foreach ($this->parseFeedBody(body: $body, paper: $paper) as $item) {
+                if (isset($seen[$item->link])) {
+                    continue;
+                }
+                $seen[$item->link] = true;
+                $items[] = $item;
+                if (count(value: $items) >= self::SOCIAL_FEED_MAX_ITEMS) {
+                    return $items;
+                }
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * Pull the Apollo cache Medium embeds into its server-rendered pages.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function parseMediumApolloState(string $html): array
+    {
+        $start = strpos(haystack: $html, needle: 'window.__APOLLO_STATE__');
+        if ($start === false) {
+            return [];
+        }
+        $start = strpos(haystack: $html, needle: '{', offset: $start);
+        if ($start === false) {
+            return [];
+        }
+        // Brace matching instead of a regex: the payload contains braces inside
+        // string values, so a lazy match would truncate it.
+        $depth = 0;
+        $length = strlen(string: $html);
+        for ($i = $start; $i < $length; $i++) {
+            if ($html[$i] === '{') {
+                $depth++;
+            }
+            if ($html[$i] === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    $decoded = json_decode(json: substr(string: $html, offset: $start, length: $i - $start + 1), associative: true);
+                    return is_array(value: $decoded) ? $decoded : [];
+                }
+            }
+        }
+        return [];
     }
 
     /**
@@ -3204,6 +3347,18 @@ final class Extrablatt
                 updated_at INTEGER NOT NULL
             );'
         );
+        $db->exec(
+            statement:
+            'CREATE TABLE IF NOT EXISTS health_days (
+                day TEXT PRIMARY KEY NOT NULL,
+                steps INTEGER DEFAULT NULL,
+                distance_meters INTEGER DEFAULT NULL,
+                floors INTEGER DEFAULT NULL,
+                calories INTEGER DEFAULT NULL,
+                active_minutes INTEGER DEFAULT NULL,
+                updated_at INTEGER NOT NULL
+            );'
+        );
         $this->runMigrations(db: $db);
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_category ON articles(category);');
         return $db;
@@ -3463,6 +3618,9 @@ final class Extrablatt
             'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7, 'limit' => 10],
             'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
             'x' => ['label' => 'X', 'papers' => ['x'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
+            // Wider window than the other social tabs: the followed Medium
+            // authors publish rarely, a 7-day cut would leave the tab empty.
+            'medium' => ['label' => 'Medium', 'papers' => ['medium'], 'window_days' => 180, 'sort' => 'hot', 'limit' => 10],
         ];
     }
 
@@ -3520,6 +3678,241 @@ final class Extrablatt
             $env[trim(string: $parts[0])] = trim(string: $parts[1], characters: " \t\n\r\0\x0B\"'");
         }
         return $env;
+    }
+
+    private function googleHealthTokenFile(): string
+    {
+        return $this->dataDir . '/google_health.json';
+    }
+
+    /**
+     * Absolute callback URL — must be registered verbatim as an authorized
+     * redirect URI in the Cloud console. Google rejects query strings there,
+     * hence the .htaccess rewrite from /oauth/google.
+     */
+    private function googleHealthRedirectUri(): string
+    {
+        $https = (string) ($_SERVER['HTTPS'] ?? '');
+        $scheme = $https !== '' && $https !== 'off' ? 'https' : 'http';
+        return $scheme . '://' . (string) ($_SERVER['HTTP_HOST'] ?? '') . '/oauth/google';
+    }
+
+    /**
+     * POST against Google's OAuth / Health endpoints (plain curl — these are
+     * first-party JSON APIs that need no browser impersonation).
+     *
+     * @return array<string, mixed>|null decoded response, null on any error
+     */
+    private function postGoogle(string $url, string $body, string $contentType, string $bearer): ?array
+    {
+        $headers = ['Content-Type: ' . $contentType, 'Accept: application/json'];
+        if ($bearer !== '') {
+            $headers[] = 'Authorization: Bearer ' . $bearer;
+        }
+        $ch = curl_init(url: $url);
+        if ($ch === false) {
+            return null;
+        }
+        curl_setopt_array(handle: $ch, options: [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => self::FETCH_CONNECT_TIMEOUT_SECONDS,
+            CURLOPT_TIMEOUT => self::FETCH_MAX_TIME_SECONDS,
+        ]);
+        $response = curl_exec(handle: $ch);
+        $status = (int) curl_getinfo(handle: $ch, option: CURLINFO_RESPONSE_CODE);
+        curl_close(handle: $ch);
+        if (!is_string(value: $response) || $status !== 200) {
+            error_log(message: 'extrablatt google health POST ' . $url . ' → HTTP ' . $status . ': ' . substr(string: (string) $response, offset: 0, length: 300));
+            return null;
+        }
+        $decoded = json_decode(json: $response, associative: true);
+        return is_array(value: $decoded) ? $decoded : null;
+    }
+
+    /**
+     * Trade the stored refresh token for a short-lived access token.
+     */
+    private function googleHealthAccessToken(): ?string
+    {
+        $env = $this->loadEnv();
+        $clientId = (string) ($env['GOOGLE_HEALTH_CLIENT_ID'] ?? '');
+        $clientSecret = (string) ($env['GOOGLE_HEALTH_CLIENT_SECRET'] ?? '');
+        if ($clientId === '' || $clientSecret === '' || !is_file(filename: $this->googleHealthTokenFile())) {
+            return null;
+        }
+        $stored = json_decode(json: (string) file_get_contents(filename: $this->googleHealthTokenFile()), associative: true);
+        $refreshToken = is_array(value: $stored) ? (string) ($stored['refresh_token'] ?? '') : '';
+        if ($refreshToken === '') {
+            return null;
+        }
+        $response = $this->postGoogle(
+            url: self::GOOGLE_HEALTH_TOKEN_URL,
+            body: http_build_query(data: [
+                'grant_type' => 'refresh_token',
+                'refresh_token' => $refreshToken,
+                'client_id' => $clientId,
+                'client_secret' => $clientSecret,
+            ]),
+            contentType: 'application/x-www-form-urlencoded',
+            bearer: ''
+        );
+        $accessToken = (string) ($response['access_token'] ?? '');
+        return $accessToken !== '' ? $accessToken : null;
+    }
+
+    /**
+     * Kick off the consent flow (?health=connect) or persist the refresh token
+     * Google hands back on the callback.
+     */
+    private function handleGoogleHealthOauth(string $step): void
+    {
+        $env = $this->loadEnv();
+        $clientId = (string) ($env['GOOGLE_HEALTH_CLIENT_ID'] ?? '');
+        $clientSecret = (string) ($env['GOOGLE_HEALTH_CLIENT_SECRET'] ?? '');
+        header(header: 'Content-Type: text/plain; charset=utf-8');
+        if ($clientId === '' || $clientSecret === '') {
+            echo "GOOGLE_HEALTH_CLIENT_ID / GOOGLE_HEALTH_CLIENT_SECRET fehlen in .data/.env\n";
+            return;
+        }
+        if ($step === 'connect') {
+            // prompt=consent forces a fresh refresh token even if the account
+            // already granted the scope — otherwise Google omits it on re-auth.
+            header(header: 'Location: ' . self::GOOGLE_HEALTH_AUTH_URL . '?' . http_build_query(data: [
+                'client_id' => $clientId,
+                'redirect_uri' => $this->googleHealthRedirectUri(),
+                'response_type' => 'code',
+                'scope' => self::GOOGLE_HEALTH_SCOPE,
+                'access_type' => 'offline',
+                'prompt' => 'consent',
+                'include_granted_scopes' => 'true',
+            ]), response_code: 302);
+            return;
+        }
+        $error = (string) ($_GET['error'] ?? '');
+        if ($error !== '') {
+            echo 'Google hat die Freigabe abgelehnt: ' . $error . "\n";
+            return;
+        }
+        $code = (string) ($_GET['code'] ?? '');
+        if ($code === '') {
+            echo "Kein Autorisierungscode erhalten.\n";
+            return;
+        }
+        $response = $this->postGoogle(
+            url: self::GOOGLE_HEALTH_TOKEN_URL,
+            body: http_build_query(data: [
+                'grant_type' => 'authorization_code',
+                'code' => $code,
+                'client_id' => $clientId,
+                'client_secret' => $clientSecret,
+                'redirect_uri' => $this->googleHealthRedirectUri(),
+            ]),
+            contentType: 'application/x-www-form-urlencoded',
+            bearer: ''
+        );
+        $refreshToken = (string) ($response['refresh_token'] ?? '');
+        if ($refreshToken === '') {
+            echo "Google hat kein Refresh-Token geliefert (siehe error_log).\n";
+            return;
+        }
+        file_put_contents(
+            filename: $this->googleHealthTokenFile(),
+            data: (string) json_encode(value: ['refresh_token' => $refreshToken, 'created_at' => time()])
+        );
+        chmod(filename: $this->googleHealthTokenFile(), permissions: 0600);
+        echo "Google Health verbunden. Beim nächsten Scrape werden die Uhrdaten geholt.\n";
+    }
+
+    /**
+     * Pull daily rollups for every configured data type into health_days.
+     */
+    private function syncGoogleHealth(PDO $db, callable $emit): void
+    {
+        $accessToken = $this->googleHealthAccessToken();
+        if ($accessToken === null) {
+            $emit('  → übersprungen (nicht verbunden – /oauth/google-Flow über /?health=connect starten)');
+            return;
+        }
+        $today = new DateTimeImmutable(datetime: 'today');
+        $days = [];
+        foreach (self::GOOGLE_HEALTH_DATA_TYPES as $dataType => $maxWindowDays) {
+            $fetched = 0;
+            for ($offset = 0; $offset < self::GOOGLE_HEALTH_HISTORY_DAYS; $offset += $maxWindowDays) {
+                $chunkDays = min($maxWindowDays, self::GOOGLE_HEALTH_HISTORY_DAYS - $offset);
+                $end = $today->modify(modifier: '-' . $offset . ' days');
+                $start = $end->modify(modifier: '-' . ($chunkDays - 1) . ' days');
+                $response = $this->postGoogle(
+                    url: self::GOOGLE_HEALTH_BASE_URL . '/users/me/dataTypes/' . $dataType . '/dataPoints:dailyRollUp',
+                    body: (string) json_encode(value: [
+                        'range' => [
+                            'start' => ['date' => ['year' => (int) $start->format(format: 'Y'), 'month' => (int) $start->format(format: 'n'), 'day' => (int) $start->format(format: 'j')]],
+                            'end' => ['date' => ['year' => (int) $end->format(format: 'Y'), 'month' => (int) $end->format(format: 'n'), 'day' => (int) $end->format(format: 'j')]],
+                        ],
+                        'windowSizeDays' => 1,
+                    ]),
+                    contentType: 'application/json',
+                    bearer: $accessToken
+                );
+                foreach ((array) ($response['rollupDataPoints'] ?? []) as $point) {
+                    if (!is_array(value: $point)) {
+                        continue;
+                    }
+                    $date = $point['civilStartTime']['date'] ?? null;
+                    if (!is_array(value: $date)) {
+                        continue;
+                    }
+                    $day = sprintf('%04d-%02d-%02d', (int) ($date['year'] ?? 0), (int) ($date['month'] ?? 0), (int) ($date['day'] ?? 0));
+                    $value = match ($dataType) {
+                        'steps' => (int) ($point['steps']['countSum'] ?? 0),
+                        'distance' => (int) round(num: ((float) ($point['distance']['millimetersSum'] ?? 0)) / 1000),
+                        'floors' => (int) ($point['floors']['countSum'] ?? 0),
+                        'total-calories' => (int) round(num: (float) ($point['totalCalories']['kcalSum'] ?? 0)),
+                        default => (int) ($point['activeZoneMinutes']['sumInFatBurnHeartZone'] ?? 0)
+                            + (int) ($point['activeZoneMinutes']['sumInCardioHeartZone'] ?? 0)
+                            + (int) ($point['activeZoneMinutes']['sumInPeakHeartZone'] ?? 0),
+                    };
+                    $column = match ($dataType) {
+                        'steps' => 'steps',
+                        'distance' => 'distance_meters',
+                        'floors' => 'floors',
+                        'total-calories' => 'calories',
+                        default => 'active_minutes',
+                    };
+                    $days[$day][$column] = $value;
+                    $fetched++;
+                }
+            }
+            $emit(sprintf('  %s: %d Tage', $dataType, $fetched));
+        }
+        if ($days === []) {
+            $emit('  → keine Daten erhalten');
+            return;
+        }
+        $now = time();
+        $stmt = $db->prepare(query: 'INSERT INTO health_days (day, steps, distance_meters, floors, calories, active_minutes, updated_at)
+            VALUES (:day, :steps, :distance, :floors, :calories, :active, :updated)
+            ON CONFLICT(day) DO UPDATE SET
+                steps = COALESCE(excluded.steps, health_days.steps),
+                distance_meters = COALESCE(excluded.distance_meters, health_days.distance_meters),
+                floors = COALESCE(excluded.floors, health_days.floors),
+                calories = COALESCE(excluded.calories, health_days.calories),
+                active_minutes = COALESCE(excluded.active_minutes, health_days.active_minutes),
+                updated_at = excluded.updated_at');
+        foreach ($days as $day => $values) {
+            $stmt->execute(params: [
+                ':day' => $day,
+                ':steps' => $values['steps'] ?? null,
+                ':distance' => $values['distance_meters'] ?? null,
+                ':floors' => $values['floors'] ?? null,
+                ':calories' => $values['calories'] ?? null,
+                ':active' => $values['active_minutes'] ?? null,
+                ':updated' => $now,
+            ]);
+        }
+        $emit(sprintf('  → %d Tage gespeichert', count(value: $days)));
     }
 
     /**
@@ -4476,6 +4869,13 @@ final class Extrablatt
         );
         $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
         $emit(sprintf('  → Phase 10 fertig (%d ms)', $ms));
+        $emit('');
+
+        $emit('Google Health: Tagesdaten der Uhr synchronisieren');
+        $phaseStart = microtime(as_float: true);
+        $this->syncGoogleHealth(db: $db, emit: $emit);
+        $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
+        $emit(sprintf('  → fertig (%d ms)', $ms));
         $emit('');
 
         $emit('Cache-Cleanup');
@@ -7187,6 +7587,77 @@ final class Extrablatt
     }
 
     /**
+     * Render the watch's daily rollups as KPI tiles plus Chart.js diagrams.
+     */
+    private function buildHealthBlock(): string
+    {
+        $rows = $this->openDatabase()
+            ->query(query: 'SELECT day, steps, distance_meters, floors, calories, active_minutes
+                FROM health_days ORDER BY day DESC LIMIT ' . self::GOOGLE_HEALTH_HISTORY_DAYS)
+            ->fetchAll(mode: PDO::FETCH_ASSOC);
+        if ($rows === []) {
+            $connected = is_file(filename: $this->googleHealthTokenFile());
+            $hint = $connected
+                ? 'Verbunden, aber noch keine Daten – beim nächsten Scrape werden sie geholt.'
+                : 'Noch nicht verbunden. <a href="/?health=connect">Google Health jetzt verbinden</a>.';
+            return '<p class="viewnav__empty">' . $hint . '</p>';
+        }
+        $rows = array_reverse(array: $rows);
+        $days = array_column(array: $rows, column_key: 'day');
+        $steps = array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'steps'));
+        $stepsByDay = array_combine(keys: $days, values: $steps);
+        $today = $stepsByDay[date(format: 'Y-m-d')] ?? 0;
+        $lastSeven = array_slice(array: $steps, offset: -7);
+        $average = $lastSeven === [] ? 0 : (int) round(num: array_sum(array: $lastSeven) / count(value: $lastSeven));
+        $best = $steps === [] ? 0 : max($steps);
+        $goalDays = count(value: array_filter(array: $lastSeven, callback: fn(int $value): bool => $value >= self::GOOGLE_HEALTH_STEP_GOAL));
+        $kpis = [
+            ['value' => number_format(num: $today, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Schritte heute'],
+            ['value' => number_format(num: $average, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Ø letzte 7 Tage'],
+            ['value' => number_format(num: $best, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Bester Tag'],
+            ['value' => $goalDays . ' / 7', 'label' => 'Ziel erreicht'],
+        ];
+        $kpiHtml = '';
+        foreach ($kpis as $kpi) {
+            $kpiHtml .= '<div class="health__kpi"><span class="health__kpi-value">' . $kpi['value']
+                . '</span><span class="health__kpi-label">' . $kpi['label'] . '</span></div>';
+        }
+        $charts = [
+            ['id' => 'healthSteps', 'title' => 'Schritte', 'type' => 'bar', 'goal' => self::GOOGLE_HEALTH_STEP_GOAL,
+                'data' => $steps],
+            ['id' => 'healthDistance', 'title' => 'Distanz (km)', 'type' => 'line', 'goal' => 0,
+                'data' => array_map(callback: fn($row): float => round(num: ((int) $row['distance_meters']) / 1000, precision: 2), array: $rows)],
+            ['id' => 'healthCalories', 'title' => 'Kalorien (kcal)', 'type' => 'bar', 'goal' => 0,
+                'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'calories'))],
+            ['id' => 'healthActive', 'title' => 'Aktive Zonenminuten', 'type' => 'bar', 'goal' => 0,
+                'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'active_minutes'))],
+        ];
+        $chartHtml = '';
+        $chartConfig = [];
+        foreach ($charts as $chart) {
+            // A metric the account never recorded would render as a flat zero
+            // line — drop the whole card instead.
+            if (array_sum(array: $chart['data']) <= 0) {
+                continue;
+            }
+            $chartHtml .= '<div class="health__chart"><h3 class="health__chart-title">' . $chart['title']
+                . '</h3><div class="health__canvas"><canvas id="' . $chart['id'] . '"></canvas></div></div>';
+            $chartConfig[] = [
+                'id' => $chart['id'],
+                'type' => $chart['type'],
+                'label' => $chart['title'],
+                'goal' => $chart['goal'],
+                'labels' => array_map(callback: fn(string $day): string => date(format: 'd.m.', timestamp: (int) strtotime(datetime: $day)), array: $days),
+                'data' => $chart['data'],
+            ];
+        }
+        $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
+        return '<section class="health"><div class="health__kpis">' . $kpiHtml . '</div>' . $chartHtml
+            . '</section><script src="?asset=js/chart.min.js"></script>'
+            . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
+    }
+
+    /**
      * Mirror the current BILD.de front page as a tile grid: same teasers,
      * same images, same Kicker/Headline split, every tile linking straight
      * to the original article in a new window. The homepage HTML is cached
@@ -8231,17 +8702,19 @@ final class Extrablatt
         $isZeitung = !$isSearch && $viewFilter === 'zeitung';
         $isFactcheck = !$isSearch && $viewFilter === 'factcheck';
         $isBild = !$isSearch && $viewFilter === 'bild';
+        $isWatch = !$isSearch && $viewFilter === 'watch';
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset, the media tabs when media=<tab> is set; "Meldungen"
         // covers every other meldungen state.
-        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && $tvFilter === 'all';
-        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isTalkshowView && $mediaFilter !== '';
-        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isTalkshowView && !$isMediaView;
+        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isWatch && $tvFilter === 'all';
+        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isWatch && !$isTalkshowView && $mediaFilter !== '';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isWatch && !$isTalkshowView && !$isMediaView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
         $bildActive = $isBild ? ' viewnav__tab--active' : '';
+        $watchActive = $isWatch ? ' viewnav__tab--active' : '';
         $mediaTabHtml = [];
         foreach ($this->mediaTabs() as $tabKey => $tab) {
             $mediaActive = $isMediaView && $mediaFilter === $tabKey ? ' viewnav__tab--active' : '';
@@ -8268,11 +8741,14 @@ final class Extrablatt
         if ($isFactcheck) {
             $activeTabLabel = 'Faktencheck';
         }
+        if ($isWatch) {
+            $activeTabLabel = 'Watch';
+        }
         // Bottom pager: leaf through the tabs like turning newspaper pages.
         // Only the first five tabs form the "Zeitung" — beyond Meldungen
         // there is no pager. Order must match the tab row in the template
         // below; search mode has no active tab and gets no pager either.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'meldungen'];
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'watch', 'meldungen'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -8291,6 +8767,9 @@ final class Extrablatt
         }
         if ($isFactcheck) {
             $activeView = 'factcheck';
+        }
+        if ($isWatch) {
+            $activeView = 'watch';
         }
         $pagerHtml = '';
         $navPosition = array_search(needle: $activeView, haystack: $navOrder, strict: true);
@@ -8337,6 +8816,7 @@ final class Extrablatt
 HTML : '';
         $factcheckBlock = $isFactcheck ? $this->buildFactCheckBlock(statement: $factcheckStatement, pending: $factcheckPending) : '';
         $bildBlock = $isBild ? $this->buildBildBlock() : '';
+        $watchBlock = $isWatch ? $this->buildHealthBlock() : '';
 
         $searchValue = htmlspecialchars(string: $searchQuery, flags: ENT_QUOTES);
         $searchBlock = '';
@@ -8442,6 +8922,20 @@ HTML : '';
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
+                .health__kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.25rem; }
+                .health__kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
+                .health__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
+                .health__kpi-label { font: 500 11px/1.2 system-ui, sans-serif; color: #71717a; text-align: center; }
+                .health__chart { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
+                .health__chart-title { margin: 0 0 10px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
+                .health__canvas { position: relative; height: 220px; }
+                html[data-theme="dark"] .health__kpi { background: #18181b; border-color: #3f3f46; }
+                html[data-theme="dark"] .health__kpi-value { color: #fafafa; }
+                html[data-theme="dark"] .health__kpi-label { color: #a1a1aa; }
+                html[data-theme="dark"] .health__chart { border-color: #3f3f46; }
+                @media (max-width: 560px) {
+                    .health__kpis { grid-template-columns: repeat(2, 1fr); }
+                }
                 .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; }
                 .pager__page { display: flex; flex-direction: column; align-items: center; gap: 6px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
                 .pager__track { width: 120px; height: 4px; border-radius: 2px; background: #e4e4e7; overflow: hidden; }
@@ -8671,6 +9165,8 @@ HTML : '';
                         <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
                         {$mediaTabHtml['reddit']}
                         {$mediaTabHtml['x']}
+                        {$mediaTabHtml['medium']}
+                        <a class="viewnav__tab{$watchActive}" href="/?view=watch">Watch</a>
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                         {$mediaTabHtml['serien']}
@@ -8684,6 +9180,7 @@ HTML : '';
                 {$meldungenBlock}
                 {$factcheckBlock}
                 {$bildBlock}
+                {$watchBlock}
                 {$searchBlock}
                 {$pagerHtml}
             </main>
@@ -8973,6 +9470,57 @@ HTML : '';
                             + ';end';
                         location.href = intent;
                     }, true);
+                })();
+
+                // Watch tab: instantiate one Chart.js chart per metric. The
+                // config travels in a data attribute so the chart code stays
+                // out of the PHP heredoc.
+                (function () {
+                    var \$data = document.getElementById('healthData');
+                    if (!\$data || typeof Chart === 'undefined') { return; }
+                    var charts = JSON.parse(\$data.getAttribute('data-charts') || '[]');
+                    var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+                    var ink = dark ? '#e4e4e7' : '#18181b';
+                    var muted = dark ? '#71717a' : '#a1a1aa';
+                    var grid = dark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+                    charts.forEach(function (chart) {
+                        var \$canvas = document.getElementById(chart.id);
+                        if (!\$canvas) { return; }
+                        var sets = [{
+                            label: chart.label,
+                            data: chart.data,
+                            backgroundColor: chart.type === 'bar' ? ink : 'transparent',
+                            borderColor: ink,
+                            borderWidth: 2,
+                            borderRadius: 3,
+                            pointRadius: 0,
+                            tension: 0.3
+                        }];
+                        if (chart.goal > 0) {
+                            sets.push({
+                                label: 'Ziel',
+                                data: chart.data.map(function () { return chart.goal; }),
+                                type: 'line',
+                                borderColor: muted,
+                                borderDash: [4, 4],
+                                borderWidth: 1,
+                                pointRadius: 0
+                            });
+                        }
+                        new Chart(\$canvas, {
+                            type: chart.type,
+                            data: { labels: chart.labels, datasets: sets },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: { legend: { display: false } },
+                                scales: {
+                                    x: { grid: { display: false }, ticks: { color: muted, maxTicksLimit: 10, font: { size: 10 } } },
+                                    y: { beginAtZero: true, grid: { color: grid }, ticks: { color: muted, font: { size: 10 } } }
+                                }
+                            }
+                        });
+                    });
                 })();
             </script>
         </body>
