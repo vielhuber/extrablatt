@@ -3925,6 +3925,32 @@ final class Extrablatt
     }
 
     /**
+     * GET counterpart of postGoogle. Returns the decoded body even on an error
+     * status, so callers can report what the API actually complained about.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function getGoogle(string $url, string $bearer): ?array
+    {
+        $ch = curl_init(url: $url);
+        if ($ch === false) {
+            return null;
+        }
+        curl_setopt_array(handle: $ch, options: [
+            CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . $bearer, 'Accept: application/json'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => self::FETCH_CONNECT_TIMEOUT_SECONDS,
+            CURLOPT_TIMEOUT => self::FETCH_MAX_TIME_SECONDS,
+        ]);
+        $response = curl_exec(handle: $ch);
+        if (!is_string(value: $response)) {
+            return null;
+        }
+        $decoded = json_decode(json: $response, associative: true);
+        return is_array(value: $decoded) ? $decoded : null;
+    }
+
+    /**
      * Trade the stored refresh token for a short-lived access token.
      */
     private function googleHealthAccessToken(): ?string
@@ -4116,16 +4142,23 @@ final class Extrablatt
     {
         $from = $today->modify(modifier: '-' . self::GOOGLE_HEALTH_HISTORY_DAYS . ' days')->format(format: 'Y-m-d');
         $until = $today->modify(modifier: '+1 day')->format(format: 'Y-m-d');
-        $response = $this->fetchWithHeaders(
+        $decoded = $this->getGoogle(
             url: self::GOOGLE_HEALTH_BASE_URL . '/users/me/dataTypes/sleep/dataPoints?' . http_build_query(data: [
                 'pageSize' => 1000,
                 'filter' => 'sleep.interval.civil_end_time >= "' . $from . '" AND sleep.interval.civil_end_time < "' . $until . '"',
             ]),
-            headers: ['Authorization: Bearer ' . $accessToken, 'Accept: application/json']
+            bearer: $accessToken
         );
-        $decoded = json_decode(json: (string) $response, associative: true);
         if (!is_array(value: $decoded)) {
-            $emit('  sleep: keine Daten (Scope erteilt? /?health=connect erneut aufrufen)');
+            $emit('  sleep: keine Daten');
+            return;
+        }
+        // A token minted before the sleep scope existed fails here, and the
+        // only cure is a fresh consent — so say that instead of a bare error.
+        $apiError = (string) ($decoded['error']['message'] ?? '');
+        if ($apiError !== '') {
+            $missingScope = ($decoded['error']['details'][0]['reason'] ?? '') === 'MISSING_OAUTH_SCOPE';
+            $emit('  sleep: ' . $apiError . ($missingScope ? ' → /?health=connect erneut aufrufen (Schlaf-Scope fehlt im Token)' : ''));
             return;
         }
         $nights = 0;
