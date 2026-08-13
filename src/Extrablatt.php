@@ -8080,10 +8080,6 @@ final class Extrablatt
             $lightHtml = '<div class="health__lights">' . $lightHtml . '</div>';
         }
         $charts = [
-            ['id' => 'healthSteps', 'title' => 'Schritte', 'type' => 'bar', 'goal' => self::GOOGLE_HEALTH_STEP_GOAL,
-                'data' => $steps],
-            ['id' => 'healthCalories', 'title' => 'Verbrannte Kalorien (kcal)', 'type' => 'bar', 'goal' => 0,
-                'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'calories'))],
             ['id' => 'healthSleep', 'title' => 'Schlaf', 'type' => 'bar', 'goal' => 0,
                 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_minutes']) / 60, precision: 2), array: $rows),
                 'stacks' => [
@@ -8092,6 +8088,10 @@ final class Extrablatt
                     ['label' => 'Leicht', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_light_minutes']) / 60, precision: 2), array: $rows)],
                     ['label' => 'Wach', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_awake_minutes']) / 60, precision: 2), array: $rows)],
                 ]],
+            ['id' => 'healthSteps', 'title' => 'Schritte', 'type' => 'bar', 'goal' => self::GOOGLE_HEALTH_STEP_GOAL,
+                'data' => $steps],
+            ['id' => 'healthCalories', 'title' => 'Kalorienverbrauch', 'type' => 'bar', 'goal' => 0,
+                'data' => array_map(callback: 'intval', array: array_column(array: $rows, column_key: 'calories'))],
         ];
         $chartHtml = '';
         $chartConfig = [];
@@ -10019,7 +10019,8 @@ HTML : '';
                                     data: stack.data,
                                     backgroundColor: shades[index % shades.length],
                                     borderWidth: 0,
-                                    borderRadius: 2
+                                    borderRadius: 2,
+                                    order: 2
                                 };
                             })
                             : [{
@@ -10030,7 +10031,8 @@ HTML : '';
                                 borderWidth: 2,
                                 borderRadius: 3,
                                 pointRadius: 0,
-                                tension: 0.3
+                                tension: 0.3,
+                                order: 2
                             }];
                         if (chart.goal > 0) {
                             sets.push({
@@ -10040,7 +10042,8 @@ HTML : '';
                                 borderColor: muted,
                                 borderDash: [4, 4],
                                 borderWidth: 1,
-                                pointRadius: 0
+                                pointRadius: 0,
+                                order: 2
                             });
                         }
                         if ((chart.trend || []).length > 0) {
@@ -10054,7 +10057,10 @@ HTML : '';
                                 tension: 0.4,
                                 // Keeps the line above the stacked segments
                                 // instead of being summed into the stack.
-                                stack: 'trend'
+                                stack: 'trend',
+                                // Chart.js draws higher order first, so the
+                                // lower number puts the trend over the bars.
+                                order: 1
                             });
                         }
                         new Chart(\$canvas, {
