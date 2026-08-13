@@ -27,6 +27,7 @@ file_put_contents(filename: $projectRoot . '/.htaccess', data: <<<HT
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule "(^|/)\\.(?!well-known)" - [F,L]
+    RewriteRule "^oauth/google\$" "index.php?health=callback" [QSA,L]
 </IfModule>
 <FilesMatch "^(config\\.json|.*\\.sqlite)\$">
     Require all denied

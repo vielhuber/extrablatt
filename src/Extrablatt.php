@@ -3723,7 +3723,6 @@ final class Extrablatt
         ]);
         $response = curl_exec(handle: $ch);
         $status = (int) curl_getinfo(handle: $ch, option: CURLINFO_RESPONSE_CODE);
-        curl_close(handle: $ch);
         if (!is_string(value: $response) || $status !== 200) {
             error_log(message: 'extrablatt google health POST ' . $url . ' → HTTP ' . $status . ': ' . substr(string: (string) $response, offset: 0, length: 300));
             return null;
