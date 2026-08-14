@@ -3826,9 +3826,11 @@ final class Extrablatt
             // Wider window than the other social tabs: the followed Medium
             // authors publish rarely, a 7-day cut would leave the tab empty.
             'medium' => ['label' => 'Medium', 'papers' => ['medium'], 'window_days' => 180, 'sort' => 'hot', 'limit' => 10],
-            // No window: the point of the c't tab is the full archive back to
-            // 1990, browsable and searchable like any other source.
-            'ct' => ['label' => "c't", 'papers' => ['ct'], 'sort' => 'published_desc'],
+            // The full archive back to 1990 stays indexed and searchable, but
+            // the tab itself shows only what stands out right now: the biggest
+            // features of the last few issues. Page count is the proxy — a
+            // six-page piece is a cover story, a one-pager is the masthead.
+            'ct' => ['label' => "c't", 'papers' => ['ct'], 'window_days' => 60, 'sort' => 'rating_desc', 'limit' => 10],
         ];
     }
 
@@ -9435,7 +9437,8 @@ final class Extrablatt
         // Only the first five tabs form the "Zeitung" — beyond Meldungen
         // there is no pager. Order must match the tab row in the template
         // below; search mode has no active tab and gets no pager either.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'ct', 'watch', 'meldungen'];
+        // c't stays out: it's a reference archive, not a page of the paper.
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'meldungen', 'watch'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -9875,9 +9878,9 @@ HTML : '';
                         {$mediaTabHtml['reddit']}
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}
-                        {$mediaTabHtml['ct']}
-                        <a class="viewnav__tab{$watchActive}" href="/?view=watch">Watch</a>
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
+                        <a class="viewnav__tab{$watchActive}" href="/?view=watch">Watch</a>
+                        {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                         {$mediaTabHtml['serien']}
                         {$mediaTabHtml['filme']}
