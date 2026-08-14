@@ -238,10 +238,11 @@ final class Extrablatt
         'AWAKE' => 'sleep_awake_minutes',
     ];
     private const GOOGLE_HEALTH_HISTORY_DAYS = 90;
-    // Issue pages fetched per scrape while the c't archive backfills. ~960
-    // issues since 1990, so the index completes over a few weeks of scrapes
-    // without any single run dragging the whole pipeline down.
-    private const CT_ISSUES_PER_SCRAPE = 15;
+    // Only the newest issues are indexed — roughly 50 articles each, so two
+    // cover the current issue plus its predecessor. Walking the full archive
+    // back to 1990 meant ~48.000 articles, each costing a paywall probe, and
+    // the run never reached the phase-7 upsert that would have persisted them.
+    private const CT_ISSUES_INDEXED = 2;
     // c't switched from monthly to fortnightly in 1997.
     private const CT_FORTNIGHTLY_SINCE = 1997;
     // Ceiling for the per-scrape media cover backfill. The classic media
@@ -1443,7 +1444,6 @@ final class Extrablatt
         preg_match_all(pattern: '~/select/ct/archiv/(\d{4})"~', subject: $index, matches: $yearMatches);
         $years = array_unique(array: $yearMatches[1]);
         rsort(array: $years);
-        $budget = self::CT_ISSUES_PER_SCRAPE;
         $known = array_flip(array: array_map(
             callback: 'strval',
             array: (array) $this->openDatabase()
@@ -1451,36 +1451,40 @@ final class Extrablatt
                 ->fetchAll(mode: PDO::FETCH_COLUMN)
         ));
         $items = [];
+        $processed = 0;
+        // Newest year first, and within it the newest issue — the year loop
+        // continues into the previous year so a January issue still finds its
+        // predecessor.
         foreach ($years as $year) {
             $yearPage = $this->cacheGet(key: 'ct:year:' . $year);
-            if ($yearPage === null || $yearPage === '') {
-                if ($budget <= 0) {
-                    continue;
-                }
+            // The running year gains issues, so its listing is re-fetched
+            // every time; closed years never change and stay cached.
+            if ($yearPage === null || $yearPage === '' || (int) $year === (int) date(format: 'Y')) {
                 $result = $this->fetchViaImpersonate(url: 'https://www.heise.de/select/ct/archiv/' . $year);
-                if ($result->body === null) {
+                if ($result->body === null && ($yearPage === null || $yearPage === '')) {
                     continue;
                 }
-                $budget--;
-                $yearPage = $result->body;
-                $this->cacheSet(key: 'ct:year:' . $year, value: $yearPage);
+                if ($result->body !== null) {
+                    $yearPage = $result->body;
+                    $this->cacheSet(key: 'ct:year:' . $year, value: $yearPage);
+                }
             }
             preg_match_all(pattern: '~/select/ct/archiv/' . $year . '/(\d+)"~', subject: $yearPage, matches: $issueMatches);
             $issues = array_unique(array: $issueMatches[1]);
             rsort(array: $issues, flags: SORT_NUMERIC);
             $issueCount = count(value: $issues);
             foreach ($issues as $issue) {
+                if ($processed >= self::CT_ISSUES_INDEXED) {
+                    return $items;
+                }
+                $processed++;
                 $key = 'ct:issue:' . $year . ':' . $issue;
                 $issuePage = $this->cacheGet(key: $key);
                 if ($issuePage === null || $issuePage === '') {
-                    if ($budget <= 0) {
-                        continue;
-                    }
                     $result = $this->fetchViaImpersonate(url: 'https://www.heise.de/select/ct/archiv/' . $year . '/' . $issue);
                     if ($result->body === null) {
                         continue;
                     }
-                    $budget--;
                     $issuePage = $result->body;
                     $this->cacheSet(key: $key, value: $issuePage);
                 }
@@ -1492,10 +1496,9 @@ final class Extrablatt
                         issuesInYear: $issueCount
                     ) as $item
                 ) {
-                    if (isset($known[$item->link])) {
-                        continue;
+                    if (!isset($known[$item->link])) {
+                        $items[] = $item;
                     }
-                    $items[] = $item;
                 }
             }
         }
