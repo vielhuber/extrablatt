@@ -1423,6 +1423,10 @@ final class Extrablatt
      * per run so a scrape stays predictable. The archive therefore fills in
      * over consecutive scrapes instead of in one multi-hour run.
      *
+     * Articles already in the database are dropped here rather than handed to
+     * the pipeline again: a printed issue never changes, so re-emitting it
+     * would only make every later phase re-examine the entire archive.
+     *
      * @return array<int, FeedItem>
      */
     private function fetchCtArchiveItems(string $paper): array
@@ -1440,6 +1444,12 @@ final class Extrablatt
         $years = array_unique(array: $yearMatches[1]);
         rsort(array: $years);
         $budget = self::CT_ISSUES_PER_SCRAPE;
+        $known = array_flip(array: array_map(
+            callback: 'strval',
+            array: (array) $this->openDatabase()
+                ->query(query: "SELECT url FROM articles WHERE paper = 'ct'")
+                ->fetchAll(mode: PDO::FETCH_COLUMN)
+        ));
         $items = [];
         foreach ($years as $year) {
             $yearPage = $this->cacheGet(key: 'ct:year:' . $year);
@@ -1482,6 +1492,9 @@ final class Extrablatt
                         issuesInYear: $issueCount
                     ) as $item
                 ) {
+                    if (isset($known[$item->link])) {
+                        continue;
+                    }
                     $items[] = $item;
                 }
             }
@@ -4321,17 +4334,40 @@ final class Extrablatt
     private function makeEmit(): callable
     {
         $this->setupStreamingOutput();
-        $padding = str_repeat(string: ' ', times: 8192);
+        // The stream grows downwards, but reading a running scrape means
+        // watching the newest line — so the container reverses its flex
+        // direction and every arriving line lands at the top of the page.
+        echo <<<'HTML'
+            <!doctype html>
+            <meta charset="utf-8">
+            <title>extrablatt scrape</title>
+            <style>
+                :root { color-scheme: light dark; }
+                body { margin: 0; background: #fafafa; color: #18181b; }
+                #log { display: flex; flex-direction: column-reverse; align-items: stretch;
+                       font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                       padding: 12px 14px; }
+                .l { white-space: pre-wrap; word-break: break-word; min-height: 1.45em; }
+                .l--fatal { color: #dc2626; font-weight: 700; }
+                @media (prefers-color-scheme: dark) {
+                    body { background: #09090b; color: #e4e4e7; }
+                    .l--fatal { color: #f87171; }
+                }
+            </style>
+            <div id="log">
+            HTML;
+        // Padding defeats proxy buffering; inside a flex item it collapses.
+        $padding = '<span hidden>' . str_repeat(string: ' ', times: 8192) . '</span>';
         if (!is_dir(filename: $this->logDir)) {
             mkdir(directory: $this->logDir, permissions: 0755, recursive: true);
         }
         $logFile = $this->logDir . '/scrape.log';
-        @file_put_contents(filename: $logFile, data: '');
+        file_put_contents(filename: $logFile, data: '');
         return function (string $line) use ($padding, $logFile): void {
-            echo $line . $padding . "\n";
+            echo '<div class="l">' . htmlspecialchars(string: $line, flags: ENT_QUOTES) . '</div>' . $padding . "\n";
             @ob_flush();
             @flush();
-            @file_put_contents(filename: $logFile, data: $line . "\n", flags: FILE_APPEND);
+            file_put_contents(filename: $logFile, data: $line . "\n", flags: FILE_APPEND);
         };
     }
 
@@ -5442,7 +5478,7 @@ final class Extrablatt
         while (ob_get_level() > 0) {
             ob_end_clean();
         }
-        header(header: 'Content-Type: text/plain; charset=utf-8');
+        header(header: 'Content-Type: text/html; charset=utf-8');
         header(header: 'Cache-Control: no-cache, no-store, must-revalidate');
         header(header: 'X-Accel-Buffering: no');
         if (function_exists(function: 'apache_setenv')) {
@@ -5470,13 +5506,13 @@ final class Extrablatt
                 return;
             }
             $msg = sprintf(
-                "\n💥 FATAL: %s in %s:%d\n",
+                "💥 FATAL: %s in %s:%d",
                 $err['message'] ?? 'unknown',
                 $err['file'] ?? '?',
                 $err['line'] ?? 0
             );
-            @file_put_contents(filename: $logFile, data: $msg, flags: FILE_APPEND);
-            echo $msg;
+            file_put_contents(filename: $logFile, data: "\n" . $msg . "\n", flags: FILE_APPEND);
+            echo '<div class="l l--fatal">' . htmlspecialchars(string: $msg, flags: ENT_QUOTES) . "</div>\n";
             @flush();
         });
     }
