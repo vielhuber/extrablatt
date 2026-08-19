@@ -585,6 +585,131 @@ final class Extrablatt
             return;
         }
 
+        if (isset($_POST['health_action'])) {
+            $action = (string) $_POST['health_action'];
+            $measurementIdInput = trim(string: (string) ($_POST['measurement_id'] ?? ''));
+            $measurementId = $measurementIdInput === ''
+                ? null
+                : filter_var(value: $measurementIdInput, filter: FILTER_VALIDATE_INT);
+            $redirectParameters = ['view' => 'watch'];
+            if ($action === 'delete') {
+                if ($measurementId === false || $measurementId === null || $measurementId < 1) {
+                    $redirectParameters['health_error'] = 'Ungültiger Datensatz.';
+                } else {
+                    $statement = $this->openDatabase()->prepare(query: 'DELETE FROM health_measurements WHERE id = :id');
+                    $statement->execute(params: [':id' => $measurementId]);
+                    $deleted = $statement->rowCount() > 0;
+                    $redirectParameters[$deleted ? 'health_status' : 'health_error'] = $deleted
+                        ? 'deleted'
+                        : 'Datensatz nicht gefunden.';
+                }
+                header(header: 'Location: /?' . http_build_query(data: $redirectParameters), response_code: 303);
+                return;
+            }
+
+            $day = trim(string: (string) ($_POST['day'] ?? ''));
+            $weightInput = str_replace(search: ',', replace: '.', subject: trim(string: (string) ($_POST['weight_kg'] ?? '')));
+            $systolicInput = trim(string: (string) ($_POST['blood_pressure_systolic'] ?? ''));
+            $diastolicInput = trim(string: (string) ($_POST['blood_pressure_diastolic'] ?? ''));
+            $pulseInput = trim(string: (string) ($_POST['pulse'] ?? ''));
+            $date = DateTimeImmutable::createFromFormat(format: '!Y-m-d', datetime: $day);
+            $weight = $weightInput === '' ? null : filter_var(value: $weightInput, filter: FILTER_VALIDATE_FLOAT);
+            $systolic = $systolicInput === '' ? null : filter_var(value: $systolicInput, filter: FILTER_VALIDATE_INT);
+            $diastolic = $diastolicInput === '' ? null : filter_var(value: $diastolicInput, filter: FILTER_VALIDATE_INT);
+            $pulse = $pulseInput === '' ? null : filter_var(value: $pulseInput, filter: FILTER_VALIDATE_INT);
+            $error = '';
+            if ($action !== 'save') {
+                $error = 'Ungültige Aktion.';
+            }
+            if ($error === '' && $measurementId === false) {
+                $error = 'Ungültiger Datensatz.';
+            }
+            if ($error === '' && ($date === false || $date->format(format: 'Y-m-d') !== $day)) {
+                $error = 'Bitte ein gültiges Datum angeben.';
+            }
+            if ($error === '' && ($weight === false || ($weight !== null && $weight <= 0))) {
+                $error = 'Bitte ein gültiges Gewicht angeben.';
+            }
+            if ($error === '' && (($systolic === null) !== ($diastolic === null))) {
+                $error = 'Bitte den systolischen und diastolischen Blutdruck angeben.';
+            }
+            if ($error === '' && ($systolic === false || $diastolic === false
+                || ($systolic !== null && $systolic <= 0) || ($diastolic !== null && $diastolic <= 0))) {
+                $error = 'Bitte einen gültigen Blutdruck angeben.';
+            }
+            if ($error === '' && ($pulse === false || ($pulse !== null && $pulse <= 0))) {
+                $error = 'Bitte einen gültigen Puls angeben.';
+            }
+            if ($error === '' && $weight === null && $systolic === null && $pulse === null) {
+                $error = 'Bitte mindestens einen Messwert angeben.';
+            }
+            if ($error === '' && $measurementId !== null && $measurementId < 1) {
+                $error = 'Ungültiger Datensatz.';
+            }
+            if ($error === '') {
+                $database = $this->openDatabase();
+                if ($measurementId !== null) {
+                    $measurementStatement = $database->prepare(query: 'SELECT 1 FROM health_measurements WHERE id = :id');
+                    $measurementStatement->execute(params: [':id' => $measurementId]);
+                    if ($measurementStatement->fetchColumn() === false) {
+                        $error = 'Datensatz nicht gefunden.';
+                    }
+                }
+            }
+            if ($error === '') {
+                $existingStatement = $database->prepare(
+                    query: 'SELECT id FROM health_measurements WHERE day = :day AND (:id IS NULL OR id != :id)'
+                );
+                $existingStatement->execute(params: [':day' => $day, ':id' => $measurementId]);
+                if ($existingStatement->fetchColumn() !== false) {
+                    $error = 'Für dieses Datum existiert bereits ein Eintrag.';
+                }
+            }
+            if ($error === '' && $measurementId === null) {
+                $statement = $database->prepare(
+                    query: 'INSERT INTO health_measurements
+                        (day, weight_kg, blood_pressure_systolic, blood_pressure_diastolic, pulse, created_at, updated_at)
+                        VALUES (:day, :weight, :systolic, :diastolic, :pulse, :created_at, :updated_at)'
+                );
+                $statement->execute(params: [
+                    ':day' => $day,
+                    ':weight' => $weight,
+                    ':systolic' => $systolic,
+                    ':diastolic' => $diastolic,
+                    ':pulse' => $pulse,
+                    ':created_at' => time(),
+                    ':updated_at' => time(),
+                ]);
+            }
+            if ($error === '' && $measurementId !== null) {
+                $statement = $database->prepare(
+                    query: 'UPDATE health_measurements
+                        SET day = :day, weight_kg = :weight, blood_pressure_systolic = :systolic,
+                            blood_pressure_diastolic = :diastolic, pulse = :pulse, updated_at = :updated_at
+                        WHERE id = :id'
+                );
+                $statement->execute(params: [
+                    ':day' => $day,
+                    ':weight' => $weight,
+                    ':systolic' => $systolic,
+                    ':diastolic' => $diastolic,
+                    ':pulse' => $pulse,
+                    ':updated_at' => time(),
+                    ':id' => $measurementId,
+                ]);
+            }
+            if ($error !== '') {
+                $redirectParameters['health_error'] = $error;
+                if ($measurementId !== null && $measurementId !== false) {
+                    $redirectParameters['edit_measurement'] = $measurementId;
+                }
+            } else {
+                $redirectParameters['health_status'] = 'saved';
+            }
+            header(header: 'Location: /?' . http_build_query(data: $redirectParameters), response_code: 303);
+            return;
+        }
+
         if ($customUrl === '') {
             // Quelle-Dropdown holds only news papers — TV moves into its own
             // dropdown bound to $tvFilter / $_GET['tv'].
@@ -3556,6 +3681,21 @@ final class Extrablatt
                 sleep_start TEXT DEFAULT NULL,
                 sleep_end TEXT DEFAULT NULL,
                 updated_at INTEGER NOT NULL
+            );'
+        );
+        $db->exec(
+            statement:
+            'CREATE TABLE IF NOT EXISTS health_measurements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day TEXT UNIQUE NOT NULL,
+                weight_kg REAL DEFAULT NULL,
+                blood_pressure_systolic INTEGER DEFAULT NULL,
+                blood_pressure_diastolic INTEGER DEFAULT NULL,
+                pulse INTEGER DEFAULT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                CHECK(weight_kg IS NOT NULL OR blood_pressure_systolic IS NOT NULL OR pulse IS NOT NULL),
+                CHECK((blood_pressure_systolic IS NULL) = (blood_pressure_diastolic IS NULL))
             );'
         );
         foreach (
@@ -7996,10 +8136,159 @@ final class Extrablatt
     }
 
     /**
-     * Render the watch's daily rollups as KPI tiles plus Chart.js diagrams.
+     * Render manual measurements and the watch's daily rollups as Chart.js diagrams.
      */
     private function buildHealthBlock(): string
     {
+        $measurementRows = $this->openDatabase()
+            ->query(query: 'SELECT id, day, weight_kg, blood_pressure_systolic, blood_pressure_diastolic, pulse
+                FROM health_measurements ORDER BY day DESC')
+            ->fetchAll(mode: PDO::FETCH_ASSOC);
+        $editMeasurement = null;
+        $editMeasurementId = filter_var(value: $_GET['edit_measurement'] ?? null, filter: FILTER_VALIDATE_INT);
+        if ($editMeasurementId !== false && $editMeasurementId > 0) {
+            foreach ($measurementRows as $measurementRow) {
+                if ((int) $measurementRow['id'] === $editMeasurementId) {
+                    $editMeasurement = $measurementRow;
+                    break;
+                }
+            }
+        }
+        $formDay = (string) ($editMeasurement['day'] ?? date(format: 'Y-m-d'));
+        $formWeight = (string) ($editMeasurement['weight_kg'] ?? '');
+        $formSystolic = (string) ($editMeasurement['blood_pressure_systolic'] ?? '');
+        $formDiastolic = (string) ($editMeasurement['blood_pressure_diastolic'] ?? '');
+        $formPulse = (string) ($editMeasurement['pulse'] ?? '');
+        $formId = $editMeasurement !== null
+            ? '<input type="hidden" name="measurement_id" value="' . (int) $editMeasurement['id'] . '">'
+            : '';
+        $formTitle = $editMeasurement !== null ? 'Messwerte bearbeiten' : 'Messwerte erfassen';
+        $submitLabel = $editMeasurement !== null ? 'Änderungen speichern' : 'Speichern';
+        $cancelLink = $editMeasurement !== null ? '<a class="health-entry__cancel" href="/?view=watch">Abbrechen</a>' : '';
+        $message = '';
+        $healthStatus = (string) ($_GET['health_status'] ?? '');
+        if ($healthStatus === 'saved') {
+            $message = '<p class="health-entry__message health-entry__message--success">Messwerte gespeichert.</p>';
+        }
+        if ($healthStatus === 'deleted') {
+            $message = '<p class="health-entry__message health-entry__message--success">Messwerte gelöscht.</p>';
+        }
+        $healthError = trim(string: (string) ($_GET['health_error'] ?? ''));
+        if ($healthError !== '') {
+            $message = '<p class="health-entry__message health-entry__message--error">'
+                . htmlspecialchars(string: $healthError, flags: ENT_QUOTES) . '</p>';
+        }
+        $measurementTableRows = '';
+        foreach ($measurementRows as $measurementRow) {
+            $weightLabel = $measurementRow['weight_kg'] !== null
+                ? number_format(num: (float) $measurementRow['weight_kg'], decimals: 1, decimal_separator: ',', thousands_separator: '.') . ' kg'
+                : '–';
+            $bloodPressureLabel = $measurementRow['blood_pressure_systolic'] !== null
+                ? (int) $measurementRow['blood_pressure_systolic'] . '/' . (int) $measurementRow['blood_pressure_diastolic']
+                : '–';
+            $pulseLabel = $measurementRow['pulse'] !== null ? (string) (int) $measurementRow['pulse'] : '–';
+            $measurementTableRows .= '<tr>'
+                . '<td><time datetime="' . htmlspecialchars(string: (string) $measurementRow['day'], flags: ENT_QUOTES) . '">'
+                . date(format: 'd.m.Y', timestamp: (int) strtotime(datetime: (string) $measurementRow['day'])) . '</time></td>'
+                . '<td>' . $weightLabel . '</td>'
+                . '<td>' . $bloodPressureLabel . '</td>'
+                . '<td>' . $pulseLabel . '</td>'
+                . '<td class="health-entry__actions"><a href="/?view=watch&amp;edit_measurement=' . (int) $measurementRow['id'] . '">Bearbeiten</a>'
+                . '<form method="post" action="/?view=watch" onsubmit="return confirm(\'Eintrag wirklich löschen?\')">'
+                . '<input type="hidden" name="health_action" value="delete">'
+                . '<input type="hidden" name="measurement_id" value="' . (int) $measurementRow['id'] . '">'
+                . '<button type="submit">Löschen</button></form></td>'
+                . '</tr>';
+        }
+        $measurementTable = $measurementTableRows !== ''
+            ? '<div class="health-entry__table-wrap"><table class="health-entry__table"><thead><tr>'
+                . '<th>Datum</th><th>Gewicht</th><th>Blutdruck</th><th>Puls</th><th></th>'
+                . '</tr></thead><tbody>' . $measurementTableRows . '</tbody></table></div>'
+            : '<p class="health-entry__empty">Noch keine manuellen Messwerte vorhanden.</p>';
+        $measurementHtml = '<section class="health-entry">'
+            . '<h2 class="health-entry__title">' . $formTitle . '</h2>' . $message
+            . '<form class="health-entry__form" method="post" action="/?view=watch">'
+            . '<input type="hidden" name="health_action" value="save">' . $formId
+            . '<label>Datum<input type="date" name="day" value="' . htmlspecialchars(string: $formDay, flags: ENT_QUOTES) . '" required></label>'
+            . '<label>Gewicht (kg)<input type="number" name="weight_kg" value="' . htmlspecialchars(string: $formWeight, flags: ENT_QUOTES) . '" min="0.1" step="0.1" inputmode="decimal"></label>'
+            . '<label>Blutdruck systolisch<input type="number" name="blood_pressure_systolic" value="' . htmlspecialchars(string: $formSystolic, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
+            . '<label>Blutdruck diastolisch<input type="number" name="blood_pressure_diastolic" value="' . htmlspecialchars(string: $formDiastolic, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
+            . '<label>Puls<input type="number" name="pulse" value="' . htmlspecialchars(string: $formPulse, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
+            . '<div class="health-entry__buttons"><button type="submit">' . $submitLabel . '</button>' . $cancelLink . '</div>'
+            . '</form>' . $measurementTable . '</section>';
+
+        $measurementRowsAscending = array_reverse(array: $measurementRows);
+        $measurementCharts = [];
+        foreach (
+            [
+                ['id' => 'healthWeight', 'title' => 'Gewicht', 'column' => 'weight_kg'],
+                ['id' => 'healthPulse', 'title' => 'Puls', 'column' => 'pulse'],
+            ] as $measurementChart
+        ) {
+            $chartRows = array_values(array: array_filter(
+                array: $measurementRowsAscending,
+                callback: fn(array $measurementRow): bool => $measurementRow[$measurementChart['column']] !== null
+            ));
+            $labels = array_map(
+                callback: fn(array $measurementRow): string => date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $measurementRow['day'])),
+                array: $chartRows
+            );
+            $values = array_map(
+                callback: fn(array $measurementRow): float|int => $measurementChart['column'] === 'weight_kg'
+                    ? round(num: (float) $measurementRow[$measurementChart['column']], precision: 1)
+                    : (int) $measurementRow[$measurementChart['column']],
+                array: $chartRows
+            );
+            $trend = [];
+            $span = (int) floor(num: self::GOOGLE_HEALTH_TREND_WINDOW / 2);
+            foreach ($values as $index => $ignored) {
+                $from = max(0, $index - $span);
+                $to = min(count(value: $values) - 1, $index + $span);
+                $window = array_slice(array: $values, offset: $from, length: $to - $from + 1);
+                $trend[] = round(num: array_sum(array: $window) / count(value: $window), precision: 2);
+            }
+            $measurementCharts[] = [
+                'id' => $measurementChart['id'],
+                'type' => 'line',
+                'label' => $measurementChart['title'],
+                'goal' => 0,
+                'labels' => $labels,
+                'data' => $values,
+                'stacks' => [],
+                'series' => [],
+                'trend' => $trend,
+                'points' => true,
+                'beginAtZero' => false,
+            ];
+        }
+        $bloodPressureRows = array_values(array: array_filter(
+            array: $measurementRowsAscending,
+            callback: fn(array $measurementRow): bool => $measurementRow['blood_pressure_systolic'] !== null
+        ));
+        array_splice(array: $measurementCharts, offset: 1, length: 0, replacement: [[
+            'id' => 'healthBloodPressure',
+            'type' => 'line',
+            'label' => 'Blutdruck',
+            'goal' => 0,
+            'labels' => array_map(
+                callback: fn(array $measurementRow): string => date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $measurementRow['day'])),
+                array: $bloodPressureRows
+            ),
+            'data' => [],
+            'stacks' => [],
+            'series' => [
+                ['label' => 'Systolisch', 'data' => array_map(callback: fn(array $measurementRow): int => (int) $measurementRow['blood_pressure_systolic'], array: $bloodPressureRows)],
+                ['label' => 'Diastolisch', 'data' => array_map(callback: fn(array $measurementRow): int => (int) $measurementRow['blood_pressure_diastolic'], array: $bloodPressureRows)],
+            ],
+            'trend' => [],
+            'points' => true,
+            'beginAtZero' => false,
+        ]]);
+        $measurementChartHtml = '';
+        foreach ($measurementCharts as $measurementChart) {
+            $measurementChartHtml .= '<div class="health__chart"><h3 class="health__chart-title">' . $measurementChart['label']
+                . '</h3><div class="health__canvas"><canvas id="' . $measurementChart['id'] . '"></canvas></div></div>';
+        }
         $rows = $this->openDatabase()
             ->query(query: 'SELECT day, steps, floors, calories, sleep_minutes, sleep_period_minutes,
                     sleep_onset_minutes, sleep_deep_minutes, sleep_light_minutes, sleep_rem_minutes,
@@ -8011,7 +8300,10 @@ final class Extrablatt
             $hint = $connected
                 ? 'Verbunden, aber noch keine Daten – beim nächsten Scrape werden sie geholt.'
                 : 'Noch nicht verbunden. <a href="/?health=connect">Google Health jetzt verbinden</a>.';
-            return '<p class="viewnav__empty">' . $hint . '</p>';
+            $payload = htmlspecialchars(string: (string) json_encode(value: $measurementCharts), flags: ENT_QUOTES);
+            return '<section class="health">' . $measurementHtml . $measurementChartHtml
+                . '<p class="viewnav__empty">' . $hint . '</p></section><script src="?asset=js/chart.min.js"></script>'
+                . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
         }
         $rows = array_reverse(array: $rows);
         $days = array_column(array: $rows, column_key: 'day');
@@ -8208,8 +8500,9 @@ final class Extrablatt
                 'trend' => $trend,
             ];
         }
+        $chartConfig = array_merge($measurementCharts, $chartConfig);
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
-        return '<section class="health">' . $lightHtml . $chartHtml . '<div class="health__kpis">' . $kpiHtml . '</div>'
+        return '<section class="health">' . $measurementHtml . $measurementChartHtml . $lightHtml . $chartHtml . '<div class="health__kpis">' . $kpiHtml . '</div>'
             . '</section><script src="?asset=js/chart.min.js"></script>'
             . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
     }
@@ -9470,7 +9763,7 @@ final class Extrablatt
             $activeTabLabel = 'Faktencheck';
         }
         if ($isWatch) {
-            $activeTabLabel = 'Watch';
+            $activeTabLabel = 'Gesundheit';
         }
         // Bottom pager: leaf through the tabs like turning newspaper pages.
         // Only the first five tabs form the "Zeitung" — beyond Meldungen
@@ -9651,6 +9944,28 @@ HTML : '';
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
+                .health-entry { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
+                .health-entry__title { margin: 0 0 12px; font: 700 15px/1.2 system-ui, sans-serif; color: #18181b; }
+                .health-entry__form { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; align-items: end; }
+                .health-entry__form label { display: flex; flex-direction: column; gap: 5px; font: 600 11px/1.2 system-ui, sans-serif; color: #71717a; }
+                .health-entry__form input { width: 100%; min-width: 0; padding: 9px 10px; font: 500 14px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; }
+                .health-entry__form input:focus { outline: none; border-color: #18181b; }
+                .health-entry__buttons { display: flex; align-items: center; gap: 10px; grid-column: 1 / -1; }
+                .health-entry__buttons button { padding: 9px 14px; font: 700 12px/1 system-ui, sans-serif; color: #fff; background: #18181b; border: 0; border-radius: 6px; cursor: pointer; }
+                .health-entry__buttons button:hover { background: #3f3f46; }
+                .health-entry__cancel, .health-entry__actions a, .health-entry__actions button { font: 600 11px/1 system-ui, sans-serif; color: #71717a; }
+                .health-entry__cancel, .health-entry__actions a { text-decoration: underline; text-underline-offset: 2px; }
+                .health-entry__message { margin: 0 0 12px; font: 600 12px/1.4 system-ui, sans-serif; }
+                .health-entry__message--success { color: #15803d; }
+                .health-entry__message--error { color: #b91c1c; }
+                .health-entry__table-wrap { margin-top: 16px; overflow-x: auto; }
+                .health-entry__table { width: 100%; border-collapse: collapse; font: 500 12px/1.3 system-ui, sans-serif; color: #52525b; }
+                .health-entry__table th, .health-entry__table td { padding: 8px; text-align: left; border-top: 1px solid #e4e4e7; white-space: nowrap; }
+                .health-entry__table th { color: #71717a; }
+                .health-entry__actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+                .health-entry__actions form { margin: 0; }
+                .health-entry__actions button { padding: 0; background: none; border: 0; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+                .health-entry__empty { margin: 14px 0 0; font: 500 12px/1.4 system-ui, sans-serif; color: #a1a1aa; }
                 .health__kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
                 .health__kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .health__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
@@ -9681,7 +9996,17 @@ HTML : '';
                 html[data-theme="dark"] .health__kpi-value { color: #fafafa; }
                 html[data-theme="dark"] .health__kpi-label { color: #a1a1aa; }
                 html[data-theme="dark"] .health__chart { border-color: #3f3f46; }
+                html[data-theme="dark"] .health-entry { background: #18181b; border-color: #3f3f46; }
+                html[data-theme="dark"] .health-entry__title { color: #fafafa; }
+                html[data-theme="dark"] .health-entry__form label { color: #a1a1aa; }
+                html[data-theme="dark"] .health-entry__form input { color: #e4e4e7; background: #27272a; border-color: #3f3f46; }
+                html[data-theme="dark"] .health-entry__form input:focus { border-color: #a1a1aa; }
+                html[data-theme="dark"] .health-entry__buttons button { color: #18181b; background: #e4e4e7; }
+                html[data-theme="dark"] .health-entry__table { color: #d4d4d8; }
+                html[data-theme="dark"] .health-entry__table th, html[data-theme="dark"] .health-entry__table td { border-top-color: #3f3f46; }
+                html[data-theme="dark"] .health-entry__cancel, html[data-theme="dark"] .health-entry__actions a, html[data-theme="dark"] .health-entry__actions button { color: #a1a1aa; }
                 @media (max-width: 560px) {
+                    .health-entry__form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
                     .health__kpis { grid-template-columns: repeat(2, 1fr); }
                     .health__lights { grid-template-columns: 1fr; }
                 }
@@ -9918,7 +10243,7 @@ HTML : '';
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
-                        <a class="viewnav__tab{$watchActive}" href="/?view=watch">Watch</a>
+                        <a class="viewnav__tab{$watchActive}" href="/?view=watch">Gesundheit</a>
                         {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                         {$mediaTabHtml['serien']}
@@ -10224,7 +10549,7 @@ HTML : '';
                     }, true);
                 })();
 
-                // Watch tab: instantiate one Chart.js chart per metric. The
+                // Health tab: instantiate one Chart.js chart per metric. The
                 // config travels in a data attribute so the chart code stays
                 // out of the PHP heredoc.
                 (function () {
@@ -10243,10 +10568,24 @@ HTML : '';
                         // chart.stacks and shade them from ink to muted so the
                         // phases stay distinguishable in both themes.
                         var stacked = (chart.stacks || []).length > 0;
+                        let multipleSeries = (chart.series || []).length > 0;
                         var shades = dark
                             ? ['#e4e4e7', '#a1a1aa', '#71717a', '#3f3f46']
                             : ['#18181b', '#52525b', '#a1a1aa', '#d4d4d8'];
-                        var sets = stacked
+                        var sets = multipleSeries
+                            ? chart.series.map(function (series, index) {
+                                return {
+                                    label: series.label,
+                                    data: series.data,
+                                    backgroundColor: 'transparent',
+                                    borderColor: shades[index % shades.length],
+                                    borderWidth: 2,
+                                    pointRadius: chart.points ? 3 : 0,
+                                    tension: 0.3,
+                                    order: 2
+                                };
+                            })
+                            : stacked
                             ? chart.stacks.map(function (stack, index) {
                                 return {
                                     label: stack.label,
@@ -10264,7 +10603,7 @@ HTML : '';
                                 borderColor: ink,
                                 borderWidth: 2,
                                 borderRadius: 3,
-                                pointRadius: 0,
+                                pointRadius: chart.points ? 3 : 0,
                                 tension: 0.3,
                                 order: 2
                             }];
@@ -10314,13 +10653,13 @@ HTML : '';
                                             font: { size: 10 },
                                             // Single-series charts only need
                                             // the trend explained, not the bars.
-                                            filter: function (item) { return stacked || item.text === 'Trend'; }
+                                            filter: function (item) { return stacked || multipleSeries || item.text === 'Trend'; }
                                         }
                                     }
                                 },
                                 scales: {
                                     x: { stacked: stacked, grid: { display: false }, ticks: { color: muted, maxTicksLimit: 10, font: { size: 10 } } },
-                                    y: { stacked: stacked, beginAtZero: true, grid: { color: grid }, ticks: { color: muted, font: { size: 10 } } }
+                                    y: { stacked: stacked, beginAtZero: chart.beginAtZero !== false, grid: { color: grid }, ticks: { color: muted, font: { size: 10 } } }
                                 }
                             }
                         });
