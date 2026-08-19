@@ -603,7 +603,7 @@ final class Extrablatt
                         ? 'deleted'
                         : 'Datensatz nicht gefunden.';
                 }
-                header(header: 'Location: /?' . http_build_query(data: $redirectParameters), response_code: 303);
+                header(header: 'Location: /?' . http_build_query(data: $redirectParameters) . '#health-entry-form', response_code: 303);
                 return;
             }
 
@@ -706,7 +706,7 @@ final class Extrablatt
             } else {
                 $redirectParameters['health_status'] = 'saved';
             }
-            header(header: 'Location: /?' . http_build_query(data: $redirectParameters), response_code: 303);
+            header(header: 'Location: /?' . http_build_query(data: $redirectParameters) . '#health-entry-form', response_code: 303);
             return;
         }
 
@@ -8164,7 +8164,7 @@ final class Extrablatt
             : '';
         $formTitle = $editMeasurement !== null ? 'Messwerte bearbeiten' : 'Messwerte erfassen';
         $submitLabel = $editMeasurement !== null ? 'Änderungen speichern' : 'Speichern';
-        $cancelLink = $editMeasurement !== null ? '<a class="health-entry__cancel" href="/?view=watch">Abbrechen</a>' : '';
+        $cancelLink = $editMeasurement !== null ? '<a class="health-entry__cancel" href="/?view=watch#health-entry-form">Abbrechen</a>' : '';
         $message = '';
         $healthStatus = (string) ($_GET['health_status'] ?? '');
         if ($healthStatus === 'saved') {
@@ -8193,19 +8193,23 @@ final class Extrablatt
                 . '<td>' . $weightLabel . '</td>'
                 . '<td>' . $bloodPressureLabel . '</td>'
                 . '<td>' . $pulseLabel . '</td>'
-                . '<td class="health-entry__actions"><a href="/?view=watch&amp;edit_measurement=' . (int) $measurementRow['id'] . '">Bearbeiten</a>'
+                . '<td class="health-entry__actions"><a class="health-entry__action" href="/?view=watch&amp;edit_measurement=' . (int) $measurementRow['id'] . '#health-entry-form" aria-label="Bearbeiten" title="Bearbeiten">'
+                . '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4Zm9.5-13.5 4 4"/></svg></a>'
                 . '<form method="post" action="/?view=watch" onsubmit="return confirm(\'Eintrag wirklich löschen?\')">'
                 . '<input type="hidden" name="health_action" value="delete">'
                 . '<input type="hidden" name="measurement_id" value="' . (int) $measurementRow['id'] . '">'
-                . '<button type="submit">Löschen</button></form></td>'
+                . '<button class="health-entry__action" type="submit" aria-label="Löschen" title="Löschen">'
+                . '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button></form></td>'
                 . '</tr>';
         }
-        $measurementTable = $measurementTableRows !== ''
+        $measurementTableContent = $measurementTableRows !== ''
             ? '<div class="health-entry__table-wrap"><table class="health-entry__table"><thead><tr>'
-                . '<th>Datum</th><th>Gewicht</th><th>Blutdruck</th><th>Puls</th><th></th>'
+                . '<th>Datum</th><th>Gewicht</th><th>Blutdruck</th><th>Puls</th><th aria-label="Aktionen"></th>'
                 . '</tr></thead><tbody>' . $measurementTableRows . '</tbody></table></div>'
             : '<p class="health-entry__empty">Noch keine manuellen Messwerte vorhanden.</p>';
-        $measurementHtml = '<section class="health-entry">'
+        $measurementTableHtml = '<section class="health-entry"><h2 class="health-entry__title">Messwerte</h2>'
+            . $measurementTableContent . '</section>';
+        $measurementFormHtml = '<section class="health-entry" id="health-entry-form">'
             . '<h2 class="health-entry__title">' . $formTitle . '</h2>' . $message
             . '<form class="health-entry__form" method="post" action="/?view=watch">'
             . '<input type="hidden" name="health_action" value="save">' . $formId
@@ -8215,7 +8219,7 @@ final class Extrablatt
             . '<label>Blutdruck diastolisch<input type="number" name="blood_pressure_diastolic" value="' . htmlspecialchars(string: $formDiastolic, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
             . '<label>Puls<input type="number" name="pulse" value="' . htmlspecialchars(string: $formPulse, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
             . '<div class="health-entry__buttons"><button type="submit">' . $submitLabel . '</button>' . $cancelLink . '</div>'
-            . '</form>' . $measurementTable . '</section>';
+            . '</form></section>';
 
         $measurementRowsAscending = array_reverse(array: $measurementRows);
         $measurementCharts = [];
@@ -8301,8 +8305,8 @@ final class Extrablatt
                 ? 'Verbunden, aber noch keine Daten – beim nächsten Scrape werden sie geholt.'
                 : 'Noch nicht verbunden. <a href="/?health=connect">Google Health jetzt verbinden</a>.';
             $payload = htmlspecialchars(string: (string) json_encode(value: $measurementCharts), flags: ENT_QUOTES);
-            return '<section class="health">' . $measurementHtml . $measurementChartHtml
-                . '<p class="viewnav__empty">' . $hint . '</p></section><script src="?asset=js/chart.min.js"></script>'
+            return '<section class="health">' . $measurementChartHtml . '<p class="viewnav__empty">' . $hint . '</p>'
+                . $measurementTableHtml . $measurementFormHtml . '</section><script src="?asset=js/chart.min.js"></script>'
                 . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
         }
         $rows = array_reverse(array: $rows);
@@ -8500,9 +8504,10 @@ final class Extrablatt
                 'trend' => $trend,
             ];
         }
-        $chartConfig = array_merge($measurementCharts, $chartConfig);
+        $chartConfig = array_merge($chartConfig, $measurementCharts);
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
-        return '<section class="health">' . $measurementHtml . $measurementChartHtml . $lightHtml . $chartHtml . '<div class="health__kpis">' . $kpiHtml . '</div>'
+        return '<section class="health">' . $lightHtml . $chartHtml . $measurementChartHtml
+            . '<div class="health__kpis">' . $kpiHtml . '</div>' . $measurementTableHtml . $measurementFormHtml
             . '</section><script src="?asset=js/chart.min.js"></script>'
             . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
     }
@@ -9953,8 +9958,7 @@ HTML : '';
                 .health-entry__buttons { display: flex; align-items: center; gap: 10px; grid-column: 1 / -1; }
                 .health-entry__buttons button { padding: 9px 14px; font: 700 12px/1 system-ui, sans-serif; color: #fff; background: #18181b; border: 0; border-radius: 6px; cursor: pointer; }
                 .health-entry__buttons button:hover { background: #3f3f46; }
-                .health-entry__cancel, .health-entry__actions a, .health-entry__actions button { font: 600 11px/1 system-ui, sans-serif; color: #71717a; }
-                .health-entry__cancel, .health-entry__actions a { text-decoration: underline; text-underline-offset: 2px; }
+                .health-entry__cancel { font: 600 11px/1 system-ui, sans-serif; color: #71717a; text-decoration: underline; text-underline-offset: 2px; }
                 .health-entry__message { margin: 0 0 12px; font: 600 12px/1.4 system-ui, sans-serif; }
                 .health-entry__message--success { color: #15803d; }
                 .health-entry__message--error { color: #b91c1c; }
@@ -9964,9 +9968,12 @@ HTML : '';
                 .health-entry__table th { color: #71717a; }
                 .health-entry__actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
                 .health-entry__actions form { margin: 0; }
-                .health-entry__actions button { padding: 0; background: none; border: 0; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+                .health-entry__action { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: #71717a; background: none; border: 0; border-radius: 5px; cursor: pointer; text-decoration: none; }
+                .health-entry__action:hover { color: #18181b; background: #e4e4e7; }
+                .health-entry__action:focus-visible { outline: 2px solid #18181b; outline-offset: 1px; }
+                .health-entry__action svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
                 .health-entry__empty { margin: 14px 0 0; font: 500 12px/1.4 system-ui, sans-serif; color: #a1a1aa; }
-                .health__kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+                .health__kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.25rem; }
                 .health__kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .health__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
                 .health__kpi-label { font: 500 11px/1.2 system-ui, sans-serif; color: #71717a; text-align: center; }
@@ -10004,7 +10011,9 @@ HTML : '';
                 html[data-theme="dark"] .health-entry__buttons button { color: #18181b; background: #e4e4e7; }
                 html[data-theme="dark"] .health-entry__table { color: #d4d4d8; }
                 html[data-theme="dark"] .health-entry__table th, html[data-theme="dark"] .health-entry__table td { border-top-color: #3f3f46; }
-                html[data-theme="dark"] .health-entry__cancel, html[data-theme="dark"] .health-entry__actions a, html[data-theme="dark"] .health-entry__actions button { color: #a1a1aa; }
+                html[data-theme="dark"] .health-entry__cancel, html[data-theme="dark"] .health-entry__action { color: #a1a1aa; }
+                html[data-theme="dark"] .health-entry__action:hover { color: #fafafa; background: #3f3f46; }
+                html[data-theme="dark"] .health-entry__action:focus-visible { outline-color: #e4e4e7; }
                 @media (max-width: 560px) {
                     .health-entry__form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
                     .health__kpis { grid-template-columns: repeat(2, 1fr); }
