@@ -255,6 +255,8 @@ final class Extrablatt
     private const GOOGLE_HEALTH_OAUTH_STATE = 'extrablatt-health';
     private const GOOGLE_HEALTH_STEP_GOAL = 10000;
     private const GOOGLE_HEALTH_STEP_AMBER = 7500;
+    private const HEALTH_WEIGHT_GOAL_KG = 105;
+    private const HEALTH_WEIGHT_AMBER_KG = 110;
     // Sleep traffic light, in minutes: 7 h is the target, below 6 h is red.
     private const GOOGLE_HEALTH_SLEEP_GOAL = 420;
     private const GOOGLE_HEALTH_SLEEP_AMBER = 360;
@@ -8390,8 +8392,7 @@ final class Extrablatt
             $kpiHtml .= '<div class="health__kpi"><span class="health__kpi-value">' . $kpi['value']
                 . '</span><span class="health__kpi-label">' . $kpi['label'] . '</span></div>';
         }
-        // Traffic lights: the two metrics worth acting on, reduced to a
-        // red/amber/green verdict on the last seven recorded days.
+        // Traffic lights reduce the actionable metrics to a red/amber/green verdict.
         $lights = [];
         if ($lastSeven !== []) {
             $lights[] = [
@@ -8416,6 +8417,24 @@ final class Extrablatt
                     default => 'red',
                 },
             ];
+        }
+        foreach ($measurementRows as $measurementRow) {
+            if ($measurementRow['weight_kg'] === null) {
+                continue;
+            }
+            $latestWeight = (float) $measurementRow['weight_kg'];
+            $lights[] = [
+                'title' => 'Gewicht',
+                'caption' => 'Zuletzt ' . date(format: 'd.m.', timestamp: (int) strtotime(datetime: (string) $measurementRow['day']))
+                    . ' · Ziel ' . self::HEALTH_WEIGHT_GOAL_KG . ' kg',
+                'value' => number_format(num: $latestWeight, decimals: 1, decimal_separator: ',', thousands_separator: '.') . ' kg',
+                'level' => match (true) {
+                    $latestWeight <= self::HEALTH_WEIGHT_GOAL_KG => 'green',
+                    $latestWeight <= self::HEALTH_WEIGHT_AMBER_KG => 'amber',
+                    default => 'red',
+                },
+            ];
+            break;
         }
         $lightHtml = '';
         foreach ($lights as $light) {
@@ -8506,8 +8525,8 @@ final class Extrablatt
         }
         $chartConfig = array_merge($chartConfig, $measurementCharts);
         $payload = htmlspecialchars(string: (string) json_encode(value: $chartConfig), flags: ENT_QUOTES);
-        return '<section class="health">' . $lightHtml . $chartHtml . $measurementChartHtml
-            . '<div class="health__kpis">' . $kpiHtml . '</div>' . $measurementTableHtml . $measurementFormHtml
+        return '<section class="health">' . $lightHtml . $chartHtml
+            . '<div class="health__kpis">' . $kpiHtml . '</div>' . $measurementChartHtml . $measurementTableHtml . $measurementFormHtml
             . '</section><script src="?asset=js/chart.min.js"></script>'
             . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
     }
@@ -9977,7 +9996,7 @@ HTML : '';
                 .health__kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .health__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
                 .health__kpi-label { font: 500 11px/1.2 system-ui, sans-serif; color: #71717a; text-align: center; }
-                .health__lights { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 1.25rem; }
+                .health__lights { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 1.25rem; }
                 .health__light { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
                 .health__lamps { display: flex; flex-direction: column; gap: 5px; padding: 6px; border-radius: 7px; background: #27272a; }
                 .health__lamp { display: block; width: 13px; height: 13px; border-radius: 50%; opacity: 0.22; }
