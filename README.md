@@ -48,6 +48,8 @@ after install, edit:
 
 the `Gesundheit` tab stores manual weight, blood-pressure, and pulse measurements in SQLite and reads the Google Health API (daily rollups of the paired watch). set `GOOGLE_HEALTH_CLIENT_ID` / `GOOGLE_HEALTH_CLIENT_SECRET` in `.env`, register the site root as the OAuth redirect URI, publish the cloud project (publishing status `Testing` makes google revoke the refresh token every 7 days), then visit `/?health=connect` once.
 
+the `Krypto` tab shows the rolling 7-day BTC/EUR and ETH/EUR price history from CoinGecko with the bundled Chart.js library. market data stays fresh for 15 minutes, with the last cached response retained through temporary API failures; the weekly digest adds the same 7-day movement as prose above the weather.
+
 categories, AI defaults (`temperature`, `timeout`, `max_tries`), and the archive fulltext minimum (8000 chars) are hardcoded in the package.
 
 ## usage
