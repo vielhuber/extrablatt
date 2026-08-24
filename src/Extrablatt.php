@@ -263,9 +263,9 @@ final class Extrablatt
     // Days averaged into the trend line drawn over each chart.
     private const GOOGLE_HEALTH_TREND_WINDOW = 7;
     private const CRYPTO_MARKET_BASE_URL = 'https://api.coingecko.com/api/v3';
-    private const CRYPTO_MARKET_CACHE_KEY = 'crypto_market';
+    private const CRYPTO_MARKET_CACHE_KEY = 'crypto_market_year';
     private const CRYPTO_MARKET_CACHE_TTL_SECONDS = 900;
-    private const CRYPTO_MARKET_HISTORY_DAYS = 7;
+    private const CRYPTO_MARKET_HISTORY_DAYS = 365;
     private const CRYPTO_ASSETS = [
         'bitcoin' => 'BTC',
         'ethereum' => 'ETH',
@@ -7789,7 +7789,6 @@ final class Extrablatt
                 . http_build_query(data: [
                     'vs_currency' => 'eur',
                     'days' => self::CRYPTO_MARKET_HISTORY_DAYS,
-                    'interval' => 'hourly',
                 ]);
             $raw = $this->httpGet(url: $url, timeout: 10);
             $decoded = $raw !== null ? json_decode(json: $raw, associative: true) : null;
@@ -7859,7 +7858,7 @@ final class Extrablatt
     }
 
     /**
-     * Turn the current seven-day crypto movement into a compact market recap.
+     * Turn the current one-year crypto movement into a compact market recap.
      */
     private function generateCryptoProse(array $crypto, array $aiConfig, string $apiKey): ?string
     {
@@ -7877,7 +7876,7 @@ final class Extrablatt
                 continue;
             }
             $lines[] = sprintf(
-                '%s/EUR: aktuell %.2f EUR, 7-Tage-Veränderung %+.2f %%, Spanne %.2f bis %.2f EUR.',
+                '%s/EUR: aktuell %.2f EUR, 1-Jahres-Veränderung %+.2f %%, Spanne %.2f bis %.2f EUR.',
                 (string) $symbol,
                 (float) ($asset['current'] ?? 0),
                 (float) ($asset['change'] ?? 0),
@@ -7889,7 +7888,7 @@ final class Extrablatt
             return null;
         }
         $prompt = "Schreibe einen flüssigen, prägnanten Absatz auf Deutsch (2 bis 3 Sätze) über den " .
-            "aktuellen 7-Tage-Kursverlauf von Bitcoin und Ethereum in Euro:\n\n" .
+            "aktuellen 1-Jahres-Kursverlauf von Bitcoin und Ethereum in Euro:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
             "Anforderungen:\n" .
             "- Keine Aufzählung und keine Prognose.\n" .
@@ -8369,7 +8368,7 @@ final class Extrablatt
                 }
                 $timestamp = (int) floor(num: (int) $pricePoint[0] / 1000);
                 $latestTimestamp = max($latestTimestamp, $timestamp);
-                $labels[] = date(format: 'd.m. H:i', timestamp: $timestamp);
+                $labels[] = date(format: 'd.m.Y', timestamp: $timestamp);
                 $values[] = round(num: (float) $pricePoint[1], precision: 2);
             }
             if ($values === []) {
@@ -8387,12 +8386,12 @@ final class Extrablatt
                 . '<span class="crypto__kpi-value">'
                 . number_format(num: (float) $assetStats['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
                 . ' €</span>'
-                . '<span class="crypto__kpi-label">' . $symbol . '/EUR · 7 Tage '
+                . '<span class="crypto__kpi-label">' . $symbol . '/EUR · 1 Jahr '
                 . '<strong class="crypto__change' . $changeClass . '">' . $changeLabel . '</strong></span>'
                 . '</div>';
             $chartId = 'crypto' . ucfirst(string: $assetId);
             $chartHtml .= '<div class="crypto__chart"><h3 class="crypto__chart-title">' . $symbol
-                . '/EUR · 7 Tage</h3><div class="crypto__canvas"><canvas id="' . $chartId . '"></canvas></div></div>';
+                . '/EUR · 1 Jahr</h3><div class="crypto__canvas"><canvas id="' . $chartId . '"></canvas></div></div>';
             $chartConfig[] = [
                 'id' => $chartId,
                 'type' => 'line',
@@ -9207,7 +9206,7 @@ final class Extrablatt
                 $direction = $change === 0.0 ? 'unverändert' : ($change > 0 ? 'im Plus' : 'im Minus');
                 $sentences[] = (string) $symbol . '/EUR notiert aktuell bei <strong>'
                     . number_format(num: (float) $asset['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
-                    . ' €</strong> und liegt im Sieben-Tage-Vergleich mit <strong>'
+                    . ' €</strong> und liegt im Ein-Jahres-Vergleich mit <strong>'
                     . ($change > 0 ? '+' : '')
                     . number_format(num: $change, decimals: 2, decimal_separator: ',', thousands_separator: '.')
                     . ' %</strong> ' . $direction . '.';
@@ -9218,7 +9217,7 @@ final class Extrablatt
             $body = '<p>' . implode(separator: ' ', array: $sentences) . '</p>';
         }
         return '<div class="digest__crypto">'
-            . '<h2 class="digest__title">Kryptowährungen <span class="digest__date">7-Tage-Trend · EUR</span></h2>'
+            . '<h2 class="digest__title">Kryptowährungen <span class="digest__date">1-Jahres-Trend · EUR</span></h2>'
             . $body
             . '</div>';
     }
@@ -10115,7 +10114,7 @@ final class Extrablatt
             $activeTabLabel = 'Faktencheck';
         }
         if ($isCrypto) {
-            $activeTabLabel = 'Krypto';
+            $activeTabLabel = 'Crypto';
         }
         if ($isWatch) {
             $activeTabLabel = 'Gesundheit';
@@ -10280,7 +10279,7 @@ HTML : '';
                 * { box-sizing: border-box; }
                 html { overflow-y: scroll; }
                 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f4f4f5; color: #111; min-height: 100vh; }
-                main { max-width: 840px; margin: 0 auto; padding: 1.25rem 1rem; }
+                main { max-width: 940px; margin: 0 auto; padding: 1.25rem 1rem; }
                 header.top { display: flex; align-items: baseline; gap: 12px; margin: 0 0 1rem; flex-wrap: wrap; }
                 header.top h1 { font-size: clamp(1.4rem, 4vw, 2rem); margin: 0; letter-spacing: -0.02em; font-weight: 800; }
                 header.top h1 a { color: inherit; text-decoration: none; }
@@ -10628,7 +10627,7 @@ HTML : '';
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
-                        <a class="viewnav__tab{$cryptoActive}" href="/?view=crypto">Krypto</a>
+                        <a class="viewnav__tab{$cryptoActive}" href="/?view=crypto">Crypto</a>
                         <a class="viewnav__tab{$watchActive}" href="/?view=watch">Gesundheit</a>
                         {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>

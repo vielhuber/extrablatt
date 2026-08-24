@@ -36,17 +36,24 @@ $marketData = [
         ],
     ],
 ];
-$invoke('cacheSet', 'crypto_market', (string) json_encode(value: $marketData));
+$invoke('cacheSet', 'crypto_market_year', (string) json_encode(value: $marketData));
+$historyDays = (new ReflectionClass(objectOrClass: $application))->getConstant(name: 'CRYPTO_MARKET_HISTORY_DAYS');
+if ($historyDays !== 365) {
+    throw new RuntimeException(message: 'Expected one year of crypto history.');
+}
 $stats = $invoke('cryptoDigestStats', $marketData);
 if (($stats['assets']['BTC']['change'] ?? null) !== 5.0 || ($stats['assets']['ETH']['change'] ?? null) !== -5.0) {
-    throw new RuntimeException(message: 'Expected seven-day changes for BTC and ETH.');
+    throw new RuntimeException(message: 'Expected one-year changes for BTC and ETH.');
 }
 
 $dashboard = $invoke('renderDashboard', '', '', '', '', '', '', '', '', '', '', 'crypto');
-$assertContains('href="/?view=crypto">Krypto</a>', $dashboard);
-$assertBefore('href="/?view=crypto">Krypto</a>', 'href="/?view=watch">Gesundheit</a>', $dashboard);
+$assertContains('main { max-width: 940px;', $dashboard);
+$assertContains('href="/?view=crypto">Crypto</a>', $dashboard);
+$assertBefore('href="/?view=crypto">Crypto</a>', 'href="/?view=watch">Gesundheit</a>', $dashboard);
 $assertContains('BTC/EUR', $dashboard);
 $assertContains('ETH/EUR', $dashboard);
+$assertContains('BTC/EUR · 1 Jahr', $dashboard);
+$assertContains('ETH/EUR · 1 Jahr', $dashboard);
 $assertContains('63.000,00 €', $dashboard);
 $assertContains('data-chart-config', $dashboard);
 $assertContains('Seite 8 / 9', $dashboard);
@@ -93,7 +100,7 @@ $digest = [
 ];
 $invoke('cacheSet', 'daily_digest', (string) json_encode(value: $digest));
 $digestHtml = $invoke('renderDigestHtml');
-$assertContains('Kryptowährungen', $digestHtml);
+$assertContains('1-Jahres-Trend · EUR', $digestHtml);
 $assertContains('Bitcoin steigt, während Ethereum nachgibt.', $digestHtml);
 $assertBefore('Kryptowährungen', 'Wetter', $digestHtml);
 $fallbackHtml = $invoke('buildCryptoDigestBlock', ['assets' => $digest['crypto']['assets']]);
