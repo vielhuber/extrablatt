@@ -225,6 +225,7 @@ final class Extrablatt
     // morning you woke up.
     // Evening fragments belong to the night ending the following morning;
     // all other sessions stay with their local end date.
+    private const GOOGLE_HEALTH_DAY_SLEEP_FROM_HOUR = 9;
     private const GOOGLE_HEALTH_NIGHT_FROM_HOUR = 18;
     private const GOOGLE_HEALTH_SLEEP_STAGES = [
         'DEEP' => 'sleep_deep_minutes',
@@ -3680,6 +3681,8 @@ final class Extrablatt
                 sleep_minutes INTEGER DEFAULT NULL,
                 sleep_period_minutes INTEGER DEFAULT NULL,
                 sleep_onset_minutes INTEGER DEFAULT NULL,
+                nap_minutes INTEGER DEFAULT NULL,
+                nap_count INTEGER DEFAULT NULL,
                 sleep_deep_minutes INTEGER DEFAULT NULL,
                 sleep_light_minutes INTEGER DEFAULT NULL,
                 sleep_rem_minutes INTEGER DEFAULT NULL,
@@ -3706,7 +3709,7 @@ final class Extrablatt
         );
         foreach (
             [
-                'sleep_minutes', 'sleep_period_minutes', 'sleep_onset_minutes', 'sleep_deep_minutes',
+                'sleep_minutes', 'sleep_period_minutes', 'sleep_onset_minutes', 'nap_minutes', 'nap_count', 'sleep_deep_minutes',
                 'sleep_light_minutes', 'sleep_rem_minutes', 'sleep_awake_minutes'
             ] as $sleepColumn
         ) {
@@ -4285,7 +4288,7 @@ final class Extrablatt
         }
         $columns = [
             'steps', 'floors', 'calories',
-            'sleep_minutes', 'sleep_period_minutes', 'sleep_onset_minutes',
+            'sleep_minutes', 'sleep_period_minutes', 'sleep_onset_minutes', 'nap_minutes', 'nap_count',
             'sleep_deep_minutes', 'sleep_light_minutes', 'sleep_rem_minutes', 'sleep_awake_minutes',
             'sleep_start', 'sleep_end',
         ];
@@ -4373,6 +4376,16 @@ final class Extrablatt
                 $night['sleep_minutes'] = (int) ($night['sleep_minutes'] ?? 0) + (int) ($summary['minutesAsleep'] ?? 0);
                 $night['sleep_period_minutes'] = (int) ($night['sleep_period_minutes'] ?? 0) + (int) ($summary['minutesInSleepPeriod'] ?? 0);
                 $night['sleep_onset_minutes'] = (int) ($night['sleep_onset_minutes'] ?? 0) + (int) ($summary['minutesToFallAsleep'] ?? 0);
+                $night['nap_minutes'] = (int) ($night['nap_minutes'] ?? 0);
+                $night['nap_count'] = (int) ($night['nap_count'] ?? 0);
+                if ($localStart !== null) {
+                    $startHour = (int) gmdate(format: 'G', timestamp: $localStart);
+                    // Google also marks short night fragments as naps, so local daytime is the stable discriminator.
+                    if ($startHour >= self::GOOGLE_HEALTH_DAY_SLEEP_FROM_HOUR && $startHour < self::GOOGLE_HEALTH_NIGHT_FROM_HOUR) {
+                        $night['nap_minutes'] += (int) ($summary['minutesAsleep'] ?? 0);
+                        $night['nap_count']++;
+                    }
+                }
                 foreach ((array) ($summary['stagesSummary'] ?? []) as $stage) {
                     $column = self::GOOGLE_HEALTH_SLEEP_STAGES[(string) ($stage['type'] ?? '')] ?? null;
                     if ($column !== null) {
@@ -8609,7 +8622,7 @@ final class Extrablatt
                 . '</h3><div class="health__canvas"><canvas id="' . $measurementChart['id'] . '"></canvas></div></div>';
         }
         $rows = $this->openDatabase()
-            ->query(query: 'SELECT day, steps, floors, calories, sleep_minutes, sleep_period_minutes,
+            ->query(query: 'SELECT day, steps, floors, calories, sleep_minutes, sleep_period_minutes, nap_minutes, nap_count,
                     sleep_onset_minutes, sleep_deep_minutes, sleep_light_minutes, sleep_rem_minutes,
                     sleep_awake_minutes, sleep_start, sleep_end
                 FROM health_days ORDER BY day DESC LIMIT ' . self::GOOGLE_HEALTH_HISTORY_DAYS)
@@ -8688,6 +8701,40 @@ final class Extrablatt
             if ($onsetAverage > 0) {
                 $kpis[] = ['value' => $onsetAverage . ' min', 'label' => 'Ø Einschlafdauer'];
             }
+            $recentNapMinutes = array_sum(array: array_map(callback: fn(array $r): int => (int) $r['nap_minutes'], array: $recentNights));
+            $recentNapCount = array_sum(array: array_map(callback: fn(array $r): int => (int) $r['nap_count'], array: $recentNights));
+            $averageNapMinutes = $recentNapCount > 0 ? (int) round(num: $recentNapMinutes / $recentNapCount) : null;
+            $previousNightCount = min(7, max(0, count(value: $sleepRows) - count(value: $recentNights)));
+            $previousNights = $previousNightCount > 0
+                ? array_slice(array: $sleepRows, offset: -count(value: $recentNights) - $previousNightCount, length: $previousNightCount)
+                : [];
+            $previousAverage = $previousNights !== []
+                ? (int) round(num: array_sum(array: array_map(callback: fn(array $r): int => (int) $r['sleep_minutes'], array: $previousNights)) / count(value: $previousNights))
+                : null;
+            $trendDifference = $previousAverage !== null ? $sleepAverage - $previousAverage : null;
+            $goalDifference = $sleepAverage - self::GOOGLE_HEALTH_SLEEP_GOAL;
+            $sleepGoalDays = count(value: array_filter(
+                array: $recentNights,
+                callback: fn(array $r): bool => (int) $r['sleep_minutes'] >= self::GOOGLE_HEALTH_SLEEP_GOAL
+            ));
+            $kpis[] = [
+                'value' => $averageNapMinutes !== null ? $formatDuration($averageNapMinutes) : '–',
+                'label' => 'Ø Mittagsschlaf · ' . $recentNapCount . ' Nickerchen',
+            ];
+            $kpis[] = [
+                'value' => $trendDifference !== null
+                    ? ($trendDifference >= 0 ? '+' : '−') . $formatDuration(abs($trendDifference))
+                    : '–',
+                'label' => 'vs. vorige ' . count(value: $previousNights) . ' Nächte',
+            ];
+            $kpis[] = [
+                'value' => $sleepGoalDays . ' / ' . count(value: $recentNights),
+                'label' => 'Schlafziel ≥ ' . intdiv(self::GOOGLE_HEALTH_SLEEP_GOAL, 60) . ' h',
+            ];
+            $kpis[] = [
+                'value' => ($goalDifference >= 0 ? '+' : '−') . $formatDuration(abs($goalDifference)),
+                'label' => 'Ø zum ' . intdiv(self::GOOGLE_HEALTH_SLEEP_GOAL, 60) . '-h-Ziel',
+            ];
         }
         $kpiHtml = '';
         foreach ($kpis as $kpi) {
