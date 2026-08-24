@@ -8366,66 +8366,86 @@ final class Extrablatt
         if ($marketData === null) {
             return '<p class="viewnav__empty">Kursdaten sind gerade nicht erreichbar.</p>';
         }
-        $stats = $this->cryptoDigestStats(marketData: $marketData);
-        if ($stats === []) {
-            return '<p class="viewnav__empty">Keine Kursdaten verfügbar.</p>';
-        }
-        $kpiHtml = '';
-        $chartHtml = '';
+        $periods = [
+            [
+                'label' => '1 Jahr',
+                'chart_suffix' => '',
+                'date_format' => 'd.m.Y',
+                'stats' => $this->cryptoDigestStats(marketData: $marketData),
+            ],
+            [
+                'label' => '4 Wochen',
+                'chart_suffix' => 'FourWeeks',
+                'date_format' => 'd.m.',
+                'stats' => $this->cryptoDigestStats(
+                    marketData: $marketData,
+                    historyDays: self::CRYPTO_DIGEST_HISTORY_DAYS
+                ),
+            ],
+        ];
+        $periodHtml = '';
         $chartConfig = [];
         $latestTimestamp = 0;
-        foreach (self::CRYPTO_ASSETS as $assetId => $symbol) {
-            $asset = $marketData['assets'][$assetId] ?? null;
-            $assetStats = $stats['assets'][$symbol] ?? null;
-            if (!is_array(value: $asset) || !is_array(value: $assetStats)) {
-                continue;
-            }
-            $labels = [];
-            $values = [];
-            foreach ((array) ($asset['prices'] ?? []) as $pricePoint) {
-                if (!is_array(value: $pricePoint) || !isset($pricePoint[0], $pricePoint[1])) {
+        foreach ($periods as $period) {
+            $kpiHtml = '';
+            $chartHtml = '';
+            foreach (self::CRYPTO_ASSETS as $assetId => $symbol) {
+                $assetStats = $period['stats']['assets'][$symbol] ?? null;
+                if (!is_array(value: $assetStats)) {
                     continue;
                 }
-                $timestamp = (int) floor(num: (int) $pricePoint[0] / 1000);
-                $latestTimestamp = max($latestTimestamp, $timestamp);
-                $labels[] = date(format: 'd.m.Y', timestamp: $timestamp);
-                $values[] = round(num: (float) $pricePoint[1], precision: 2);
+                $labels = [];
+                $values = [];
+                foreach ((array) ($assetStats['prices'] ?? []) as $pricePoint) {
+                    if (!is_array(value: $pricePoint) || !isset($pricePoint[0], $pricePoint[1])) {
+                        continue;
+                    }
+                    $timestamp = (int) floor(num: (int) $pricePoint[0] / 1000);
+                    $latestTimestamp = max($latestTimestamp, $timestamp);
+                    $labels[] = date(format: (string) $period['date_format'], timestamp: $timestamp);
+                    $values[] = round(num: (float) $pricePoint[1], precision: 2);
+                }
+                if ($values === []) {
+                    continue;
+                }
+                $change = (float) $assetStats['change'];
+                $changeClass = $change > 0 ? ' crypto__change--up' : ($change < 0 ? ' crypto__change--down' : '');
+                $changeLabel = ($change > 0 ? '+' : '') . number_format(
+                    num: $change,
+                    decimals: 2,
+                    decimal_separator: ',',
+                    thousands_separator: '.'
+                ) . ' %';
+                $kpiHtml .= '<div class="crypto__kpi">'
+                    . '<span class="crypto__kpi-value">'
+                    . number_format(num: (float) $assetStats['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
+                    . ' €</span>'
+                    . '<span class="crypto__kpi-label">' . $symbol . '/EUR · ' . $period['label'] . ' '
+                    . '<strong class="crypto__change' . $changeClass . '">' . $changeLabel . '</strong></span>'
+                    . '</div>';
+                $chartId = 'crypto' . ucfirst(string: $assetId) . $period['chart_suffix'];
+                $chartHtml .= '<div class="crypto__chart"><h3 class="crypto__chart-title">' . $symbol
+                    . '/EUR · ' . $period['label'] . '</h3><div class="crypto__canvas"><canvas id="'
+                    . $chartId . '"></canvas></div></div>';
+                $chartConfig[] = [
+                    'id' => $chartId,
+                    'type' => 'line',
+                    'label' => $symbol . '/EUR',
+                    'goal' => 0,
+                    'labels' => $labels,
+                    'data' => $values,
+                    'stacks' => [],
+                    'series' => [],
+                    'trend' => [],
+                    'points' => false,
+                    'beginAtZero' => false,
+                    'currency' => 'EUR',
+                ];
             }
-            if ($values === []) {
-                continue;
+            if ($chartHtml !== '') {
+                $periodHtml .= '<section class="crypto__period"><h2 class="crypto__period-title">' . $period['label']
+                    . '</h2><div class="crypto__kpis">' . $kpiHtml . '</div>' . $chartHtml . '</section>';
             }
-            $change = (float) $assetStats['change'];
-            $changeClass = $change > 0 ? ' crypto__change--up' : ($change < 0 ? ' crypto__change--down' : '');
-            $changeLabel = ($change > 0 ? '+' : '') . number_format(
-                num: $change,
-                decimals: 2,
-                decimal_separator: ',',
-                thousands_separator: '.'
-            ) . ' %';
-            $kpiHtml .= '<div class="crypto__kpi">'
-                . '<span class="crypto__kpi-value">'
-                . number_format(num: (float) $assetStats['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
-                . ' €</span>'
-                . '<span class="crypto__kpi-label">' . $symbol . '/EUR · 1 Jahr '
-                . '<strong class="crypto__change' . $changeClass . '">' . $changeLabel . '</strong></span>'
-                . '</div>';
-            $chartId = 'crypto' . ucfirst(string: $assetId);
-            $chartHtml .= '<div class="crypto__chart"><h3 class="crypto__chart-title">' . $symbol
-                . '/EUR · 1 Jahr</h3><div class="crypto__canvas"><canvas id="' . $chartId . '"></canvas></div></div>';
-            $chartConfig[] = [
-                'id' => $chartId,
-                'type' => 'line',
-                'label' => $symbol . '/EUR',
-                'goal' => 0,
-                'labels' => $labels,
-                'data' => $values,
-                'stacks' => [],
-                'series' => [],
-                'trend' => [],
-                'points' => false,
-                'beginAtZero' => false,
-                'currency' => 'EUR',
-            ];
         }
         if ($chartConfig === []) {
             return '<p class="viewnav__empty">Keine Kursdaten verfügbar.</p>';
@@ -8437,7 +8457,7 @@ final class Extrablatt
             string: (string) json_encode(value: $chartConfig, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
             flags: ENT_QUOTES
         );
-        return '<section class="crypto"><div class="crypto__kpis">' . $kpiHtml . '</div>' . $chartHtml
+        return '<section class="crypto">' . $periodHtml
             . '<p class="crypto__source">Stand ' . $stand
             . ' · Daten: <a href="https://www.coingecko.com/" target="_blank" rel="noreferrer noopener">CoinGecko</a></p>'
             . '</section><script src="?asset=js/chart.min.js"></script>'
@@ -9207,7 +9227,7 @@ final class Extrablatt
     /**
      * Prefer the stored market prose while retaining a deterministic outage fallback.
      *
-     * @param array{prose?: string, assets?: array<string, array{current?: float, change?: float, prices?: array<int, array{0: int, 1: float}>}>} $crypto
+     * @param array{prose?: string, assets?: array<string, array{current?: float, change?: float}>} $crypto
      */
     private function buildCryptoDigestBlock(array $crypto): string
     {
@@ -9236,72 +9256,9 @@ final class Extrablatt
             }
             $body = '<p>' . implode(separator: ' ', array: $sentences) . '</p>';
         }
-        $widgetHtml = '';
-        $chartHtml = '';
-        $chartConfig = [];
-        foreach ((array) ($crypto['assets'] ?? []) as $symbol => $asset) {
-            if (!is_array(value: $asset) || !isset($asset['current'], $asset['change'])) {
-                continue;
-            }
-            $change = (float) $asset['change'];
-            $changeClass = $change > 0
-                ? ' digest__crypto-change--up'
-                : ($change < 0 ? ' digest__crypto-change--down' : '');
-            $changeLabel = ($change > 0 ? '+' : '') . number_format(
-                num: $change,
-                decimals: 2,
-                decimal_separator: ',',
-                thousands_separator: '.'
-            ) . ' %';
-            $widgetHtml .= '<div class="digest__crypto-kpi">'
-                . '<span class="digest__crypto-kpi-value">'
-                . number_format(num: (float) $asset['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
-                . ' €</span><span class="digest__crypto-kpi-label">' . (string) $symbol . '/EUR · 4 Wochen '
-                . '<strong class="digest__crypto-change' . $changeClass . '">' . $changeLabel . '</strong></span></div>';
-
-            $labels = [];
-            $values = [];
-            foreach ((array) ($asset['prices'] ?? []) as $pricePoint) {
-                if (!is_array(value: $pricePoint) || !isset($pricePoint[0], $pricePoint[1])) {
-                    continue;
-                }
-                $labels[] = date(format: 'd.m.', timestamp: (int) floor(num: (int) $pricePoint[0] / 1000));
-                $values[] = round(num: (float) $pricePoint[1], precision: 2);
-            }
-            if (count(value: $values) < 2) {
-                continue;
-            }
-            $chartId = 'digestCrypto' . (string) $symbol;
-            $chartHtml .= '<div class="digest__crypto-chart"><h3>' . (string) $symbol
-                . '/EUR · 4 Wochen</h3><div class="digest__crypto-canvas"><canvas id="' . $chartId . '"></canvas></div></div>';
-            $chartConfig[] = [
-                'id' => $chartId,
-                'type' => 'line',
-                'label' => (string) $symbol . '/EUR',
-                'goal' => 0,
-                'labels' => $labels,
-                'data' => $values,
-                'stacks' => [],
-                'series' => [],
-                'trend' => [],
-                'points' => false,
-                'beginAtZero' => false,
-                'currency' => 'EUR',
-            ];
-        }
-        $charts = '';
-        if ($chartConfig !== []) {
-            $payload = htmlspecialchars(
-                string: (string) json_encode(value: $chartConfig, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-                flags: ENT_QUOTES
-            );
-            $charts = '<div class="digest__crypto-charts">' . $chartHtml . '</div>'
-                . '<script src="?asset=js/chart.min.js"></script>'
-                . '<script type="application/json" data-chart-config="' . $payload . '"></script>';
-        }
         return '<div class="digest__crypto">'
             . '<h2 class="digest__title">Kryptowährungen <span class="digest__date">4-Wochen-Trend · EUR</span></h2>'
-            . $body . '<div class="digest__crypto-kpis">' . $widgetHtml . '</div>' . $charts
+            . $body
             . '</div>';
     }
 
@@ -10434,6 +10391,8 @@ HTML : '';
                 .health__chart { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
                 .health__chart-title { margin: 0 0 10px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
                 .health__canvas { position: relative; height: 220px; }
+                .crypto__period + .crypto__period { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #d4d4d8; }
+                .crypto__period-title { margin: 0 0 1rem; font: 700 15px/1.2 system-ui, sans-serif; color: #18181b; }
                 .crypto__kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
                 .crypto__kpi { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .crypto__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
@@ -10450,6 +10409,8 @@ HTML : '';
                 html[data-theme="dark"] .health__kpi-value { color: #fafafa; }
                 html[data-theme="dark"] .health__kpi-label { color: #a1a1aa; }
                 html[data-theme="dark"] .health__chart { border-color: #3f3f46; }
+                html[data-theme="dark"] .crypto__period + .crypto__period { border-top-color: #3f3f46; }
+                html[data-theme="dark"] .crypto__period-title { color: #fafafa; }
                 html[data-theme="dark"] .crypto__kpi { background: #18181b; border-color: #3f3f46; }
                 html[data-theme="dark"] .crypto__kpi-value { color: #fafafa; }
                 html[data-theme="dark"] .crypto__kpi-label { color: #a1a1aa; }
@@ -10504,16 +10465,6 @@ HTML : '';
                 .digest__health { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__crypto p,
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
-                .digest__crypto-kpis,
-                .digest__crypto-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 0.9rem; }
-                .digest__crypto-kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 8px; font-family: system-ui, sans-serif; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; }
-                .digest__crypto-kpi-value { font-size: 16px; font-weight: 700; line-height: 1; color: #18181b; }
-                .digest__crypto-kpi-label { font-size: 10px; font-weight: 500; line-height: 1.2; color: #71717a; text-align: center; }
-                .digest .digest__crypto-change--up { color: #15803d; }
-                .digest .digest__crypto-change--down { color: #b91c1c; }
-                .digest__crypto-chart { padding: 10px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; }
-                .digest__crypto-chart h3 { margin: 0 0 8px; font: 600 11px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
-                .digest__crypto-canvas { position: relative; height: 150px; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .bild__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
@@ -10645,13 +10596,6 @@ HTML : '';
                 html[data-theme="dark"] .digest__health { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__crypto p,
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
-                html[data-theme="dark"] .digest__crypto-kpi,
-                html[data-theme="dark"] .digest__crypto-chart { background: #18181b; border-color: #3f3f46; }
-                html[data-theme="dark"] .digest__crypto-kpi-value { color: #fafafa; }
-                html[data-theme="dark"] .digest__crypto-kpi-label,
-                html[data-theme="dark"] .digest__crypto-chart h3 { color: #a1a1aa; }
-                html[data-theme="dark"] .digest .digest__crypto-change--up { color: #4ade80; }
-                html[data-theme="dark"] .digest .digest__crypto-change--down { color: #f87171; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
                 html[data-theme="dark"] .bild__tile { background: #18181b; border-color: #3f3f46; color: #fafafa; }
@@ -10682,8 +10626,6 @@ HTML : '';
                 html[data-theme="dark"] .pager__fill { background: #e4e4e7; }
                 /* Mobile: the tab row collapses into a dropdown menu. */
                 @media (max-width: 767px) {
-                    .digest__crypto-kpis,
-                    .digest__crypto-charts { grid-template-columns: 1fr; }
                     nav.viewnav { display: block; position: relative; border-bottom: none; }
                     .viewnav__toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; font: 700 14px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; border-radius: 8px; padding: 12px 14px; cursor: pointer; }
                     .viewnav__chevron { width: 9px; height: 9px; border-right: 2px solid #71717a; border-bottom: 2px solid #71717a; transform: translateY(-2px) rotate(45deg); transition: transform 0.15s; }

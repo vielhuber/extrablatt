@@ -16,6 +16,11 @@ $assertContains = static function (string $needle, string $haystack): void {
         throw new RuntimeException(message: 'Expected output to contain: ' . $needle);
     }
 };
+$assertNotContains = static function (string $needle, string $haystack): void {
+    if (str_contains(haystack: $haystack, needle: $needle)) {
+        throw new RuntimeException(message: 'Expected output not to contain: ' . $needle);
+    }
+};
 $assertBefore = static function (string $first, string $second, string $haystack): void {
     $firstPosition = strpos(haystack: $haystack, needle: $first);
     $secondPosition = strpos(haystack: $haystack, needle: $second);
@@ -60,6 +65,16 @@ $assertContains('BTC/EUR', $dashboard);
 $assertContains('ETH/EUR', $dashboard);
 $assertContains('BTC/EUR · 1 Jahr', $dashboard);
 $assertContains('ETH/EUR · 1 Jahr', $dashboard);
+$assertContains('BTC/EUR · 4 Wochen', $dashboard);
+$assertContains('ETH/EUR · 4 Wochen', $dashboard);
+$assertContains('id="cryptoBitcoinFourWeeks"', $dashboard);
+$assertContains('id="cryptoEthereumFourWeeks"', $dashboard);
+if (substr_count(haystack: $dashboard, needle: 'class="crypto__chart"') !== 4) {
+    throw new RuntimeException(message: 'Expected four crypto charts.');
+}
+if (substr_count(haystack: $dashboard, needle: 'class="crypto__kpi"') !== 4) {
+    throw new RuntimeException(message: 'Expected four crypto widgets.');
+}
 $assertContains('63.000,00 €', $dashboard);
 $assertContains('data-chart-config', $dashboard);
 $assertContains('Seite 8 / 9', $dashboard);
@@ -100,11 +115,9 @@ $invoke('cacheSet', 'daily_digest', (string) json_encode(value: $digest));
 $digestHtml = $invoke('renderDigestHtml');
 $assertContains('4-Wochen-Trend · EUR', $digestHtml);
 $assertContains('Bitcoin steigt, während Ethereum nachgibt.', $digestHtml);
-$assertContains('BTC/EUR · 4 Wochen', $digestHtml);
-$assertContains('ETH/EUR · 4 Wochen', $digestHtml);
-$assertContains('id="digestCryptoBTC"', $digestHtml);
-$assertContains('id="digestCryptoETH"', $digestHtml);
-$assertContains('data-chart-config', $digestHtml);
+$assertNotContains('class="digest__crypto-kpi"', $digestHtml);
+$assertNotContains('id="digestCryptoBTC"', $digestHtml);
+$assertNotContains('data-chart-config', $digestHtml);
 $assertBefore('Kryptowährungen', 'Wetter', $digestHtml);
 $fallbackHtml = $invoke('buildCryptoDigestBlock', ['assets' => $digest['crypto']['assets']]);
 $assertContains('63.000,00 €', $fallbackHtml);
