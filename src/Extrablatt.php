@@ -266,6 +266,7 @@ final class Extrablatt
     private const CRYPTO_MARKET_CACHE_KEY = 'crypto_market_year';
     private const CRYPTO_MARKET_CACHE_TTL_SECONDS = 900;
     private const CRYPTO_MARKET_HISTORY_DAYS = 365;
+    private const CRYPTO_DIGEST_HISTORY_DAYS = 28;
     private const CRYPTO_ASSETS = [
         'bitcoin' => 'BTC',
         'ethereum' => 'ETH',
@@ -7398,7 +7399,10 @@ final class Extrablatt
         $cryptoMarket = $this->fetchCryptoMarketData();
         $crypto = null;
         if ($cryptoMarket !== null) {
-            $crypto = $this->cryptoDigestStats(marketData: $cryptoMarket);
+            $crypto = $this->cryptoDigestStats(
+                marketData: $cryptoMarket,
+                historyDays: self::CRYPTO_DIGEST_HISTORY_DAYS
+            );
             if ($crypto !== []) {
                 $crypto['prose'] = $this->generateCryptoProse(
                     crypto: $crypto,
@@ -7826,9 +7830,9 @@ final class Extrablatt
     /**
      * Reduce the market series to the values needed for prose and KPI rendering.
      *
-     * @return array{assets: array<string, array{current: float, high: float, low: float, change: float}>}
+     * @return array{assets: array<string, array{current: float, high: float, low: float, change: float, prices: array<int, array{0: int, 1: float}>}>}
      */
-    private function cryptoDigestStats(array $marketData): array
+    private function cryptoDigestStats(array $marketData, ?int $historyDays = null): array
     {
         $stats = ['assets' => []];
         $assets = isset($marketData['assets']) && is_array(value: $marketData['assets']) ? $marketData['assets'] : [];
@@ -7836,12 +7840,26 @@ final class Extrablatt
             if (!is_array(value: $asset) || !isset($asset['symbol'], $asset['prices']) || !is_array(value: $asset['prices'])) {
                 continue;
             }
-            $values = [];
+            $prices = [];
             foreach ($asset['prices'] as $pricePoint) {
-                if (is_array(value: $pricePoint) && isset($pricePoint[1]) && (float) $pricePoint[1] > 0) {
-                    $values[] = (float) $pricePoint[1];
+                if (
+                    is_array(value: $pricePoint)
+                    && isset($pricePoint[0], $pricePoint[1])
+                    && (int) $pricePoint[0] > 0
+                    && (float) $pricePoint[1] > 0
+                ) {
+                    $prices[] = [(int) $pricePoint[0], (float) $pricePoint[1]];
                 }
             }
+            if ($historyDays !== null && $prices !== []) {
+                $latestTimestamp = (int) $prices[array_key_last(array: $prices)][0];
+                $cutoffTimestamp = $latestTimestamp - $historyDays * 86_400_000;
+                $prices = array_values(array: array_filter(
+                    array: $prices,
+                    callback: fn(array $pricePoint): bool => $pricePoint[0] >= $cutoffTimestamp
+                ));
+            }
+            $values = array_column(array: $prices, column_key: 1);
             if (count(value: $values) < 2) {
                 continue;
             }
@@ -7852,13 +7870,14 @@ final class Extrablatt
                 'high' => max($values),
                 'low' => min($values),
                 'change' => round(num: ($current - $start) / $start * 100, precision: 2),
+                'prices' => $prices,
             ];
         }
         return $stats['assets'] === [] ? [] : $stats;
     }
 
     /**
-     * Turn the current one-year crypto movement into a compact market recap.
+     * Turn the recent four-week crypto movement into a compact market recap.
      */
     private function generateCryptoProse(array $crypto, array $aiConfig, string $apiKey): ?string
     {
@@ -7876,7 +7895,7 @@ final class Extrablatt
                 continue;
             }
             $lines[] = sprintf(
-                '%s/EUR: aktuell %.2f EUR, 1-Jahres-Veränderung %+.2f %%, Spanne %.2f bis %.2f EUR.',
+                '%s/EUR: aktuell %.2f EUR, 4-Wochen-Veränderung %+.2f %%, Spanne %.2f bis %.2f EUR.',
                 (string) $symbol,
                 (float) ($asset['current'] ?? 0),
                 (float) ($asset['change'] ?? 0),
@@ -7888,10 +7907,11 @@ final class Extrablatt
             return null;
         }
         $prompt = "Schreibe einen flüssigen, prägnanten Absatz auf Deutsch (2 bis 3 Sätze) über den " .
-            "aktuellen 1-Jahres-Kursverlauf von Bitcoin und Ethereum in Euro:\n\n" .
+            "Kursverlauf von Bitcoin und Ethereum in Euro während der vergangenen vier Wochen:\n\n" .
             implode(separator: "\n", array: $lines) . "\n\n" .
             "Anforderungen:\n" .
             "- Keine Aufzählung und keine Prognose.\n" .
+            "- Nimm ausdrücklich Bezug auf die Entwicklung über den gesamten Vier-Wochen-Zeitraum.\n" .
             "- Vergleiche die Richtung und Stärke beider Kursverläufe und nenne die aktuellen Kurse.\n" .
             "- Ordne Hoch und Tief nur ein, wenn es für den Verlauf hilfreich ist.\n" .
             "- Keine Anlageberatung und keine Kauf- oder Verkaufsempfehlung.\n" .
@@ -9187,7 +9207,7 @@ final class Extrablatt
     /**
      * Prefer the stored market prose while retaining a deterministic outage fallback.
      *
-     * @param array{prose?: string, assets?: array<string, array{current?: float, change?: float}>} $crypto
+     * @param array{prose?: string, assets?: array<string, array{current?: float, change?: float, prices?: array<int, array{0: int, 1: float}>}>} $crypto
      */
     private function buildCryptoDigestBlock(array $crypto): string
     {
@@ -9206,7 +9226,7 @@ final class Extrablatt
                 $direction = $change === 0.0 ? 'unverändert' : ($change > 0 ? 'im Plus' : 'im Minus');
                 $sentences[] = (string) $symbol . '/EUR notiert aktuell bei <strong>'
                     . number_format(num: (float) $asset['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
-                    . ' €</strong> und liegt im Ein-Jahres-Vergleich mit <strong>'
+                    . ' €</strong> und liegt im Vier-Wochen-Vergleich mit <strong>'
                     . ($change > 0 ? '+' : '')
                     . number_format(num: $change, decimals: 2, decimal_separator: ',', thousands_separator: '.')
                     . ' %</strong> ' . $direction . '.';
@@ -9216,9 +9236,72 @@ final class Extrablatt
             }
             $body = '<p>' . implode(separator: ' ', array: $sentences) . '</p>';
         }
+        $widgetHtml = '';
+        $chartHtml = '';
+        $chartConfig = [];
+        foreach ((array) ($crypto['assets'] ?? []) as $symbol => $asset) {
+            if (!is_array(value: $asset) || !isset($asset['current'], $asset['change'])) {
+                continue;
+            }
+            $change = (float) $asset['change'];
+            $changeClass = $change > 0
+                ? ' digest__crypto-change--up'
+                : ($change < 0 ? ' digest__crypto-change--down' : '');
+            $changeLabel = ($change > 0 ? '+' : '') . number_format(
+                num: $change,
+                decimals: 2,
+                decimal_separator: ',',
+                thousands_separator: '.'
+            ) . ' %';
+            $widgetHtml .= '<div class="digest__crypto-kpi">'
+                . '<span class="digest__crypto-kpi-value">'
+                . number_format(num: (float) $asset['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
+                . ' €</span><span class="digest__crypto-kpi-label">' . (string) $symbol . '/EUR · 4 Wochen '
+                . '<strong class="digest__crypto-change' . $changeClass . '">' . $changeLabel . '</strong></span></div>';
+
+            $labels = [];
+            $values = [];
+            foreach ((array) ($asset['prices'] ?? []) as $pricePoint) {
+                if (!is_array(value: $pricePoint) || !isset($pricePoint[0], $pricePoint[1])) {
+                    continue;
+                }
+                $labels[] = date(format: 'd.m.', timestamp: (int) floor(num: (int) $pricePoint[0] / 1000));
+                $values[] = round(num: (float) $pricePoint[1], precision: 2);
+            }
+            if (count(value: $values) < 2) {
+                continue;
+            }
+            $chartId = 'digestCrypto' . (string) $symbol;
+            $chartHtml .= '<div class="digest__crypto-chart"><h3>' . (string) $symbol
+                . '/EUR · 4 Wochen</h3><div class="digest__crypto-canvas"><canvas id="' . $chartId . '"></canvas></div></div>';
+            $chartConfig[] = [
+                'id' => $chartId,
+                'type' => 'line',
+                'label' => (string) $symbol . '/EUR',
+                'goal' => 0,
+                'labels' => $labels,
+                'data' => $values,
+                'stacks' => [],
+                'series' => [],
+                'trend' => [],
+                'points' => false,
+                'beginAtZero' => false,
+                'currency' => 'EUR',
+            ];
+        }
+        $charts = '';
+        if ($chartConfig !== []) {
+            $payload = htmlspecialchars(
+                string: (string) json_encode(value: $chartConfig, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                flags: ENT_QUOTES
+            );
+            $charts = '<div class="digest__crypto-charts">' . $chartHtml . '</div>'
+                . '<script src="?asset=js/chart.min.js"></script>'
+                . '<script type="application/json" data-chart-config="' . $payload . '"></script>';
+        }
         return '<div class="digest__crypto">'
-            . '<h2 class="digest__title">Kryptowährungen <span class="digest__date">1-Jahres-Trend · EUR</span></h2>'
-            . $body
+            . '<h2 class="digest__title">Kryptowährungen <span class="digest__date">4-Wochen-Trend · EUR</span></h2>'
+            . $body . '<div class="digest__crypto-kpis">' . $widgetHtml . '</div>' . $charts
             . '</div>';
     }
 
@@ -10421,6 +10504,16 @@ HTML : '';
                 .digest__health { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__crypto p,
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
+                .digest__crypto-kpis,
+                .digest__crypto-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 0.9rem; }
+                .digest__crypto-kpi { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 8px; font-family: system-ui, sans-serif; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; }
+                .digest__crypto-kpi-value { font-size: 16px; font-weight: 700; line-height: 1; color: #18181b; }
+                .digest__crypto-kpi-label { font-size: 10px; font-weight: 500; line-height: 1.2; color: #71717a; text-align: center; }
+                .digest .digest__crypto-change--up { color: #15803d; }
+                .digest .digest__crypto-change--down { color: #b91c1c; }
+                .digest__crypto-chart { padding: 10px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; }
+                .digest__crypto-chart h3 { margin: 0 0 8px; font: 600 11px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
+                .digest__crypto-canvas { position: relative; height: 150px; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .bild__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
@@ -10552,6 +10645,13 @@ HTML : '';
                 html[data-theme="dark"] .digest__health { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__crypto p,
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
+                html[data-theme="dark"] .digest__crypto-kpi,
+                html[data-theme="dark"] .digest__crypto-chart { background: #18181b; border-color: #3f3f46; }
+                html[data-theme="dark"] .digest__crypto-kpi-value { color: #fafafa; }
+                html[data-theme="dark"] .digest__crypto-kpi-label,
+                html[data-theme="dark"] .digest__crypto-chart h3 { color: #a1a1aa; }
+                html[data-theme="dark"] .digest .digest__crypto-change--up { color: #4ade80; }
+                html[data-theme="dark"] .digest .digest__crypto-change--down { color: #f87171; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
                 html[data-theme="dark"] .bild__tile { background: #18181b; border-color: #3f3f46; color: #fafafa; }
@@ -10582,6 +10682,8 @@ HTML : '';
                 html[data-theme="dark"] .pager__fill { background: #e4e4e7; }
                 /* Mobile: the tab row collapses into a dropdown menu. */
                 @media (max-width: 767px) {
+                    .digest__crypto-kpis,
+                    .digest__crypto-charts { grid-template-columns: 1fr; }
                     nav.viewnav { display: block; position: relative; border-bottom: none; }
                     .viewnav__toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; font: 700 14px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; border-radius: 8px; padding: 12px 14px; cursor: pointer; }
                     .viewnav__chevron { width: 9px; height: 9px; border-right: 2px solid #71717a; border-bottom: 2px solid #71717a; transform: translateY(-2px) rotate(45deg); transition: transform 0.15s; }

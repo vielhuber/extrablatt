@@ -24,15 +24,18 @@ $assertBefore = static function (string $first, string $second, string $haystack
     }
 };
 
+$currentTimestamp = 1_787_086_400_000;
+$fourWeekStartTimestamp = $currentTimestamp - 27 * 86_400_000;
+$annualStartTimestamp = $currentTimestamp - 364 * 86_400_000;
 $marketData = [
     'assets' => [
         'bitcoin' => [
             'symbol' => 'BTC',
-            'prices' => [[1_787_000_000_000, 60_000.0], [1_787_086_400_000, 63_000.0]],
+            'prices' => [[$annualStartTimestamp, 50_000.0], [$fourWeekStartTimestamp, 60_000.0], [$currentTimestamp, 63_000.0]],
         ],
         'ethereum' => [
             'symbol' => 'ETH',
-            'prices' => [[1_787_000_000_000, 3_000.0], [1_787_086_400_000, 2_850.0]],
+            'prices' => [[$annualStartTimestamp, 2_500.0], [$fourWeekStartTimestamp, 3_000.0], [$currentTimestamp, 2_850.0]],
         ],
     ],
 ];
@@ -41,9 +44,12 @@ $historyDays = (new ReflectionClass(objectOrClass: $application))->getConstant(n
 if ($historyDays !== 365) {
     throw new RuntimeException(message: 'Expected one year of crypto history.');
 }
-$stats = $invoke('cryptoDigestStats', $marketData);
-if (($stats['assets']['BTC']['change'] ?? null) !== 5.0 || ($stats['assets']['ETH']['change'] ?? null) !== -5.0) {
-    throw new RuntimeException(message: 'Expected one-year changes for BTC and ETH.');
+$digestStats = $invoke('cryptoDigestStats', $marketData, 28);
+if (($digestStats['assets']['BTC']['change'] ?? null) !== 5.0 || ($digestStats['assets']['ETH']['change'] ?? null) !== -5.0) {
+    throw new RuntimeException(message: 'Expected four-week changes for BTC and ETH.');
+}
+if (count($digestStats['assets']['BTC']['prices'] ?? []) !== 2 || count($digestStats['assets']['ETH']['prices'] ?? []) !== 2) {
+    throw new RuntimeException(message: 'Expected four-week chart points for BTC and ETH.');
 }
 
 $dashboard = $invoke('renderDashboard', '', '', '', '', '', '', '', '', '', '', 'crypto');
@@ -78,15 +84,7 @@ $digest = [
     'top_today' => null,
     'items' => [],
     'crypto' => [
-        'assets' => [
-            'BTC' => [
-                'current' => 63_000.0,
-                'high' => 64_000.0,
-                'low' => 59_000.0,
-                'change' => 5.0,
-            ],
-            'ETH' => ['current' => 2_850.0, 'high' => 3_100.0, 'low' => 2_800.0, 'change' => -5.0],
-        ],
+        'assets' => $digestStats['assets'],
         'prose' => 'Bitcoin steigt, während Ethereum nachgibt.',
     ],
     'weather' => [
@@ -100,8 +98,13 @@ $digest = [
 ];
 $invoke('cacheSet', 'daily_digest', (string) json_encode(value: $digest));
 $digestHtml = $invoke('renderDigestHtml');
-$assertContains('1-Jahres-Trend · EUR', $digestHtml);
+$assertContains('4-Wochen-Trend · EUR', $digestHtml);
 $assertContains('Bitcoin steigt, während Ethereum nachgibt.', $digestHtml);
+$assertContains('BTC/EUR · 4 Wochen', $digestHtml);
+$assertContains('ETH/EUR · 4 Wochen', $digestHtml);
+$assertContains('id="digestCryptoBTC"', $digestHtml);
+$assertContains('id="digestCryptoETH"', $digestHtml);
+$assertContains('data-chart-config', $digestHtml);
 $assertBefore('Kryptowährungen', 'Wetter', $digestHtml);
 $fallbackHtml = $invoke('buildCryptoDigestBlock', ['assets' => $digest['crypto']['assets']]);
 $assertContains('63.000,00 €', $fallbackHtml);
