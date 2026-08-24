@@ -223,14 +223,9 @@ final class Extrablatt
     // Sleep is a session type, not a daily rollup — it comes from the list
     // endpoint and is keyed by the civil date the session ENDED on, i.e. the
     // morning you woke up.
-    // Local hour boundaries that separate night sleep from a daytime nap: a
-    // session ending at or after 18:00 belongs to the night starting that
-    // evening, one ending before 12:00 to the night that just ended.
-    private const GOOGLE_HEALTH_NAP_FROM_HOUR = 12;
+    // Evening fragments belong to the night ending the following morning;
+    // all other sessions stay with their local end date.
     private const GOOGLE_HEALTH_NIGHT_FROM_HOUR = 18;
-    // A night counts as fully recorded once its stage breakdown covers this
-    // much of the time in bed; below that the watch only logged "asleep".
-    private const GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO = 0.9;
     private const GOOGLE_HEALTH_SLEEP_STAGES = [
         'DEEP' => 'sleep_deep_minutes',
         'LIGHT' => 'sleep_light_minutes',
@@ -4315,13 +4310,12 @@ final class Extrablatt
     }
 
     /**
-     * Merge the nightly sleep sessions into the per-day buckets, keyed by the
-     * local date the session ended on — i.e. the morning you woke up.
+     * Merge all sleep sessions into per-day buckets without excluding naps.
      *
      * Three quirks of the live API drive the shape of this: responses carry
-     * only UTC timestamps plus an offset (no civil time), `mainSleep` is set on
-     * naps too so `nap` is the reliable discriminator, and the result is paged
-     * far below the requested page size.
+     * only UTC timestamps plus an offset (no civil time), interrupted nights
+     * arrive as separate fragments, and the result is paged far below the
+     * requested page size.
      *
      * @param array<string, array<string, int|string>> $days
      */
@@ -4366,15 +4360,7 @@ final class Extrablatt
                 }
                 $endOffset = (int) rtrim(string: (string) ($sleep['interval']['endUtcOffset'] ?? '0s'), characters: 's');
                 $localEnd = $endTimestamp + $endOffset;
-                // The `nap` flag is useless here — the watch sets it on every
-                // fragment of an interrupted night. What separates a real nap
-                // from a night is when the session ended: mornings belong to
-                // the night that just finished, evenings to the one starting,
-                // and anything ending mid-afternoon is an actual nap.
                 $endHour = (int) gmdate(format: 'G', timestamp: $localEnd);
-                if ($endHour >= self::GOOGLE_HEALTH_NAP_FROM_HOUR && $endHour < self::GOOGLE_HEALTH_NIGHT_FROM_HOUR) {
-                    continue;
-                }
                 $day = $endHour >= self::GOOGLE_HEALTH_NIGHT_FROM_HOUR
                     ? gmdate(format: 'Y-m-d', timestamp: $localEnd + 86400)
                     : gmdate(format: 'Y-m-d', timestamp: $localEnd);
@@ -8660,20 +8646,9 @@ final class Extrablatt
             ['value' => number_format(num: $best, decimals: 0, decimal_separator: ',', thousands_separator: '.'), 'label' => 'Bester Tag'],
             ['value' => $goalDays . ' / ' . count(value: $lastSeven), 'label' => 'Ziel erreicht'],
         ];
-        // Same for sleep, plus: a night the watch only logged as "asleep"
-        // without a stage breakdown is an incomplete recording and would skew
-        // the phase percentages, so it doesn't count either.
         $sleepRows = array_values(array: array_filter(
             array: $rows,
-            callback: function (array $r): bool {
-                $period = (int) $r['sleep_period_minutes'];
-                if ($period <= 0) {
-                    return false;
-                }
-                $staged = (int) $r['sleep_deep_minutes'] + (int) $r['sleep_light_minutes']
-                    + (int) $r['sleep_rem_minutes'] + (int) $r['sleep_awake_minutes'];
-                return $staged >= $period * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO;
-            }
+            callback: fn(array $r): bool => (int) $r['sleep_minutes'] > 0
         ));
         $sleepAverage = null;
         if ($sleepRows !== []) {
@@ -8781,6 +8756,14 @@ final class Extrablatt
         if ($lightHtml !== '') {
             $lightHtml = '<div class="health__lights">' . $lightHtml . '</div>';
         }
+        $sleepWithoutStages = array_map(
+            callback: function (array $r): float {
+                $classifiedSleep = (int) $r['sleep_deep_minutes'] + (int) $r['sleep_light_minutes']
+                    + (int) $r['sleep_rem_minutes'];
+                return round(num: max(0, (int) $r['sleep_minutes'] - $classifiedSleep) / 60, precision: 2);
+            },
+            array: $rows
+        );
         $charts = [
             ['id' => 'healthSleep', 'title' => 'Schlaf', 'type' => 'bar', 'goal' => 0,
                 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_minutes']) / 60, precision: 2), array: $rows),
@@ -8788,6 +8771,7 @@ final class Extrablatt
                     ['label' => 'Tief', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_deep_minutes']) / 60, precision: 2), array: $rows)],
                     ['label' => 'REM', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_rem_minutes']) / 60, precision: 2), array: $rows)],
                     ['label' => 'Leicht', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_light_minutes']) / 60, precision: 2), array: $rows)],
+                    ['label' => 'Ohne Phasen', 'data' => $sleepWithoutStages],
                     ['label' => 'Wach', 'data' => array_map(callback: fn(array $r): float => round(num: ((int) $r['sleep_awake_minutes']) / 60, precision: 2), array: $rows)],
                 ]],
             ['id' => 'healthSteps', 'title' => 'Schritte', 'type' => 'bar', 'goal' => self::GOOGLE_HEALTH_STEP_GOAL,
@@ -8807,15 +8791,6 @@ final class Extrablatt
             foreach ($chart['data'] as $index => $value) {
                 if ($value <= 0) {
                     continue;
-                }
-                // Stacked series live off their segments: a night the watch
-                // logged without a stage breakdown would draw an empty column,
-                // and a partial one a stump. Same completeness bar as the tiles.
-                if ($chart['stacks'] ?? [] !== []) {
-                    $covered = array_sum(array: array_map(callback: fn(array $s): float => (float) $s['data'][$index], array: $chart['stacks']));
-                    if ($covered < $value * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO) {
-                        continue;
-                    }
                 }
                 $labels[] = date(format: 'd.m.', timestamp: (int) strtotime(datetime: $days[$index]));
                 $values[] = $value;
@@ -9115,12 +9090,7 @@ final class Extrablatt
         ));
         $sleepValues = array_values(array: array_map(
             callback: fn(array $r): int => (int) $r['sleep_minutes'],
-            array: array_filter(array: $rows, callback: function (array $r): bool {
-                $period = (int) $r['sleep_period_minutes'];
-                $staged = (int) $r['sleep_deep_minutes'] + (int) $r['sleep_light_minutes']
-                    + (int) $r['sleep_rem_minutes'] + (int) $r['sleep_awake_minutes'];
-                return $period > 0 && $staged >= $period * self::GOOGLE_HEALTH_SLEEP_COMPLETE_RATIO;
-            })
+            array: array_filter(array: $rows, callback: fn(array $r): bool => (int) $r['sleep_minutes'] > 0)
         ));
         // Rows arrive newest-first, so the first seven are the current week.
         $trend = function (array $values): ?array {
@@ -11010,8 +10980,8 @@ HTML : '';
                         var stacked = (chart.stacks || []).length > 0;
                         let multipleSeries = (chart.series || []).length > 0;
                         var shades = dark
-                            ? ['#e4e4e7', '#a1a1aa', '#71717a', '#3f3f46']
-                            : ['#18181b', '#52525b', '#a1a1aa', '#d4d4d8'];
+                            ? ['#e4e4e7', '#a1a1aa', '#71717a', '#3f3f46', '#52525b']
+                            : ['#18181b', '#52525b', '#a1a1aa', '#d4d4d8', '#71717a'];
                         var sets = multipleSeries
                             ? chart.series.map(function (series, index) {
                                 return {

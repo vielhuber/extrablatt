@@ -3,5 +3,5 @@
         "@prettier/plugin-php": ">=0.25",
         "prettier": ">=3"
     },
-    "version": "2.4.10"
+    "version": "2.4.11"
 }
