@@ -262,6 +262,14 @@ final class Extrablatt
     private const GOOGLE_HEALTH_SLEEP_AMBER = 360;
     // Days averaged into the trend line drawn over each chart.
     private const GOOGLE_HEALTH_TREND_WINDOW = 7;
+    private const CRYPTO_MARKET_BASE_URL = 'https://api.coingecko.com/api/v3';
+    private const CRYPTO_MARKET_CACHE_KEY = 'crypto_market';
+    private const CRYPTO_MARKET_CACHE_TTL_SECONDS = 900;
+    private const CRYPTO_MARKET_HISTORY_DAYS = 7;
+    private const CRYPTO_ASSETS = [
+        'bitcoin' => 'BTC',
+        'ethereum' => 'ETH',
+    ];
 
     /**
      * Per-deployment HMAC key for the auth cookie, derived from AUTH_PASSWORD
@@ -748,7 +756,7 @@ final class Extrablatt
                 $thumbFilter = '';
             }
             $mediaViews = array_keys(array: $this->mediaTabs());
-            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'watch'], $mediaViews), strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'crypto', 'watch'], $mediaViews), strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -7387,6 +7395,19 @@ final class Extrablatt
             return;
         }
 
+        $cryptoMarket = $this->fetchCryptoMarketData();
+        $crypto = null;
+        if ($cryptoMarket !== null) {
+            $crypto = $this->cryptoDigestStats(marketData: $cryptoMarket);
+            if ($crypto !== []) {
+                $crypto['prose'] = $this->generateCryptoProse(
+                    crypto: $crypto,
+                    aiConfig: $aiConfig,
+                    apiKey: $apiKey
+                );
+            }
+        }
+
         $weatherLocation = (string) ($this->loadConfig()['weather_location'] ?? '');
         $weather = $weatherLocation !== '' ? $this->fetchWeather(location: $weatherLocation) : null;
         if ($weather !== null) {
@@ -7435,6 +7456,7 @@ final class Extrablatt
             'window_start' => $cutoff,
             'top_today' => $topToday,
             'items' => $items,
+            'crypto' => $crypto,
             'weather' => $weather,
             'health' => $health,
             'tv' => $tv,
@@ -7445,11 +7467,12 @@ final class Extrablatt
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
         $emit(sprintf(
-            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Wetter: %s, Gesundheit: %s, TV: %s, Medien: %d/%d Blöcke)',
+            '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Krypto: %s, Wetter: %s, Gesundheit: %s, TV: %s, Medien: %d/%d Blöcke)',
             count(value: $items),
             count(value: $articles),
             $todayCount,
             $topToday !== null ? 'ja' : 'nein',
+            $crypto !== null ? (($crypto['prose'] ?? null) !== null ? 'Prosa' : 'nur Zahlen') : 'nein',
             $weather !== null ? sprintf('%s %.0f°C', $weather['location'], $weather['temp_current']) : 'nein',
             $health !== null ? (($health['prose'] ?? null) !== null ? 'Prosa' : 'nur Zahlen') : 'nein',
             $tv !== null ? sprintf('%d Sendungen', (int) ($tv['count'] ?? 0)) : 'nein',
@@ -7729,6 +7752,178 @@ final class Extrablatt
     }
 
     /**
+     * Fetch the rolling EUR price history while retaining stale data through API outages.
+     *
+     * @return array{assets: array<string, array{symbol: string, prices: array<int, array{0: int, 1: float}>}>}|null
+     */
+    private function fetchCryptoMarketData(): ?array
+    {
+        try {
+            $statement = $this->openDatabase()->prepare(
+                query: 'SELECT value, updated_at FROM cache WHERE key = :key'
+            );
+            $statement->execute(params: [':key' => self::CRYPTO_MARKET_CACHE_KEY]);
+            $cacheRow = $statement->fetch(mode: PDO::FETCH_ASSOC);
+        } catch (PDOException $exception) {
+            error_log(message: 'extrablatt crypto cache read failed: ' . $exception->getMessage());
+            $cacheRow = false;
+        }
+        $cached = null;
+        if (is_array(value: $cacheRow)) {
+            $decoded = json_decode(json: (string) $cacheRow['value'], associative: true);
+            if (is_array(value: $decoded) && isset($decoded['assets']) && is_array(value: $decoded['assets'])) {
+                $cached = $decoded;
+            }
+        }
+        if (
+            $cached !== null
+            && is_array(value: $cacheRow)
+            && (int) $cacheRow['updated_at'] > time() - self::CRYPTO_MARKET_CACHE_TTL_SECONDS
+        ) {
+            return $cached;
+        }
+
+        $assets = [];
+        foreach (self::CRYPTO_ASSETS as $assetId => $symbol) {
+            $url = self::CRYPTO_MARKET_BASE_URL . '/coins/' . $assetId . '/market_chart?'
+                . http_build_query(data: [
+                    'vs_currency' => 'eur',
+                    'days' => self::CRYPTO_MARKET_HISTORY_DAYS,
+                    'interval' => 'hourly',
+                ]);
+            $raw = $this->httpGet(url: $url, timeout: 10);
+            $decoded = $raw !== null ? json_decode(json: $raw, associative: true) : null;
+            if (!is_array(value: $decoded) || !isset($decoded['prices']) || !is_array(value: $decoded['prices'])) {
+                return $cached;
+            }
+            $prices = [];
+            foreach ($decoded['prices'] as $pricePoint) {
+                if (!is_array(value: $pricePoint) || !isset($pricePoint[0], $pricePoint[1])) {
+                    continue;
+                }
+                $timestamp = (int) $pricePoint[0];
+                $price = (float) $pricePoint[1];
+                if ($timestamp <= 0 || $price <= 0) {
+                    continue;
+                }
+                $prices[] = [$timestamp, $price];
+            }
+            if (count(value: $prices) < 2) {
+                return $cached;
+            }
+            $assets[$assetId] = [
+                'symbol' => $symbol,
+                'prices' => $prices,
+            ];
+        }
+        $marketData = ['assets' => $assets];
+        $this->cacheSet(
+            key: self::CRYPTO_MARKET_CACHE_KEY,
+            value: (string) json_encode(value: $marketData, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+        );
+        return $marketData;
+    }
+
+    /**
+     * Reduce the market series to the values needed for prose and KPI rendering.
+     *
+     * @return array{assets: array<string, array{current: float, high: float, low: float, change: float}>}
+     */
+    private function cryptoDigestStats(array $marketData): array
+    {
+        $stats = ['assets' => []];
+        $assets = isset($marketData['assets']) && is_array(value: $marketData['assets']) ? $marketData['assets'] : [];
+        foreach ($assets as $asset) {
+            if (!is_array(value: $asset) || !isset($asset['symbol'], $asset['prices']) || !is_array(value: $asset['prices'])) {
+                continue;
+            }
+            $values = [];
+            foreach ($asset['prices'] as $pricePoint) {
+                if (is_array(value: $pricePoint) && isset($pricePoint[1]) && (float) $pricePoint[1] > 0) {
+                    $values[] = (float) $pricePoint[1];
+                }
+            }
+            if (count(value: $values) < 2) {
+                continue;
+            }
+            $start = $values[0];
+            $current = (float) end($values);
+            $stats['assets'][(string) $asset['symbol']] = [
+                'current' => $current,
+                'high' => max($values),
+                'low' => min($values),
+                'change' => round(num: ($current - $start) / $start * 100, precision: 2),
+            ];
+        }
+        return $stats['assets'] === [] ? [] : $stats;
+    }
+
+    /**
+     * Turn the current seven-day crypto movement into a compact market recap.
+     */
+    private function generateCryptoProse(array $crypto, array $aiConfig, string $apiKey): ?string
+    {
+        if (!class_exists(class: 'vielhuber\\aihelper\\aihelper')) {
+            return null;
+        }
+        $provider = (string) ($aiConfig['provider'] ?? '');
+        $model = (string) ($aiConfig['model'] ?? '');
+        if ($provider === '' || $model === '' || $apiKey === '') {
+            return null;
+        }
+        $lines = [];
+        foreach ((array) ($crypto['assets'] ?? []) as $symbol => $asset) {
+            if (!is_array(value: $asset)) {
+                continue;
+            }
+            $lines[] = sprintf(
+                '%s/EUR: aktuell %.2f EUR, 7-Tage-Veränderung %+.2f %%, Spanne %.2f bis %.2f EUR.',
+                (string) $symbol,
+                (float) ($asset['current'] ?? 0),
+                (float) ($asset['change'] ?? 0),
+                (float) ($asset['low'] ?? 0),
+                (float) ($asset['high'] ?? 0)
+            );
+        }
+        if ($lines === []) {
+            return null;
+        }
+        $prompt = "Schreibe einen flüssigen, prägnanten Absatz auf Deutsch (2 bis 3 Sätze) über den " .
+            "aktuellen 7-Tage-Kursverlauf von Bitcoin und Ethereum in Euro:\n\n" .
+            implode(separator: "\n", array: $lines) . "\n\n" .
+            "Anforderungen:\n" .
+            "- Keine Aufzählung und keine Prognose.\n" .
+            "- Vergleiche die Richtung und Stärke beider Kursverläufe und nenne die aktuellen Kurse.\n" .
+            "- Ordne Hoch und Tief nur ein, wenn es für den Verlauf hilfreich ist.\n" .
+            "- Keine Anlageberatung und keine Kauf- oder Verkaufsempfehlung.\n" .
+            "- Hebe 1 bis 2 zentrale Zahlen mit Markdown-Bold (**…**) hervor.\n" .
+            "- Antworte AUSSCHLIESSLICH mit dem Fließtext, ohne Anführungszeichen, ohne Codeblock, ohne Vorrede.";
+        try {
+            $aiClass = 'vielhuber\\aihelper\\aihelper';
+            $aiUrl = (string) ($aiConfig['url'] ?? '');
+            $ai = $aiClass::create(
+                provider: $provider,
+                model: $model,
+                temperature: (float) ($aiConfig['temperature'] ?? 0.4),
+                api_key: $apiKey,
+                max_tries: (int) ($aiConfig['max_tries'] ?? 2),
+                timeout: (int) ($aiConfig['timeout'] ?? 60),
+                url: $aiUrl !== '' ? $aiUrl : null
+            );
+            $response = $ai->ask(prompt: $prompt)['response'] ?? null;
+        } catch (\Throwable) {
+            return null;
+        }
+        if (is_object(value: $response) || is_array(value: $response)) {
+            $response = json_encode(value: $response);
+        }
+        $text = trim(string: (string) $response);
+        $text = (string) preg_replace(pattern: '~^\s*```(?:\w+)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
+        $text = trim(string: $text, characters: " \t\n\r\0\x0B\"'");
+        return $text !== '' ? $text : null;
+    }
+
+    /**
      * Fetch current weather plus an 8-day daily forecast (today + 7) for
      * the given city via Open-Meteo's free, key-less APIs. Returns null on
      * any failure so the digest still renders without a weather block.
@@ -7880,8 +8075,8 @@ final class Extrablatt
 
     /**
      * Plain HTTP GET that returns the response body or null on any non-2xx
-     * / network failure. Local helper for weather lookups — kept private
-     * because it deliberately swallows errors.
+     * / network failure. Local helper for key-less JSON APIs — kept private
+     * because callers deliberately degrade to cached or omitted blocks.
      */
     private function httpGet(string $url, int $timeout = 10): ?string
     {
@@ -8069,6 +8264,12 @@ final class Extrablatt
             $paragraphs .= $this->buildDigestParagraph(item: $item);
         }
 
+        $cryptoHtml = '';
+        $crypto = isset($data['crypto']) && is_array(value: $data['crypto']) ? $data['crypto'] : null;
+        if ($crypto !== null) {
+            $cryptoHtml = $this->buildCryptoDigestBlock(crypto: $crypto);
+        }
+
         $weatherHtml = '';
         $weather = isset($data['weather']) && is_array(value: $data['weather']) ? $data['weather'] : null;
         if ($weather !== null) {
@@ -8097,7 +8298,7 @@ final class Extrablatt
             $healthHtml = $this->buildHealthDigestBlock(health: $health);
         }
 
-        if ($leadHtml === '' && $paragraphs === '' && $weatherHtml === '' && $healthHtml === '' && $tvHtml === '' && $mediaHtml === '') {
+        if ($leadHtml === '' && $paragraphs === '' && $cryptoHtml === '' && $weatherHtml === '' && $healthHtml === '' && $tvHtml === '' && $mediaHtml === '') {
             return '';
         }
 
@@ -8105,7 +8306,7 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $cryptoHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
     }
 
     /**
@@ -8135,6 +8336,93 @@ final class Extrablatt
             . '<h2 class="digest__title">' . $heading . ' <span class="digest__date">' . $subtitle . '</span></h2>'
             . $body
             . '</div>';
+    }
+
+    /**
+     * Render Bitcoin and Ethereum EUR histories with the bundled Chart.js asset.
+     */
+    private function buildCryptoBlock(): string
+    {
+        $marketData = $this->fetchCryptoMarketData();
+        if ($marketData === null) {
+            return '<p class="viewnav__empty">Kursdaten sind gerade nicht erreichbar.</p>';
+        }
+        $stats = $this->cryptoDigestStats(marketData: $marketData);
+        if ($stats === []) {
+            return '<p class="viewnav__empty">Keine Kursdaten verfügbar.</p>';
+        }
+        $kpiHtml = '';
+        $chartHtml = '';
+        $chartConfig = [];
+        $latestTimestamp = 0;
+        foreach (self::CRYPTO_ASSETS as $assetId => $symbol) {
+            $asset = $marketData['assets'][$assetId] ?? null;
+            $assetStats = $stats['assets'][$symbol] ?? null;
+            if (!is_array(value: $asset) || !is_array(value: $assetStats)) {
+                continue;
+            }
+            $labels = [];
+            $values = [];
+            foreach ((array) ($asset['prices'] ?? []) as $pricePoint) {
+                if (!is_array(value: $pricePoint) || !isset($pricePoint[0], $pricePoint[1])) {
+                    continue;
+                }
+                $timestamp = (int) floor(num: (int) $pricePoint[0] / 1000);
+                $latestTimestamp = max($latestTimestamp, $timestamp);
+                $labels[] = date(format: 'd.m. H:i', timestamp: $timestamp);
+                $values[] = round(num: (float) $pricePoint[1], precision: 2);
+            }
+            if ($values === []) {
+                continue;
+            }
+            $change = (float) $assetStats['change'];
+            $changeClass = $change > 0 ? ' crypto__change--up' : ($change < 0 ? ' crypto__change--down' : '');
+            $changeLabel = ($change > 0 ? '+' : '') . number_format(
+                num: $change,
+                decimals: 2,
+                decimal_separator: ',',
+                thousands_separator: '.'
+            ) . ' %';
+            $kpiHtml .= '<div class="crypto__kpi">'
+                . '<span class="crypto__kpi-value">'
+                . number_format(num: (float) $assetStats['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
+                . ' €</span>'
+                . '<span class="crypto__kpi-label">' . $symbol . '/EUR · 7 Tage '
+                . '<strong class="crypto__change' . $changeClass . '">' . $changeLabel . '</strong></span>'
+                . '</div>';
+            $chartId = 'crypto' . ucfirst(string: $assetId);
+            $chartHtml .= '<div class="crypto__chart"><h3 class="crypto__chart-title">' . $symbol
+                . '/EUR · 7 Tage</h3><div class="crypto__canvas"><canvas id="' . $chartId . '"></canvas></div></div>';
+            $chartConfig[] = [
+                'id' => $chartId,
+                'type' => 'line',
+                'label' => $symbol . '/EUR',
+                'goal' => 0,
+                'labels' => $labels,
+                'data' => $values,
+                'stacks' => [],
+                'series' => [],
+                'trend' => [],
+                'points' => false,
+                'beginAtZero' => false,
+                'currency' => 'EUR',
+            ];
+        }
+        if ($chartConfig === []) {
+            return '<p class="viewnav__empty">Keine Kursdaten verfügbar.</p>';
+        }
+        $stand = $latestTimestamp > 0
+            ? date(format: 'd.m.Y H:i', timestamp: $latestTimestamp) . ' Uhr'
+            : date(format: 'd.m.Y H:i') . ' Uhr';
+        $payload = htmlspecialchars(
+            string: (string) json_encode(value: $chartConfig, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            flags: ENT_QUOTES
+        );
+        return '<section class="crypto"><div class="crypto__kpis">' . $kpiHtml . '</div>' . $chartHtml
+            . '<p class="crypto__source">Stand ' . $stand
+            . ' · Daten: <a href="https://www.coingecko.com/" target="_blank" rel="noreferrer noopener">CoinGecko</a></p>'
+            . '</section><script src="?asset=js/chart.min.js"></script>'
+            . '<script type="application/json" data-chart-config="' . $payload . '"></script>';
     }
 
     /**
@@ -8309,7 +8597,7 @@ final class Extrablatt
             $payload = htmlspecialchars(string: (string) json_encode(value: $measurementCharts), flags: ENT_QUOTES);
             return '<section class="health">' . $measurementChartHtml . '<p class="viewnav__empty">' . $hint . '</p>'
                 . $measurementTableHtml . $measurementFormHtml . '</section><script src="?asset=js/chart.min.js"></script>'
-                . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
+                . '<script type="application/json" data-chart-config="' . $payload . '"></script>';
         }
         $rows = array_reverse(array: $rows);
         $days = array_column(array: $rows, column_key: 'day');
@@ -8528,7 +8816,7 @@ final class Extrablatt
         return '<section class="health">' . $lightHtml . $chartHtml
             . '<div class="health__kpis">' . $kpiHtml . '</div>' . $measurementChartHtml . $measurementTableHtml . $measurementFormHtml
             . '</section><script src="?asset=js/chart.min.js"></script>'
-            . '<script id="healthData" type="application/json" data-charts="' . $payload . '"></script>';
+            . '<script type="application/json" data-chart-config="' . $payload . '"></script>';
     }
 
     /**
@@ -8895,6 +9183,44 @@ final class Extrablatt
         $text = (string) preg_replace(pattern: '~^\s*```(?:\w+)?\s*|\s*```\s*$~i', replacement: '', subject: $text);
         $text = trim(string: $text, characters: " \t\n\r\0\x0B\"'");
         return $text !== '' ? $text : null;
+    }
+
+    /**
+     * Prefer the stored market prose while retaining a deterministic outage fallback.
+     *
+     * @param array{prose?: string, assets?: array<string, array{current?: float, change?: float}>} $crypto
+     */
+    private function buildCryptoDigestBlock(array $crypto): string
+    {
+        $prose = trim(string: (string) ($crypto['prose'] ?? ''));
+        if ($prose !== '') {
+            $escaped = htmlspecialchars(string: $prose, flags: ENT_QUOTES);
+            $escaped = (string) preg_replace(pattern: '/\*\*(.+?)\*\*/s', replacement: '<strong>$1</strong>', subject: $escaped);
+            $body = '<p>' . $escaped . '</p>';
+        } else {
+            $sentences = [];
+            foreach ((array) ($crypto['assets'] ?? []) as $symbol => $asset) {
+                if (!is_array(value: $asset) || !isset($asset['current'], $asset['change'])) {
+                    continue;
+                }
+                $change = (float) $asset['change'];
+                $direction = $change === 0.0 ? 'unverändert' : ($change > 0 ? 'im Plus' : 'im Minus');
+                $sentences[] = (string) $symbol . '/EUR notiert aktuell bei <strong>'
+                    . number_format(num: (float) $asset['current'], decimals: 2, decimal_separator: ',', thousands_separator: '.')
+                    . ' €</strong> und liegt im Sieben-Tage-Vergleich mit <strong>'
+                    . ($change > 0 ? '+' : '')
+                    . number_format(num: $change, decimals: 2, decimal_separator: ',', thousands_separator: '.')
+                    . ' %</strong> ' . $direction . '.';
+            }
+            if ($sentences === []) {
+                return '';
+            }
+            $body = '<p>' . implode(separator: ' ', array: $sentences) . '</p>';
+        }
+        return '<div class="digest__crypto">'
+            . '<h2 class="digest__title">Kryptowährungen <span class="digest__date">7-Tage-Trend · EUR</span></h2>'
+            . $body
+            . '</div>';
     }
 
     /**
@@ -9747,18 +10073,20 @@ final class Extrablatt
         $isZeitung = !$isSearch && $viewFilter === 'zeitung';
         $isFactcheck = !$isSearch && $viewFilter === 'factcheck';
         $isBild = !$isSearch && $viewFilter === 'bild';
+        $isCrypto = !$isSearch && $viewFilter === 'crypto';
         $isWatch = !$isSearch && $viewFilter === 'watch';
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset, the media tabs when media=<tab> is set; "Meldungen"
         // covers every other meldungen state.
-        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isWatch && $tvFilter === 'all';
-        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isWatch && !$isTalkshowView && $mediaFilter !== '';
-        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isWatch && !$isTalkshowView && !$isMediaView;
+        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isCrypto && !$isWatch && $tvFilter === 'all';
+        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isCrypto && !$isWatch && !$isTalkshowView && $mediaFilter !== '';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isCrypto && !$isWatch && !$isTalkshowView && !$isMediaView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
         $bildActive = $isBild ? ' viewnav__tab--active' : '';
+        $cryptoActive = $isCrypto ? ' viewnav__tab--active' : '';
         $watchActive = $isWatch ? ' viewnav__tab--active' : '';
         $mediaTabHtml = [];
         foreach ($this->mediaTabs() as $tabKey => $tab) {
@@ -9786,15 +10114,17 @@ final class Extrablatt
         if ($isFactcheck) {
             $activeTabLabel = 'Faktencheck';
         }
+        if ($isCrypto) {
+            $activeTabLabel = 'Krypto';
+        }
         if ($isWatch) {
             $activeTabLabel = 'Gesundheit';
         }
-        // Bottom pager: leaf through the tabs like turning newspaper pages.
-        // Only the first five tabs form the "Zeitung" — beyond Meldungen
-        // there is no pager. Order must match the tab row in the template
-        // below; search mode has no active tab and gets no pager either.
+        // Bottom pager: leaf through the editorial and personal-data tabs
+        // like turning newspaper pages. Order must match the tab row in the
+        // template below; search mode has no active tab and gets no pager.
         // c't stays out: it's a reference archive, not a page of the paper.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'meldungen', 'watch'];
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'meldungen', 'crypto', 'watch'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -9813,6 +10143,9 @@ final class Extrablatt
         }
         if ($isFactcheck) {
             $activeView = 'factcheck';
+        }
+        if ($isCrypto) {
+            $activeView = 'crypto';
         }
         if ($isWatch) {
             $activeView = 'watch';
@@ -9862,6 +10195,7 @@ final class Extrablatt
 HTML : '';
         $factcheckBlock = $isFactcheck ? $this->buildFactCheckBlock(statement: $factcheckStatement, pending: $factcheckPending) : '';
         $bildBlock = $isBild ? $this->buildBildBlock() : '';
+        $cryptoBlock = $isCrypto ? $this->buildCryptoBlock() : '';
         $watchBlock = $isWatch ? $this->buildHealthBlock() : '';
 
         $searchValue = htmlspecialchars(string: $searchQuery, flags: ENT_QUOTES);
@@ -10018,10 +10352,28 @@ HTML : '';
                 .health__chart { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
                 .health__chart-title { margin: 0 0 10px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
                 .health__canvas { position: relative; height: 220px; }
+                .crypto__kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
+                .crypto__kpi { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 14px 8px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
+                .crypto__kpi-value { font: 700 20px/1 system-ui, sans-serif; color: #18181b; }
+                .crypto__kpi-label { font: 500 11px/1.2 system-ui, sans-serif; color: #71717a; text-align: center; }
+                .crypto__change { color: #71717a; }
+                .crypto__change--up { color: #15803d; }
+                .crypto__change--down { color: #b91c1c; }
+                .crypto__chart { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; }
+                .crypto__chart-title { margin: 0 0 10px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
+                .crypto__canvas { position: relative; height: 220px; }
+                .crypto__source { margin: -0.35rem 0 0; font: 500 10px/1.4 system-ui, sans-serif; color: #a1a1aa; text-align: right; }
+                .crypto__source a { color: inherit; }
                 html[data-theme="dark"] .health__kpi { background: #18181b; border-color: #3f3f46; }
                 html[data-theme="dark"] .health__kpi-value { color: #fafafa; }
                 html[data-theme="dark"] .health__kpi-label { color: #a1a1aa; }
                 html[data-theme="dark"] .health__chart { border-color: #3f3f46; }
+                html[data-theme="dark"] .crypto__kpi { background: #18181b; border-color: #3f3f46; }
+                html[data-theme="dark"] .crypto__kpi-value { color: #fafafa; }
+                html[data-theme="dark"] .crypto__kpi-label { color: #a1a1aa; }
+                html[data-theme="dark"] .crypto__change--up { color: #4ade80; }
+                html[data-theme="dark"] .crypto__change--down { color: #f87171; }
+                html[data-theme="dark"] .crypto__chart { border-color: #3f3f46; }
                 html[data-theme="dark"] .health-entry { background: #18181b; border-color: #3f3f46; }
                 html[data-theme="dark"] .health-entry__title { color: #fafafa; }
                 html[data-theme="dark"] .health-entry__form label { color: #a1a1aa; }
@@ -10037,6 +10389,7 @@ HTML : '';
                     .health-entry__form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
                     .health__kpis { grid-template-columns: repeat(2, 1fr); }
                     .health__lights { grid-template-columns: 1fr; }
+                    .crypto__kpis { grid-template-columns: 1fr; }
                 }
                 .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; }
                 .pager__page { display: flex; flex-direction: column; align-items: center; gap: 6px; font: 600 13px/1 system-ui, sans-serif; color: #71717a; letter-spacing: 0.02em; }
@@ -10064,8 +10417,10 @@ HTML : '';
                 .digest__sources a { color: #a1a1aa; text-decoration: none; margin: 0 8px 0 0; display: inline-block; }
                 .digest__sources a:last-child { margin-right: 0; }
                 .digest__sources a:hover { color: #18181b; text-decoration: underline; }
+                .digest__crypto,
                 .digest__weather,
                 .digest__health { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
+                .digest__crypto p,
                 .digest__weather p { font-size: 15px; color: #3f3f46; margin: 0; }
                 .digest__tv { margin-top: 1.3rem; padding-top: 1.2rem; border-top: 1px solid #d4d4d8; }
                 .digest__tv p { font-size: 15px; color: #3f3f46; margin: 0; }
@@ -10193,8 +10548,10 @@ HTML : '';
                 html[data-theme="dark"] .digest__sources { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a { color: #71717a; }
                 html[data-theme="dark"] .digest__sources a:hover { color: #e4e4e7; }
+                html[data-theme="dark"] .digest__crypto,
                 html[data-theme="dark"] .digest__weather,
                 html[data-theme="dark"] .digest__health { border-top-color: #3f3f46; }
+                html[data-theme="dark"] .digest__crypto p,
                 html[data-theme="dark"] .digest__weather p { color: #d4d4d8; }
                 html[data-theme="dark"] .digest__tv { border-top-color: #3f3f46; }
                 html[data-theme="dark"] .digest__tv p { color: #d4d4d8; }
@@ -10271,6 +10628,7 @@ HTML : '';
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
+                        <a class="viewnav__tab{$cryptoActive}" href="/?view=crypto">Krypto</a>
                         <a class="viewnav__tab{$watchActive}" href="/?view=watch">Gesundheit</a>
                         {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
@@ -10285,6 +10643,7 @@ HTML : '';
                 {$meldungenBlock}
                 {$factcheckBlock}
                 {$bildBlock}
+                {$cryptoBlock}
                 {$watchBlock}
                 {$searchBlock}
                 {$pagerHtml}
@@ -10577,13 +10936,13 @@ HTML : '';
                     }, true);
                 })();
 
-                // Health tab: instantiate one Chart.js chart per metric. The
-                // config travels in a data attribute so the chart code stays
-                // out of the PHP heredoc.
+                // Data tabs instantiate one bundled Chart.js chart per metric.
+                // The config travels in a data attribute so the chart code
+                // stays out of the PHP heredoc.
                 (function () {
-                    var \$data = document.getElementById('healthData');
+                    var \$data = document.querySelector('[data-chart-config]');
                     if (!\$data || typeof Chart === 'undefined') { return; }
-                    var charts = JSON.parse(\$data.getAttribute('data-charts') || '[]');
+                    var charts = JSON.parse(\$data.getAttribute('data-chart-config') || '[]');
                     var dark = document.documentElement.getAttribute('data-theme') === 'dark';
                     var ink = dark ? '#e4e4e7' : '#18181b';
                     var muted = dark ? '#71717a' : '#a1a1aa';
@@ -10592,6 +10951,16 @@ HTML : '';
                     charts.forEach(function (chart) {
                         var \$canvas = document.getElementById(chart.id);
                         if (!\$canvas) { return; }
+                        let currency = chart.currency || '';
+                        let formatValue = function (value) {
+                            if (currency === '') { return value; }
+                            return new Intl.NumberFormat('de-DE', {
+                                style: 'currency',
+                                currency: currency,
+                                minimumFractionDigits: 0,
+                                maximumFractionDigits: Number(value) >= 1000 ? 0 : 2
+                            }).format(Number(value));
+                        };
                         // Stacked charts (sleep stages) carry their series in
                         // chart.stacks and shade them from ink to muted so the
                         // phases stay distinguishable in both themes.
@@ -10683,11 +11052,27 @@ HTML : '';
                                             // the trend explained, not the bars.
                                             filter: function (item) { return stacked || multipleSeries || item.text === 'Trend'; }
                                         }
+                                    },
+                                    tooltip: {
+                                        callbacks: {
+                                            label: function (context) {
+                                                return context.dataset.label + ': ' + formatValue(context.parsed.y);
+                                            }
+                                        }
                                     }
                                 },
                                 scales: {
                                     x: { stacked: stacked, grid: { display: false }, ticks: { color: muted, maxTicksLimit: 10, font: { size: 10 } } },
-                                    y: { stacked: stacked, beginAtZero: chart.beginAtZero !== false, grid: { color: grid }, ticks: { color: muted, font: { size: 10 } } }
+                                    y: {
+                                        stacked: stacked,
+                                        beginAtZero: chart.beginAtZero !== false,
+                                        grid: { color: grid },
+                                        ticks: {
+                                            color: muted,
+                                            font: { size: 10 },
+                                            callback: function (value) { return formatValue(value); }
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -10699,4 +11084,3 @@ HTML : '';
         HTML;
     }
 }
-
