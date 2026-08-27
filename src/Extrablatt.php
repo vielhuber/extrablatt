@@ -3988,9 +3988,9 @@ final class Extrablatt
             'hackernews' => ['label' => 'Hacker News', 'papers' => ['hackernews'], 'window_days' => 7, 'limit' => 10],
             'reddit' => ['label' => 'Reddit', 'papers' => ['reddit'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
             'x' => ['label' => 'X', 'papers' => ['x'], 'window_days' => 7, 'sort' => 'hot', 'limit' => 10],
-            // Wider window than the other social tabs: the followed Medium
-            // authors publish rarely, a 7-day cut would leave the tab empty.
-            'medium' => ['label' => 'Medium', 'papers' => ['medium'], 'window_days' => 180, 'sort' => 'hot', 'limit' => 10],
+            // Wider window than the other social tabs: followed Medium authors
+            // publish rarely and read posts are excluded from the ten slots.
+            'medium' => ['label' => 'Medium', 'papers' => ['medium'], 'window_days' => 365, 'sort' => 'hot', 'limit' => 10],
             // The full archive back to 1990 stays indexed and searchable, but
             // the tab itself shows only what stands out right now: the biggest
             // features of the last few issues. Page count is the proxy — a
