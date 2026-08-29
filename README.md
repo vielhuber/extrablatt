@@ -21,7 +21,7 @@ composer require vielhuber/extrablatt
 after install, edit:
 
 - `.data/config.json`: papers (see schema below)
-- `.data/.env`: `AI_API_KEY` / `AUTH_PASSWORD` / `AI_PROVIDER` / `AI_MODEL`
+- `.data/.env`: `AI_API_KEY` / `AI_BASE_URL` / `AUTH_PASSWORD` / `AI_PROVIDER` / `AI_MODEL`
 - `.data/cookies/`: drop cookie exports per host into
 - `.data/database.sqlite`: restore database (optional)
 
