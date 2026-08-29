@@ -616,11 +616,13 @@ final class Extrablatt
 
             $day = trim(string: (string) ($_POST['day'] ?? ''));
             $weightInput = str_replace(search: ',', replace: '.', subject: trim(string: (string) ($_POST['weight_kg'] ?? '')));
+            $bodyFatInput = str_replace(search: ',', replace: '.', subject: trim(string: (string) ($_POST['body_fat_percentage'] ?? '')));
             $systolicInput = trim(string: (string) ($_POST['blood_pressure_systolic'] ?? ''));
             $diastolicInput = trim(string: (string) ($_POST['blood_pressure_diastolic'] ?? ''));
             $pulseInput = trim(string: (string) ($_POST['pulse'] ?? ''));
             $date = DateTimeImmutable::createFromFormat(format: '!Y-m-d', datetime: $day);
             $weight = $weightInput === '' ? null : filter_var(value: $weightInput, filter: FILTER_VALIDATE_FLOAT);
+            $bodyFat = $bodyFatInput === '' ? null : filter_var(value: $bodyFatInput, filter: FILTER_VALIDATE_FLOAT);
             $systolic = $systolicInput === '' ? null : filter_var(value: $systolicInput, filter: FILTER_VALIDATE_INT);
             $diastolic = $diastolicInput === '' ? null : filter_var(value: $diastolicInput, filter: FILTER_VALIDATE_INT);
             $pulse = $pulseInput === '' ? null : filter_var(value: $pulseInput, filter: FILTER_VALIDATE_INT);
@@ -636,6 +638,12 @@ final class Extrablatt
             }
             if ($error === '' && ($weight === false || ($weight !== null && $weight <= 0))) {
                 $error = 'Bitte ein gültiges Gewicht angeben.';
+            }
+            if ($error === '' && ($bodyFat === false || ($bodyFat !== null && ($bodyFat <= 0 || $bodyFat > 100)))) {
+                $error = 'Bitte einen gültigen Körperfettanteil angeben.';
+            }
+            if ($error === '' && $bodyFat !== null && $weight === null) {
+                $error = 'Bitte zum Körperfettanteil auch das Gewicht angeben.';
             }
             if ($error === '' && (($systolic === null) !== ($diastolic === null))) {
                 $error = 'Bitte den systolischen und diastolischen Blutdruck angeben.';
@@ -675,12 +683,14 @@ final class Extrablatt
             if ($error === '' && $measurementId === null) {
                 $statement = $database->prepare(
                     query: 'INSERT INTO health_measurements
-                        (day, weight_kg, blood_pressure_systolic, blood_pressure_diastolic, pulse, created_at, updated_at)
-                        VALUES (:day, :weight, :systolic, :diastolic, :pulse, :created_at, :updated_at)'
+                        (day, weight_kg, body_fat_percentage, blood_pressure_systolic, blood_pressure_diastolic, pulse,
+                            created_at, updated_at)
+                        VALUES (:day, :weight, :body_fat, :systolic, :diastolic, :pulse, :created_at, :updated_at)'
                 );
                 $statement->execute(params: [
                     ':day' => $day,
                     ':weight' => $weight,
+                    ':body_fat' => $bodyFat,
                     ':systolic' => $systolic,
                     ':diastolic' => $diastolic,
                     ':pulse' => $pulse,
@@ -691,13 +701,15 @@ final class Extrablatt
             if ($error === '' && $measurementId !== null) {
                 $statement = $database->prepare(
                     query: 'UPDATE health_measurements
-                        SET day = :day, weight_kg = :weight, blood_pressure_systolic = :systolic,
-                            blood_pressure_diastolic = :diastolic, pulse = :pulse, updated_at = :updated_at
+                        SET day = :day, weight_kg = :weight, body_fat_percentage = :body_fat,
+                            blood_pressure_systolic = :systolic, blood_pressure_diastolic = :diastolic,
+                            pulse = :pulse, updated_at = :updated_at
                         WHERE id = :id'
                 );
                 $statement->execute(params: [
                     ':day' => $day,
                     ':weight' => $weight,
+                    ':body_fat' => $bodyFat,
                     ':systolic' => $systolic,
                     ':diastolic' => $diastolic,
                     ':pulse' => $pulse,
@@ -3698,6 +3710,7 @@ final class Extrablatt
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 day TEXT UNIQUE NOT NULL,
                 weight_kg REAL DEFAULT NULL,
+                body_fat_percentage REAL DEFAULT NULL,
                 blood_pressure_systolic INTEGER DEFAULT NULL,
                 blood_pressure_diastolic INTEGER DEFAULT NULL,
                 pulse INTEGER DEFAULT NULL,
@@ -3717,6 +3730,12 @@ final class Extrablatt
         }
         $this->addColumnIfMissing(db: $db, table: 'health_days', column: 'sleep_start', definition: 'TEXT DEFAULT NULL');
         $this->addColumnIfMissing(db: $db, table: 'health_days', column: 'sleep_end', definition: 'TEXT DEFAULT NULL');
+        $this->addColumnIfMissing(
+            db: $db,
+            table: 'health_measurements',
+            column: 'body_fat_percentage',
+            definition: 'REAL DEFAULT NULL'
+        );
         $this->runMigrations(db: $db);
         $db->exec(statement: 'CREATE INDEX IF NOT EXISTS idx_articles_category ON articles(category);');
         return $db;
@@ -8469,7 +8488,8 @@ final class Extrablatt
     private function buildHealthBlock(): string
     {
         $measurementRows = $this->openDatabase()
-            ->query(query: 'SELECT id, day, weight_kg, blood_pressure_systolic, blood_pressure_diastolic, pulse
+            ->query(query: 'SELECT id, day, weight_kg, body_fat_percentage,
+                    blood_pressure_systolic, blood_pressure_diastolic, pulse
                 FROM health_measurements ORDER BY day DESC')
             ->fetchAll(mode: PDO::FETCH_ASSOC);
         $editMeasurement = null;
@@ -8484,6 +8504,7 @@ final class Extrablatt
         }
         $formDay = (string) ($editMeasurement['day'] ?? date(format: 'Y-m-d'));
         $formWeight = (string) ($editMeasurement['weight_kg'] ?? '');
+        $formBodyFat = (string) ($editMeasurement['body_fat_percentage'] ?? '');
         $formSystolic = (string) ($editMeasurement['blood_pressure_systolic'] ?? '');
         $formDiastolic = (string) ($editMeasurement['blood_pressure_diastolic'] ?? '');
         $formPulse = (string) ($editMeasurement['pulse'] ?? '');
@@ -8511,6 +8532,9 @@ final class Extrablatt
             $weightLabel = $measurementRow['weight_kg'] !== null
                 ? number_format(num: (float) $measurementRow['weight_kg'], decimals: 1, decimal_separator: ',', thousands_separator: '.') . ' kg'
                 : '–';
+            $bodyFatLabel = $measurementRow['body_fat_percentage'] !== null
+                ? number_format(num: (float) $measurementRow['body_fat_percentage'], decimals: 1, decimal_separator: ',', thousands_separator: '.') . ' %'
+                : '–';
             $bloodPressureLabel = $measurementRow['blood_pressure_systolic'] !== null
                 ? (int) $measurementRow['blood_pressure_systolic'] . '/' . (int) $measurementRow['blood_pressure_diastolic']
                 : '–';
@@ -8519,6 +8543,7 @@ final class Extrablatt
                 . '<td><time datetime="' . htmlspecialchars(string: (string) $measurementRow['day'], flags: ENT_QUOTES) . '">'
                 . date(format: 'd.m.Y', timestamp: (int) strtotime(datetime: (string) $measurementRow['day'])) . '</time></td>'
                 . '<td>' . $weightLabel . '</td>'
+                . '<td>' . $bodyFatLabel . '</td>'
                 . '<td>' . $bloodPressureLabel . '</td>'
                 . '<td>' . $pulseLabel . '</td>'
                 . '<td class="health-entry__actions"><a class="health-entry__action" href="/?view=watch&amp;edit_measurement=' . (int) $measurementRow['id'] . '#health-entry-form" aria-label="Bearbeiten" title="Bearbeiten">'
@@ -8532,7 +8557,7 @@ final class Extrablatt
         }
         $measurementTableContent = $measurementTableRows !== ''
             ? '<div class="health-entry__table-wrap"><table class="health-entry__table"><thead><tr>'
-                . '<th>Datum</th><th>Gewicht</th><th>Blutdruck</th><th>Puls</th><th aria-label="Aktionen"></th>'
+                . '<th>Datum</th><th>Gewicht</th><th>Körperfettanteil</th><th>Blutdruck</th><th>Puls</th><th aria-label="Aktionen"></th>'
                 . '</tr></thead><tbody>' . $measurementTableRows . '</tbody></table></div>'
             : '<p class="health-entry__empty">Noch keine manuellen Messwerte vorhanden.</p>';
         $measurementTableHtml = '<section class="health-entry"><h2 class="health-entry__title">Messwerte</h2>'
@@ -8543,6 +8568,7 @@ final class Extrablatt
             . '<input type="hidden" name="health_action" value="save">' . $formId
             . '<label>Datum<input type="date" name="day" value="' . htmlspecialchars(string: $formDay, flags: ENT_QUOTES) . '" required></label>'
             . '<label>Gewicht (kg)<input type="number" name="weight_kg" value="' . htmlspecialchars(string: $formWeight, flags: ENT_QUOTES) . '" min="0.1" step="0.1" inputmode="decimal"></label>'
+            . '<label>Körperfettanteil (%)<input type="number" name="body_fat_percentage" value="' . htmlspecialchars(string: $formBodyFat, flags: ENT_QUOTES) . '" min="0.1" max="100" step="0.1" inputmode="decimal"></label>'
             . '<label>Blutdruck systolisch<input type="number" name="blood_pressure_systolic" value="' . htmlspecialchars(string: $formSystolic, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
             . '<label>Blutdruck diastolisch<input type="number" name="blood_pressure_diastolic" value="' . htmlspecialchars(string: $formDiastolic, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
             . '<label>Puls<input type="number" name="pulse" value="' . htmlspecialchars(string: $formPulse, flags: ENT_QUOTES) . '" min="1" step="1" inputmode="numeric"></label>'
@@ -8554,6 +8580,7 @@ final class Extrablatt
         foreach (
             [
                 ['id' => 'healthWeight', 'title' => 'Gewicht', 'column' => 'weight_kg'],
+                ['id' => 'healthBodyFat', 'title' => 'Körperfettanteil', 'column' => 'body_fat_percentage'],
                 ['id' => 'healthPulse', 'title' => 'Puls', 'column' => 'pulse'],
             ] as $measurementChart
         ) {
@@ -8567,6 +8594,7 @@ final class Extrablatt
             );
             $values = array_map(
                 callback: fn(array $measurementRow): float|int => $measurementChart['column'] === 'weight_kg'
+                    || $measurementChart['column'] === 'body_fat_percentage'
                     ? round(num: (float) $measurementRow[$measurementChart['column']], precision: 1)
                     : (int) $measurementRow[$measurementChart['column']],
                 array: $chartRows
@@ -8597,7 +8625,7 @@ final class Extrablatt
             array: $measurementRowsAscending,
             callback: fn(array $measurementRow): bool => $measurementRow['blood_pressure_systolic'] !== null
         ));
-        array_splice(array: $measurementCharts, offset: 1, length: 0, replacement: [[
+        array_splice(array: $measurementCharts, offset: 2, length: 0, replacement: [[
             'id' => 'healthBloodPressure',
             'type' => 'line',
             'label' => 'Blutdruck',
@@ -10360,7 +10388,7 @@ HTML : '';
                 .viewnav__empty { font: 500 13px/1.5 system-ui, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
                 .health-entry { margin-bottom: 1.25rem; padding: 14px; border: 1px solid #e4e4e7; border-radius: 10px; background: #fafafa; }
                 .health-entry__title { margin: 0 0 12px; font: 700 15px/1.2 system-ui, sans-serif; color: #18181b; }
-                .health-entry__form { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; align-items: end; }
+                .health-entry__form { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; align-items: end; }
                 .health-entry__form label { display: flex; flex-direction: column; gap: 5px; font: 600 11px/1.2 system-ui, sans-serif; color: #71717a; }
                 .health-entry__form input { width: 100%; min-width: 0; padding: 9px 10px; font: 500 14px/1 system-ui, sans-serif; color: #18181b; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; }
                 .health-entry__form input:focus { outline: none; border-color: #18181b; }
