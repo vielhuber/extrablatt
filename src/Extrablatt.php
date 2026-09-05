@@ -86,6 +86,8 @@ final class Extrablatt
 {
     // archive.ph and its mirrors — tried in order until one returns a real snapshot.
     private const ARCHIVE_TLDS = ['fo', 'li', 'md', 'ph', 'vn'];
+    private const PNP_REGIONAL_FILTER = "paper = 'pnp' AND (url LIKE 'https://www.pnp.de/lokales/%'
+        OR url LIKE 'https://www.pnp.de/nachrichten/bayern/%')";
 
     // Path-related state is initialised in the constructor against the
     // consumer-supplied rootDir, so the package can be installed via
@@ -7454,6 +7456,22 @@ final class Extrablatt
             );
         }
 
+        $local = $this->buildProseBlock(
+            db: $db,
+            paperKeys: ['pnp'],
+            since: $cutoff,
+            limit: 300,
+            intro: 'Du erhältst lokale und regionale PNP-Schlagzeilen der vergangenen 7 Tage. ' .
+                'Wähle die 3 bis 4 wichtigsten Meldungen für die Region aus und fasse sie in einem ' .
+                'zusammenhängenden Fließtext mit 3 bis 4 Sätzen zusammen.',
+            requirements: '- Gewichte die Tragweite für die Menschen vor Ort, nicht die Häufigkeit der Berichterstattung. ' .
+                'Bündle Meldungen zum selben Ereignis und beschreibe den jüngsten belegten Stand. ' .
+                'Nenne Orte und die wesentlichen Entwicklungen; keine überregionalen Ergänzungen, keine erfundenen Details.',
+            refNoun: 'Artikel-Nummer',
+            aiConfig: $aiConfig,
+            apiKey: $apiKey,
+            pnpOnly: true
+        );
         $tv = $this->buildTalkshowBlock(db: $db, aiConfig: $aiConfig, apiKey: $apiKey, cutoff: $cutoff);
 
         // Media blocks (Streaming, Kino, Musik, Gaming) — same mechanics as
@@ -7485,6 +7503,7 @@ final class Extrablatt
             'weather' => $weather,
             'health' => $health,
             'tv' => $tv,
+            'local' => $local,
             'media' => $media,
         ];
         $this->cacheSet(
@@ -7631,16 +7650,17 @@ final class Extrablatt
      * @param array<string, mixed> $aiConfig
      * @return array{paragraph: string, sources: array<int, array{url: string, paper: string}>, count: int}|null
      */
-    private function buildProseBlock(PDO $db, array $paperKeys, int $since, int $limit, string $intro, string $requirements, string $refNoun, array $aiConfig, string $apiKey): ?array
+    private function buildProseBlock(PDO $db, array $paperKeys, int $since, int $limit, string $intro, string $requirements, string $refNoun, array $aiConfig, string $apiKey, bool $pnpOnly = false): ?array
     {
         if ($paperKeys === []) {
             return null;
         }
+        $regionalWhere = $pnpOnly ? ' AND ' . self::PNP_REGIONAL_FILTER : '';
         $list = implode(separator: ',', array: array_map(callback: fn(string $p): string => "'" . str_replace(search: "'", replace: "''", subject: $p) . "'", array: $paperKeys));
         $stmt = $db->prepare(query: "
             SELECT url, paper, title, published_at
             FROM articles
-            WHERE paper IN ({$list})
+            WHERE paper IN ({$list}) {$regionalWhere}
               AND published_at >= :since
               AND duplicate_of IS NULL
               AND title IS NOT NULL AND title <> ''
@@ -8304,6 +8324,12 @@ final class Extrablatt
             $paragraphs .= $this->buildDigestParagraph(item: $item);
         }
 
+        $localHtml = '';
+        $local = isset($data['local']) && is_array(value: $data['local']) ? $data['local'] : null;
+        if ($local !== null) {
+            $localHtml = $this->buildProseSection(block: $local, heading: 'Lokales &amp; Regionales', subtitle: 'letzte 7 Tage');
+        }
+
         $cryptoHtml = '';
         $crypto = isset($data['crypto']) && is_array(value: $data['crypto']) ? $data['crypto'] : null;
         if ($crypto !== null) {
@@ -8338,7 +8364,7 @@ final class Extrablatt
             $healthHtml = $this->buildHealthDigestBlock(health: $health);
         }
 
-        if ($leadHtml === '' && $paragraphs === '' && $cryptoHtml === '' && $weatherHtml === '' && $healthHtml === '' && $tvHtml === '' && $mediaHtml === '') {
+        if ($leadHtml === '' && $paragraphs === '' && $cryptoHtml === '' && $weatherHtml === '' && $healthHtml === '' && $tvHtml === '' && $localHtml === '' && $mediaHtml === '') {
             return '';
         }
 
@@ -8346,7 +8372,7 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . $cryptoHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $localHtml . $cryptoHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
     }
 
     /**
@@ -9525,8 +9551,7 @@ final class Extrablatt
         // way to their configured paper set.
         if ($pnpOnly) {
             // categories describe topics, so regional scope follows the publisher's sections.
-            $where[] = "paper = 'pnp' AND (url LIKE 'https://www.pnp.de/lokales/%'
-                OR url LIKE 'https://www.pnp.de/nachrichten/bayern/%')";
+            $where[] = self::PNP_REGIONAL_FILTER;
         } elseif ($tvFilter === 'all') {
             $tvPapers = $this->talkshowPapers();
             if ($tvPapers !== []) {
