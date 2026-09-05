@@ -10212,7 +10212,7 @@ final class Extrablatt
             $activeTabLabel = 'BILD';
         }
         if ($isPnp) {
-            $activeTabLabel = 'PNP';
+            $activeTabLabel = 'Lokal';
         }
         if ($isFactcheck) {
             $activeTabLabel = 'Faktencheck';
@@ -10737,7 +10737,7 @@ HTML : '';
                         <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                         {$mediaTabHtml['hackernews']}
                         <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
-                        <a class="viewnav__tab{$pnpActive}" href="/?view=pnp">PNP</a>
+                        <a class="viewnav__tab{$pnpActive}" href="/?view=pnp">Lokal</a>
                         {$mediaTabHtml['reddit']}
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}

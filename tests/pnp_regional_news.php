@@ -83,10 +83,10 @@ try {
 
     $dashboard = $route(['view' => 'pnp']);
     $assertContains(
-        'href="/?view=bild">BILD</a><a class="viewnav__tab viewnav__tab--active" href="/?view=pnp">PNP</a>',
+        'href="/?view=bild">BILD</a><a class="viewnav__tab viewnav__tab--active" href="/?view=pnp">Lokal</a>',
         (string) preg_replace(pattern: '/>\s+</', replacement: '><', subject: $dashboard)
     );
-    $assertContains('<span>PNP</span>', $dashboard);
+    $assertContains('<span>Lokal</span>', $dashboard);
     $assertContains('Seite 4 / 10', $dashboard);
     $assertContains('href="/?view=bild" aria-label="Vorheriger Tab"', $dashboard);
     $assertContains('href="/?view=reddit" aria-label="Nächster Tab"', $dashboard);
