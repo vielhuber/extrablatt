@@ -765,7 +765,7 @@ final class Extrablatt
                 $thumbFilter = '';
             }
             $mediaViews = array_keys(array: $this->mediaTabs());
-            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'crypto', 'watch'], $mediaViews), strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'pnp', 'crypto', 'watch'], $mediaViews), strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -777,6 +777,9 @@ final class Extrablatt
                 $magicFilter = 'all';
                 $paperFilter = '';
                 $mediaFilter = '';
+            }
+            if ($viewFilter === 'pnp' && !isset($_GET['magic'])) {
+                $magicFilter = 'all';
             }
             // Media views (serien/filme/alben/games/hackernews) work the same
             // way: Meldungen shortcuts forcing media=<tab> and magic=all. They
@@ -9509,7 +9512,8 @@ final class Extrablatt
         string $readFilter,
         string $sortFilter,
         string $magicFilter,
-        string $thumbFilter
+        string $thumbFilter,
+        bool $pnpOnly = false
     ): array {
         $db = $this->openDatabase();
         $where = [];
@@ -9519,7 +9523,11 @@ final class Extrablatt
         // TV-Sendungen" expands to paper IN (<talkshowPapers>), picking a
         // single show narrows to that paper. The media tabs expand the same
         // way to their configured paper set.
-        if ($tvFilter === 'all') {
+        if ($pnpOnly) {
+            // categories describe topics, so regional scope follows the publisher's sections.
+            $where[] = "paper = 'pnp' AND (url LIKE 'https://www.pnp.de/lokales/%'
+                OR url LIKE 'https://www.pnp.de/nachrichten/bayern/%')";
+        } elseif ($tvFilter === 'all') {
             $tvPapers = $this->talkshowPapers();
             if ($tvPapers !== []) {
                 $list = implode(separator: ',', array: array_map(
@@ -9881,6 +9889,12 @@ final class Extrablatt
         // the whole archive (read, duplicates and all) by title and shows the
         // matches in place of the tab content.
         $isSearch = $searchQuery !== '';
+        $isPnp = !$isSearch && $viewFilter === 'pnp';
+        if ($isPnp) {
+            $paperFilter = 'pnp';
+            $tvFilter = '';
+            $mediaFilter = '';
+        }
         $articles = $isSearch
             ? $this->searchArticles(query: $searchQuery)
             : $this->fetchArticlesForDashboard(
@@ -9893,7 +9907,8 @@ final class Extrablatt
                 readFilter: $readFilter,
                 sortFilter: $sortFilter,
                 magicFilter: $magicFilter,
-                thumbFilter: $thumbFilter
+                thumbFilter: $thumbFilter,
+                pnpOnly: $isPnp
             );
 
         // Auto-submitting <select> dropdowns. The form's GET action keeps
@@ -10162,14 +10177,15 @@ final class Extrablatt
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset, the media tabs when media=<tab> is set; "Meldungen"
         // covers every other meldungen state.
-        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isCrypto && !$isWatch && $tvFilter === 'all';
-        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isCrypto && !$isWatch && !$isTalkshowView && $mediaFilter !== '';
-        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isCrypto && !$isWatch && !$isTalkshowView && !$isMediaView;
+        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isWatch && $tvFilter === 'all';
+        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isWatch && !$isTalkshowView && $mediaFilter !== '';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isWatch && !$isTalkshowView && !$isMediaView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
         $factcheckActive = $isFactcheck ? ' viewnav__tab--active' : '';
         $bildActive = $isBild ? ' viewnav__tab--active' : '';
+        $pnpActive = $isPnp ? ' viewnav__tab--active' : '';
         $cryptoActive = $isCrypto ? ' viewnav__tab--active' : '';
         $watchActive = $isWatch ? ' viewnav__tab--active' : '';
         $mediaTabHtml = [];
@@ -10195,6 +10211,9 @@ final class Extrablatt
         if ($isBild) {
             $activeTabLabel = 'BILD';
         }
+        if ($isPnp) {
+            $activeTabLabel = 'PNP';
+        }
         if ($isFactcheck) {
             $activeTabLabel = 'Faktencheck';
         }
@@ -10208,7 +10227,7 @@ final class Extrablatt
         // like turning newspaper pages. Order must match the tab row in the
         // template below; search mode has no active tab and gets no pager.
         // c't stays out: it's a reference archive, not a page of the paper.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'reddit', 'x', 'medium', 'meldungen', 'crypto', 'watch'];
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'pnp', 'reddit', 'x', 'medium', 'meldungen', 'crypto', 'watch'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -10224,6 +10243,9 @@ final class Extrablatt
         }
         if ($isBild) {
             $activeView = 'bild';
+        }
+        if ($isPnp) {
+            $activeView = 'pnp';
         }
         if ($isFactcheck) {
             $activeView = 'factcheck';
@@ -10262,11 +10284,14 @@ final class Extrablatt
         // onchange="filterChange(this)" auto-flips Magisch → "Alle" when the
         // user picks a single filter on an otherwise empty form. See the
         // <script> at the bottom of the template.
-        $meldungenBlock = $isMeldungenView || $isTalkshowView || $isMediaView ? <<<HTML
+        $filterView = $isPnp ? 'pnp' : 'meldungen';
+        $sourceFilters = $isPnp ? ''
+            : '<select name="paper" onchange="filterChange(this)">' . $paperOptions . '</select>'
+                . '<select name="tv" onchange="filterChange(this)">' . $tvOptions . '</select>';
+        $meldungenBlock = $isMeldungenView || $isTalkshowView || $isMediaView || $isPnp ? <<<HTML
                 <form class="filters" method="get" action="/">
-                    <input type="hidden" name="view" value="meldungen">{$mediaHidden}
-                    <select name="paper" onchange="filterChange(this)">{$paperOptions}</select>
-                    <select name="tv" onchange="filterChange(this)">{$tvOptions}</select>
+                    <input type="hidden" name="view" value="{$filterView}">{$mediaHidden}
+                    {$sourceFilters}
                     <select name="status" onchange="filterChange(this)">{$statusOptions}</select>
                     <select name="paywall" onchange="filterChange(this)">{$paywallOptions}</select>
                     <select name="thumb" onchange="filterChange(this)">{$thumbOptions}</select>
@@ -10712,6 +10737,7 @@ HTML : '';
                         <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                         {$mediaTabHtml['hackernews']}
                         <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
+                        <a class="viewnav__tab{$pnpActive}" href="/?view=pnp">PNP</a>
                         {$mediaTabHtml['reddit']}
                         {$mediaTabHtml['x']}
                         {$mediaTabHtml['medium']}
