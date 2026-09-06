@@ -66,6 +66,19 @@ php -S 127.0.0.1:8080 -t .
 0 6,18 * * * curl -s 'https://your-host/?scrape=1&key=<AUTH_PASSWORD>' >/dev/null
 ```
 
+## deployment
+
+production consumes this repository as the Composer package `vielhuber/extrablatt`.
+
+1. Test the task branch, update the package version with `npm version <version> --no-git-tag-version`, and commit the release changes.
+2. Merge the tested branch into `main`, create the matching version tag on the merged commit, and push `main` and that tag. The tag is published through Packagist.
+3. On production, back up `composer.json` and `composer.lock` outside the public document root or in a protected dot directory.
+4. Preview the targeted update with `composer update vielhuber/extrablatt:<version> --dry-run --no-dev --prefer-dist --no-interaction`. Only the Extrablatt package should change.
+5. Run the same command without `--dry-run`. Keep the application's configuration, cookies and SQLite database untouched.
+6. Run the existing authenticated scrape and check its completion and the regenerated weekly digest. Verify that the installed package reference matches the release tag.
+
+For a package rollback, restore the saved Composer files and run `composer install --no-dev --prefer-dist --no-interaction`. This restores package versions, not data changed by a scrape.
+
 ## backup
 
 ```bash
