@@ -132,10 +132,10 @@ try {
     $assertContains('Allgemeine Wochenmeldungen.', $localDashboard);
     $assertContains('href="https://www.pnp.de/lokales/passau/sport"', $localDashboard);
     if (
-        strpos(haystack: $localDashboard, needle: 'Kryptowährungen') >=
-        strpos(haystack: $localDashboard, needle: 'Lokales &amp; Regionales')
+        strpos(haystack: $localDashboard, needle: 'Lokales &amp; Regionales') >=
+        strpos(haystack: $localDashboard, needle: 'Kryptowährungen')
     ) {
-        throw new RuntimeException(message: 'Expected the regional block after cryptocurrencies.');
+        throw new RuntimeException(message: 'Expected the regional block before cryptocurrencies.');
     }
 
     unset($digest['local']);
