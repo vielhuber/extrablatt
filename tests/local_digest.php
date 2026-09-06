@@ -122,17 +122,20 @@ try {
     if (($digest['local']['sources'][0]['url'] ?? null) !== 'https://www.pnp.de/lokales/passau/sport') {
         throw new RuntimeException(message: 'Expected a resolved regional source link.');
     }
+    $digest['crypto'] = ['prose' => 'Kryptowährungen im Wochenvergleich.'];
+    $invoke('cacheSet', 'daily_digest', (string) json_encode(value: $digest));
     $localDashboard = $invoke('renderDashboard', '', '', '', '', '', '', '', '', '', '', 'zeitung');
+    $assertContains('Kryptowährungen', $localDashboard);
     $assertContains('Lokales &amp; Regionales', $localDashboard);
     $assertContains('letzte 7 Tage', $localDashboard);
     $assertContains('steht der lokale Sport im Mittelpunkt.', $localDashboard);
     $assertContains('Allgemeine Wochenmeldungen.', $localDashboard);
     $assertContains('href="https://www.pnp.de/lokales/passau/sport"', $localDashboard);
     if (
-        strpos(haystack: $localDashboard, needle: 'Wochenübersicht') >=
+        strpos(haystack: $localDashboard, needle: 'Kryptowährungen') >=
         strpos(haystack: $localDashboard, needle: 'Lokales &amp; Regionales')
     ) {
-        throw new RuntimeException(message: 'Expected the regional block after the weekly overview.');
+        throw new RuntimeException(message: 'Expected the regional block after cryptocurrencies.');
     }
 
     unset($digest['local']);
