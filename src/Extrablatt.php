@@ -8372,7 +8372,7 @@ final class Extrablatt
             ? '<h2 class="digest__title">Wochenübersicht <span class="digest__date">' . $rangeLabel . '</span></h2>' . $paragraphs
             : '';
 
-        return '<section class="digest">' . $leadHtml . $weeklyHtml . $localHtml . $cryptoHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
+        return '<section class="digest">' . $leadHtml . $weeklyHtml . $cryptoHtml . $localHtml . $weatherHtml . $healthHtml . $tvHtml . $mediaHtml . '</section>';
     }
 
     /**
