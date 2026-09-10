@@ -2011,9 +2011,12 @@ final class Extrablatt
             if (preg_match(pattern: '~score_\d+">(\d+)\s+point~', subject: $chunk, matches: $scoreMatch) !== 1) {
                 continue;
             }
-            $publishedAt = preg_match(pattern: '~<span class="age" title="[^"]*\s(\d{9,11})"~', subject: $chunk, matches: $ageMatch) === 1
-                ? (int) $ageMatch[1]
-                : null;
+            $publishedAt = null;
+            if (preg_match(pattern: '~<span class="age" title="([^"]*)"~', subject: $chunk, matches: $ageMatch) === 1) {
+                $publishedAt = preg_match(pattern: '~\s(\d{9,11})$~', subject: $ageMatch[1], matches: $timestampMatch) === 1
+                    ? (int) $timestampMatch[1]
+                    : $this->parseDate(input: $ageMatch[1]);
+            }
             $items[] = new FeedItem(
                 title: html_entity_decode(string: trim(string: $titleMatch[1]), flags: ENT_QUOTES | ENT_HTML5),
                 link: 'https://news.ycombinator.com/item?id=' . $idMatch[1],
