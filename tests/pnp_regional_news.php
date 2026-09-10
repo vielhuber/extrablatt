@@ -138,6 +138,82 @@ try {
     $reddit = $route(['view' => 'reddit']);
     $assertContains('href="/?view=pnp" aria-label="Vorheriger Tab"', $reddit);
     $assertContains('Seite 5 / 10', $reddit);
+
+    $database->exec(statement: 'DELETE FROM articles');
+    $now = time();
+    foreach (['pnp', 'other'] as $paper) {
+        for ($number = 1; $number <= 12; $number++) {
+            $statement->execute(
+                params: [
+                    'https://' . ($paper === 'pnp' ? 'www.pnp.de' : 'example.com') . '/lokales/' . $number,
+                    $paper,
+                    $paper . ' fixture ' . $number,
+                    null,
+                    $now - $number * 60,
+                    $now,
+                    $now,
+                    null
+                ]
+            );
+        }
+    }
+    $database->exec(
+        statement: "UPDATE articles SET vote = 3 WHERE paper = 'pnp' AND title IN ('pnp fixture 10', 'pnp fixture 12')"
+    );
+    $fetch = static function (string $sort = '', bool $local = true) use ($invoke): array {
+        return $invoke('fetchArticlesForDashboard', '', '', '', '', '', '', '', $sort, 'all', '', $local);
+    };
+    $latest = $fetch();
+    if (count(value: $latest) !== 10) {
+        throw new RuntimeException(message: 'Lokal must select exactly the ten latest eligible articles.');
+    }
+    $expectedTitles = array_map(callback: fn(int $number): string => 'pnp fixture ' . $number, array: range(1, 10));
+    $actualTitles = array_column(array: $latest, column_key: 'title');
+    if (array_diff($expectedTitles, $actualTitles) !== [] || $actualTitles[0] !== 'pnp fixture 10') {
+        throw new RuntimeException(message: 'Relevance must rank only the latest ten, with the liked article first.');
+    }
+    if ($actualTitles !== array_column(array: $fetch(), column_key: 'title')) {
+        throw new RuntimeException(message: 'Local relevance ordering must be stable across reloads.');
+    }
+    foreach (['published_asc', 'rating_desc', 'vote_desc', 'hot'] as $sort) {
+        $sortedTitles = array_column(array: $fetch($sort), column_key: 'title');
+        if (count(value: $sortedTitles) !== 10 || array_diff($expectedTitles, $sortedTitles) !== []) {
+            throw new RuntimeException(message: 'Manual sorting must not change the latest-ten selection.');
+        }
+    }
+    if (count(value: $fetch(local: false)) !== 24) {
+        throw new RuntimeException(message: 'The general news list must remain uncapped by the local limit.');
+    }
+    $dashboard = $route(['view' => 'pnp']);
+    $assertContains('<option value="" selected>Relevanz ↓</option>', $dashboard);
+    if (substr_count(haystack: $dashboard, needle: 'class="item__link"') !== 10) {
+        throw new RuntimeException(message: 'The local route must render ten articles.');
+    }
+    $assertContains('<option value="" selected>Datum ↓</option>', $route(['view' => 'meldungen', 'magic' => 'all']));
+
+    $database->exec(statement: "UPDATE articles SET vote = 0, published_at = $now WHERE paper = 'pnp'");
+    $tied = array_column(array: $fetch(), column_key: 'title');
+    $expectedTies = array_map(callback: fn(int $number): string => 'pnp fixture ' . $number, array: range(12, 3));
+    if ($expectedTies !== $tied) {
+        throw new RuntimeException(message: 'Equal dates and relevance must retain descending insertion order.');
+    }
+    $database->exec(
+        statement: "UPDATE articles SET published_at = NULL WHERE paper = 'pnp' AND title = 'pnp fixture 12'"
+    );
+    if (
+        in_array(needle: 'pnp fixture 12', haystack: array_column(array: $fetch(), column_key: 'title'), strict: true)
+    ) {
+        throw new RuntimeException(message: 'Undated articles must not displace newer dated articles.');
+    }
+    $database->exec(
+        statement: "UPDATE articles SET category = 'Fußball' WHERE paper = 'pnp' AND title = 'pnp fixture 10'"
+    );
+    $database->exec(
+        statement: "UPDATE articles SET category = 'Fußball', vote = 3, read_at = $now WHERE paper = 'other'"
+    );
+    if ($fetch()[0]['title'] !== 'pnp fixture 10') {
+        throw new RuntimeException(message: 'Existing category preferences must influence local relevance.');
+    }
 } finally {
     $_GET = [];
     foreach (glob(pattern: $rootDirectory . '/.data/*') as $file) {

@@ -88,6 +88,7 @@ final class Extrablatt
     private const ARCHIVE_TLDS = ['fo', 'li', 'md', 'ph', 'vn'];
     private const PNP_REGIONAL_FILTER = "paper = 'pnp' AND (url LIKE 'https://www.pnp.de/lokales/%'
         OR url LIKE 'https://www.pnp.de/nachrichten/bayern/%')";
+    private const PNP_MAX_ITEMS = 10;
 
     // Path-related state is initialised in the constructor against the
     // consumer-supplied rootDir, so the package can be installed via
@@ -9647,13 +9648,28 @@ final class Extrablatt
         if ($mediaLimit !== null) {
             $limit = $mediaLimit;
         }
+        $from = 'articles';
+        if ($pnpOnly) {
+            $from = '(SELECT * FROM articles WHERE ' . implode(separator: ' AND ', array: $where) .
+                ' ORDER BY published_at DESC, id DESC LIMIT ' . self::PNP_MAX_ITEMS . ')';
+            $where = [];
+        }
         $sql =
-            'SELECT url, paper, title, published_at, status, paywall, thumbnail, category, rating, read_at, vote FROM articles' .
+            'SELECT url, paper, title, published_at, status, paywall, thumbnail, category, rating, read_at, vote FROM ' . $from .
             (empty($where) ? '' : ' WHERE ' . implode(separator: ' AND ', array: $where)) .
             ' ORDER BY ' . $orderBy . ' LIMIT ' . $limit;
         $stmt = $db->prepare(query: $sql);
         $stmt->execute(params: $params);
-        return $stmt->fetchAll(mode: PDO::FETCH_ASSOC) ?: [];
+        $articles = $stmt->fetchAll(mode: PDO::FETCH_ASSOC) ?: [];
+        if ($pnpOnly && $magicFilter === 'all' && $sortFilter === '') {
+            $affinity = $this->magicComputeAffinity(db: $db);
+            foreach ($articles as &$article) {
+                $article['_score'] = $this->magicScore(row: $article, aff: $affinity);
+            }
+            unset($article);
+            usort(array: $articles, callback: fn(array $a, array $b): int => $b['_score'] <=> $a['_score']);
+        }
+        return $articles;
     }
 
     /**
@@ -10018,6 +10034,9 @@ final class Extrablatt
 
         $sortDropdown = '';
         foreach ($this->sortOptions() as $value => $def) {
+            if ($isPnp && $value === '') {
+                $def['label'] = 'Relevanz ↓';
+            }
             $sel = $sortFilter === $value ? ' selected' : '';
             $sortDropdown .= '<option value="' . htmlspecialchars(string: (string) $value, flags: ENT_QUOTES) . '"' . $sel . '>' . htmlspecialchars(string: $def['label'], flags: ENT_QUOTES) . '</option>';
         }
