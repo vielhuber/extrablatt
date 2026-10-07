@@ -10667,9 +10667,6 @@ HTML : '';
                 @keyframes done-tilt { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
                 .done__label { font: 600 14px/1 Arial, sans-serif; color: #71717a; margin-top: 10px; letter-spacing: 0.02em; }
                 .item--empty a { color: #111; }
-                .top-btn { position: fixed; bottom: 20px; right: max(12px, calc((100vw - 840px) / 2 - 70px)); background: rgba(0,0,0,.78); color: #fff; text-decoration: none; font: 700 12px/1 Arial, sans-serif; padding: 11px 14px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 2147483647; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
-                .top-btn.visible { opacity: 1; pointer-events: auto; }
-                .top-btn:hover { background: #000; }
                 .theme-toggle { background: transparent; border: 0; padding: 4px 6px; cursor: pointer; line-height: 0; color: #71717a; opacity: 0.8; display: inline-flex; align-items: center; transform: translateY(3px); }
                 .theme-toggle:hover { opacity: 1; color: #18181b; }
                 html[data-theme="dark"] .theme-toggle { color: #a1a1aa; }
@@ -10757,8 +10754,6 @@ HTML : '';
                     html[data-theme="dark"] .viewnav__tabs { background: #18181b; border-color: #3f3f46; box-shadow: 0 12px 32px rgba(0,0,0,0.55); }
                     html[data-theme="dark"] nav.viewnav .viewnav__tab--active { background: #fafafa; color: #18181b; }
                     html[data-theme="dark"] nav.viewnav .viewnav__tab--active:hover { color: #18181b; }
-                    /* keep the fixed top button clear of the pager's right arrow and flush with the content edge */
-                    .top-btn { bottom: 76px; right: 1rem; }
                 }
                 @keyframes viewnavIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
             </style>
@@ -10809,7 +10804,6 @@ HTML : '';
                 {$searchBlock}
                 {$pagerHtml}
             </main>
-            <a href="#" class="top-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">↑ Top</a>
             <script>
                 // Filter change handler: auto-flips Magisch → "Alle" when
                 // the picked filter ends up being the ONLY active one (i.e.
@@ -10856,16 +10850,6 @@ HTML : '';
                         }
                     }
                 };
-                (function () {
-                    var btn = document.querySelector('.top-btn');
-                    if (!btn) return;
-                    function update() {
-                        if (window.scrollY > 200) btn.classList.add('visible');
-                        else btn.classList.remove('visible');
-                    }
-                    window.addEventListener('scroll', update, { passive: true });
-                    update();
-                })();
                 // Mobile nav: the toggle button expands the tab list as a
                 // dropdown; tapping anywhere outside closes it again.
                 (function () {
