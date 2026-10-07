@@ -4705,12 +4705,32 @@ final class Extrablatt
             callback: fn(array $entry): bool =>
                 !array_key_exists(key: $entry['item']->link, array: $knownPaywall)
                 || !$this->ogImageCacheExists(url: $entry['item']->link)
+                || ($entry['paper'] === 'pnp' && !$this->cacheHas(key: 'headline:' . md5(string: $entry['item']->link)))
         ));
         $emit(sprintf('  %d bereits vollständig bekannt, %d neu/og-fehlt', count(value: $knownPaywall), count(value: $toProbe)));
         $phaseStart = microtime(as_float: true);
         $freshPaywall = empty($toProbe) ? [] : $this->checkPaywallStatusStreaming(items: $toProbe, emit: $emit);
         $ms = (int) round(num: (microtime(as_float: true) - $phaseStart) * 1000);
         $paywallStatus = $knownPaywall + $freshPaywall;
+        $titleUpdate = $db->prepare(query: 'UPDATE articles SET title = :title WHERE url = :url AND paper = \'pnp\'');
+        foreach ($allItems as $index => $entry) {
+            if ($entry['paper'] !== 'pnp') {
+                continue;
+            }
+            $item = $entry['item'];
+            $title = $this->cacheGet(key: 'headline:' . md5(string: $item->link));
+            if ($title === null || $title === '') {
+                continue;
+            }
+            $allItems[$index]['item'] = new FeedItem(
+                title: $title,
+                link: $item->link,
+                publishedAt: $item->publishedAt,
+                imageUrl: $item->imageUrl,
+                rating: $item->rating
+            );
+            $titleUpdate->execute(params: [':title' => $title, ':url' => $item->link]);
+        }
         $plus = count(value: array_filter(array: $paywallStatus, callback: fn(?bool $v): bool => $v === true));
         $free = count(value: array_filter(array: $paywallStatus, callback: fn(?bool $v): bool => $v === false));
         $emit(sprintf('  → %d PLUS, %d free (%d ms)', $plus, $free, $ms));
@@ -6587,13 +6607,16 @@ final class Extrablatt
         // attribute for these meta tags.
         $ogPattern = '(?:property|name)=["\']og:image(?::secure_url)?["\'][^>]{0,200}content=["\']\K[^"\']+';
         $twPattern = '(?:property|name)=["\']twitter:image(?::src)?["\'][^>]{0,200}content=["\']\K[^"\']+';
+        $titlePattern = '(?:property|name)=["\']og:title["\'][^>]{0,200}content=(["\'])\K[^\r\n]*?(?=\1)';
         $innerCmd =
             'body=$(' . escapeshellarg(arg: $this->curlImpersonateBin) .
             ' -sL --max-redirs 5 --max-time 12 "$1" 2>/dev/null | head -c 300000); ' .
             'pw=$(printf "%s" "$body" | grep -ciE ' . escapeshellarg(arg: $paywallPattern) . ' || true); ' .
             'og=$(printf "%s" "$body" | grep -oP ' . escapeshellarg(arg: $ogPattern) . ' 2>/dev/null | head -1); ' .
             'if [ -z "$og" ]; then og=$(printf "%s" "$body" | grep -oP ' . escapeshellarg(arg: $twPattern) . ' 2>/dev/null | head -1); fi; ' .
-            'echo "PAYWALL:${pw:-0}|OGIMG:${og}|URL:$1"';
+            'title=""; case "$1" in https://www.pnp.de/*) title=$(printf "%s" "$body" | grep -oP ' .
+            escapeshellarg(arg: $titlePattern) . ' 2>/dev/null | head -1);; esac; ' .
+            'echo "PAYWALL:${pw:-0}|OGIMG:${og}|TITLE:${title}|URL:$1"';
 
         $cmd = $this->buildParallelPipeline(
             tmpIn: $tmpIn,
@@ -6616,12 +6639,18 @@ final class Extrablatt
             if ($line === '') {
                 continue;
             }
-            if (!preg_match(pattern: '~^PAYWALL:(\d+)\|OGIMG:(.*?)\|URL:(.+)$~', subject: $line, matches: $m)) {
+            if (!preg_match(pattern: '~^PAYWALL:(\d+)\|OGIMG:(.*?)\|TITLE:(.*?)\|URL:(.+)$~', subject: $line, matches: $m)) {
                 continue;
             }
             $isPaywall = ((int) $m[1]) > 0;
             $ogImage = trim(string: $m[2]);
-            $url = $m[3];
+            $url = $m[4];
+            if (($byUrl[$url]['paper'] ?? '') === 'pnp') {
+                $title = trim(string: html_entity_decode(string: $m[3], flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8'));
+                if ($title !== '') {
+                    $this->cacheSet(key: 'headline:' . md5(string: $url), value: $title);
+                }
+            }
             $result[$url] = $isPaywall;
             // Skip the og:image side-effect for reddit posts — the dedicated
             // Phase-5 resolver parses the post JSON and pulls a much better
