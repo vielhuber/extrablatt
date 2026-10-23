@@ -1965,11 +1965,13 @@ final class Extrablatt
             $cacheKey = 'feed:' . $paper . ':p' . $page;
             $body = $this->cacheGet(key: $cacheKey);
             if ($body === null || $body === '') {
-                $result = $this->fetchViaImpersonate(url: 'https://news.ycombinator.com/best?h=168&p=' . $page);
-                if ($result->body === null) {
+                $body = $this->httpGet(
+                    url: 'https://news.ycombinator.com/best?h=168&p=' . $page,
+                    timeout: self::FETCH_MAX_TIME_SECONDS
+                );
+                if ($body === null || $body === '') {
                     break;
                 }
-                $body = $result->body;
                 $this->cacheSet(key: $cacheKey, value: $body);
             }
             $pageItems = $this->parseHackerNewsBest(html: $body);
@@ -8168,7 +8170,7 @@ final class Extrablatt
 
     /**
      * Plain HTTP GET that returns the response body or null on any non-2xx
-     * / network failure. Local helper for key-less JSON APIs — kept private
+     * / network failure. Local helper for public endpoints — kept private
      * because callers deliberately degrade to cached or omitted blocks.
      */
     private function httpGet(string $url, int $timeout = 10): ?string
