@@ -5347,43 +5347,41 @@ final class Extrablatt
         foreach ($rows as $row) {
             $readPerPaper[(string) $row[0]] = (int) $row[1];
         }
-        $unread = (array) $db->query(query: '
+        $unread = $db->query(query: '
             SELECT url, paper, title, published_at, rating, vote, category
             FROM articles WHERE read_at IS NULL AND duplicate_of IS NULL
-        ')->fetchAll(mode: PDO::FETCH_ASSOC);
-        $unread = array_values(array: array_filter(
-            array: $unread,
-            callback: function (array $row) use ($readPerPaper): bool {
-                $cutoff = $readPerPaper[(string) ($row['paper'] ?? '')] ?? 0;
-                if ($cutoff === 0) {
-                    return true;
-                }
-                return ((int) ($row['published_at'] ?? 0)) > $cutoff;
+        ');
+        $unread->setFetchMode(mode: PDO::FETCH_ASSOC);
+        $unreadCount = 0;
+        $candidates = [];
+        // Retain only the best article per source so memory does not grow with the unread backlog.
+        foreach ($unread as $row) {
+            $paper = (string) ($row['paper'] ?? '');
+            $cutoff = $readPerPaper[$paper] ?? 0;
+            if ($cutoff !== 0 && ((int) ($row['published_at'] ?? 0)) <= $cutoff) {
+                continue;
             }
-        ));
+            $unreadCount++;
+            $row['_score'] = $this->magicScore(row: $row, aff: $aff);
+            $row['_position'] = $unreadCount;
+            if (!isset($candidates[$paper]) || $row['_score'] > $candidates[$paper]['_score']) {
+                $candidates[$paper] = $row;
+            }
+        }
+        $unread->closeCursor();
 
-        if (empty($unread)) {
+        if ($unreadCount === 0) {
             $emit('  → keine ungelesenen Artikel im Topf');
         } else {
-            foreach ($unread as &$row) {
-                $row['_score'] = $this->magicScore(row: $row, aff: $aff);
-            }
-            unset($row);
-            usort(array: $unread, callback: fn(array $a, array $b): int => $b['_score'] <=> $a['_score']);
-            $candidates = [];
-            $perPaper = [];
-            foreach ($unread as $row) {
-                $paper = (string) ($row['paper'] ?? '');
-                $perPaper[$paper] = $perPaper[$paper] ?? 0;
-                if ($perPaper[$paper] < 1) {
-                    $candidates[] = $row;
-                    $perPaper[$paper]++;
-                }
-            }
+            usort(
+                array: $candidates,
+                callback: static fn(array $a, array $b): int => $b['_score'] <=> $a['_score'] ?:
+                $a['_position'] <=> $b['_position']
+            );
             // Cap candidates to 30 before LLM rerank: anything beyond that is
             // long-tail noise from low-affinity sources and inflates token cost.
             $candidates = array_slice(array: $candidates, offset: 0, length: 30);
-            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 1/Quelle, max. 30)', count(value: $unread), count(value: $candidates)));
+            $emit(sprintf('  → %d ungelesene gescort, %d Kandidaten (Top 1/Quelle, max. 30)', $unreadCount, count(value: $candidates)));
 
             $env = $this->loadEnv();
             $aiProvider = (string) ($env['AI_PROVIDER'] ?? '');
