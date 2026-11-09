@@ -46,8 +46,6 @@ after install, edit:
 - `following` (optional, `medium://home` only): explicit list of followed handles (`@username`) and publication slugs whose RSS feeds get aggregated. Without it the list is discovered from the cookie-authenticated `/following` page, which Cloudflare challenges from datacenter IPs — so shared hosting needs this key.
 - Special `rss` schemes: `reddit://home`, `x://home` and `hackernews://best` activate the dedicated scrapers in place of XML parsing; `medium://home` aggregates the followed authors' RSS feeds; `ct://archiv` indexes the complete c't article archive (needs no login, backfills a bounded number of issues per scrape, rating = editorial page count).
 
-the `Gesundheit` tab stores manual weight, body-fat percentage, blood-pressure, and pulse measurements in SQLite and reads the Google Health API (daily rollups of the paired watch). set `GOOGLE_HEALTH_CLIENT_ID` / `GOOGLE_HEALTH_CLIENT_SECRET` in `.env`, register the site root as the OAuth redirect URI, publish the cloud project (publishing status `Testing` makes google revoke the refresh token every 7 days), then visit `/?health=connect` once.
-
 the `Crypto` tab shows rolling one-year and four-week BTC/EUR and ETH/EUR price histories from CoinGecko's public endpoint without a configured API key, using the bundled Chart.js library and compact widgets for both periods. market data stays fresh for 15 minutes, with the last cached response retained through temporary API failures; the weekly digest describes the most recent four weeks above the weather without duplicating the charts.
 
 the `Lokal` tab after BILD shows the ten newest eligible PNP articles from the publisher's `Lokales` and `Bayern` sections, with optional topic filters. The default relevance order reuses the existing score: personal votes, source/topic preferences from votes and reading history, normalized external ratings when available, and recency. PNP currently supplies no external ratings. Publication date and insertion order break ties; manual sorting only reorders the same latest-ten selection. Other tabs and the weekly digest remain unchanged. During each digest scrape, these same sections supply a separate `Lokales & Regionales` prose block for the past seven days, including read articles. Existing cached digests gain the block on the next successful scrape; without matching articles or an AI response, it is omitted.
@@ -55,6 +53,8 @@ the `Lokal` tab after BILD shows the ten newest eligible PNP articles from the p
 categories, AI defaults (`temperature`, `timeout`, `max_tries`), and the archive fulltext minimum (8000 chars) are hardcoded in the package.
 
 ## usage
+
+Personal measurements, watch synchronisation and the former `Gesundheit` tab now live in the independent [healthspace](https://github.com/vielhuber/healthspace) package. Its README covers migration; existing health tables are left untouched. The editorial health-news category remains part of Extrablatt.
 
 ```bash
 php -S 127.0.0.1:8080 -t .

@@ -60,7 +60,7 @@ if (count($digestStats['assets']['BTC']['prices'] ?? []) !== 2 || count($digestS
 $dashboard = $invoke('renderDashboard', '', '', '', '', '', '', '', '', '', '', 'crypto');
 $assertContains('main { max-width: 940px;', $dashboard);
 $assertContains('href="/?view=crypto">Crypto</a>', $dashboard);
-$assertBefore('href="/?view=crypto">Crypto</a>', 'href="/?view=watch">Gesundheit</a>', $dashboard);
+$assertNotContains('href="/?view=watch"', $dashboard);
 $assertContains('BTC/EUR', $dashboard);
 $assertContains('ETH/EUR', $dashboard);
 $assertContains('BTC/EUR · 1 Jahr', $dashboard);
@@ -77,9 +77,9 @@ if (substr_count(haystack: $dashboard, needle: 'class="crypto__kpi"') !== 4) {
 }
 $assertContains('63.000,00 €', $dashboard);
 $assertContains('data-chart-config', $dashboard);
-$assertContains('Seite 9 / 10', $dashboard);
+$assertContains('Seite 9 / 9', $dashboard);
 $assertContains('href="/?view=meldungen" aria-label="Vorheriger Tab"', $dashboard);
-$assertContains('href="/?view=watch" aria-label="Nächster Tab"', $dashboard);
+$assertContains('aria-disabled="true">→</span>', $dashboard);
 
 $_GET = ['view' => 'crypto'];
 ob_start();
@@ -87,11 +87,7 @@ $application->run();
 $routedDashboard = (string) ob_get_clean();
 $_GET = [];
 $assertContains('BTC/EUR', $routedDashboard);
-$assertContains('Seite 9 / 10', $routedDashboard);
-
-$healthDashboard = $invoke('renderDashboard', '', '', '', '', '', '', '', '', '', '', 'watch');
-$assertContains('Seite 10 / 10', $healthDashboard);
-$assertContains('href="/?view=crypto" aria-label="Vorheriger Tab"', $healthDashboard);
+$assertContains('Seite 9 / 9', $routedDashboard);
 
 $digest = [
     'generated_at' => time(),
@@ -107,7 +103,6 @@ $digest = [
         'temp_current' => 20.0,
         'days' => [['date' => date(format: 'Y-m-d'), 'temp_min' => 12.0, 'temp_max' => 23.0, 'description' => 'klar']],
     ],
-    'health' => null,
     'tv' => null,
     'media' => [],
 ];

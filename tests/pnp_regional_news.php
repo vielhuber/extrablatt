@@ -79,7 +79,7 @@ try {
     $invoke('cacheSet', 'bild_home', '<html></html>');
     $bild = $route(['view' => 'bild']);
     $assertContains('href="/?view=pnp" aria-label="Nächster Tab"', $bild);
-    $assertContains('Seite 3 / 10', $bild);
+    $assertContains('Seite 3 / 9', $bild);
 
     $dashboard = $route(['view' => 'pnp']);
     $assertContains(
@@ -87,7 +87,7 @@ try {
         (string) preg_replace(pattern: '/>\s+</', replacement: '><', subject: $dashboard)
     );
     $assertContains('<span>Lokal</span>', $dashboard);
-    $assertContains('Seite 4 / 10', $dashboard);
+    $assertContains('Seite 4 / 9', $dashboard);
     $assertContains('href="/?view=bild" aria-label="Vorheriger Tab"', $dashboard);
     $assertContains('href="/?view=reddit" aria-label="Nächster Tab"', $dashboard);
     $assertContains('name="view" value="pnp"', $dashboard);
@@ -131,13 +131,13 @@ try {
     $allNews = $route(['view' => 'meldungen', 'magic' => 'all']);
     $assertContains('National fixture', $allNews);
     $assertContains('Other source fixture', $allNews);
-    $assertContains('Seite 8 / 10', $allNews);
+    $assertContains('Seite 8 / 9', $allNews);
     $talkshows = $route(['view' => 'talkshows']);
     $assertContains('Talk fixture', $talkshows);
     $assertNotContains('Local football fixture', $talkshows);
     $reddit = $route(['view' => 'reddit']);
     $assertContains('href="/?view=pnp" aria-label="Vorheriger Tab"', $reddit);
-    $assertContains('Seite 5 / 10', $reddit);
+    $assertContains('Seite 5 / 9', $reddit);
 
     $database->exec(statement: 'DELETE FROM articles');
     $now = time();
