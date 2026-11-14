@@ -52,6 +52,9 @@ file_put_contents(
         }
     }
     $body = $fixtures[$url] ?? '';
+    if (str_starts_with($url, 'https://news.ycombinator.com/') && in_array('-w', $argv, true)) {
+        $body = '';
+    }
     if (str_contains($url, '/cover.jpg')) {
         $body = base64_decode($body, true);
     }
@@ -79,6 +82,34 @@ $assertSame = static function (mixed $expected, mixed $actual): void {
 $server = null;
 
 try {
+    $socket = stream_socket_server(address: 'tcp://127.0.0.1:0');
+    $address = stream_socket_get_name(socket: $socket, remote: false);
+    fclose(stream: $socket);
+    file_put_contents(filename: $rootDirectory . '/.data/models', data: '{}');
+    file_put_contents(
+        filename: $rootDirectory . '/.data/router.php',
+        data: '<?php declare(strict_types=1); $url = "https://news.ycombinator.com" . $_SERVER["REQUEST_URI"];' .
+            'if (str_starts_with($_SERVER["REQUEST_URI"], "/item?")) {' .
+            '$fixtures = json_decode(file_get_contents(__DIR__ . "/fixtures.json"), true);' .
+            'echo $fixtures[$url] ?? ""; return;} return false;'
+    );
+    $server = proc_open(
+        command: [PHP_BINARY, '-S', $address, '-t', $rootDirectory . '/.data', $rootDirectory . '/.data/router.php'],
+        descriptor_spec: [0 => ['pipe', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+        pipes: $pipes
+    );
+    fclose(stream: $pipes[0]);
+    $probe = curl_init(url: 'http://' . $address . '/models');
+    curl_setopt_array(handle: $probe, options: [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT_MS => 100]);
+    for ($attempt = 0; $attempt < 100; $attempt++) {
+        if (curl_exec(handle: $probe) !== false) {
+            break;
+        }
+        usleep(microseconds: 10_000);
+    }
+    $assertSame(200, curl_getinfo(handle: $probe, option: CURLINFO_HTTP_CODE));
+    putenv(assignment: 'EXTRABLATT_HN_FIXTURE_URL=http://' . $address);
+    require __DIR__ . '/fixtures/hackernews_http.php';
     $assertSame($imageUrl, $invoke('extractImageFromPage', $threadUrl));
     $assertSame(null, $invoke('extractImageFromPage', $selfUrl));
     $assertSame(
@@ -91,6 +122,7 @@ try {
     );
     $assertSame(null, $invoke('extractImageFromPage', pageUrl: 'https://example.com/unsafe'));
     $invoke('cacheSet', key: 'bodyimg:' . md5(string: $threadUrl), value: '{"url":""}');
+    $invoke('cacheSet', key: 'bodyimg:v2:' . md5(string: $threadUrl), value: '{"url":""}');
     $assertSame(false, $invoke('bodyImgCacheExists', $threadUrl));
     $invoke('writeBodyImgCache', $threadUrl, $imageUrl);
     $assertSame($imageUrl, $invoke('readBodyImgCache', $threadUrl));
@@ -108,25 +140,6 @@ try {
     $assertSame(160, $dimensions[0]);
     $assertSame(160, $dimensions[1]);
 
-    $socket = stream_socket_server(address: 'tcp://127.0.0.1:0');
-    $address = stream_socket_get_name(socket: $socket, remote: false);
-    fclose(stream: $socket);
-    file_put_contents(filename: $rootDirectory . '/.data/models', data: '{}');
-    $server = proc_open(
-        command: [PHP_BINARY, '-S', $address, '-t', $rootDirectory . '/.data'],
-        descriptor_spec: [0 => ['pipe', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
-        pipes: $pipes
-    );
-    fclose(stream: $pipes[0]);
-    $probe = curl_init(url: 'http://' . $address . '/models');
-    curl_setopt_array(handle: $probe, options: [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT_MS => 100]);
-    for ($attempt = 0; $attempt < 100; $attempt++) {
-        if (curl_exec(handle: $probe) !== false) {
-            break;
-        }
-        usleep(microseconds: 10_000);
-    }
-    $assertSame(200, curl_getinfo(handle: $probe, option: CURLINFO_HTTP_CODE));
     file_put_contents(
         filename: $rootDirectory . '/.data/.env',
         data: "AI_PROVIDER=fixture\nAI_MODEL=fixture\nAI_BASE_URL=http://" . $address . "\n"
@@ -147,6 +160,8 @@ try {
         filename: $rootDirectory . '/.data/scrape.php',
         data: '<?php declare(strict_types=1); require ' .
             var_export(value: dirname(__DIR__) . '/src/Extrablatt.php', return: true) .
+            '; require ' .
+            var_export(value: __DIR__ . '/fixtures/hackernews_http.php', return: true) .
             '; $app = new vielhuber\\extrablatt\\Extrablatt(dirname(__DIR__));' .
             '(new ReflectionMethod($app, "runScrape"))->invoke($app);'
     );
@@ -165,6 +180,7 @@ try {
         }
     }
 } finally {
+    putenv(assignment: 'EXTRABLATT_HN_FIXTURE_URL');
     if (is_resource(value: $server)) {
         proc_terminate(process: $server);
         proc_close(process: $server);

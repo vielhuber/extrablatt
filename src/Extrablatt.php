@@ -243,12 +243,17 @@ final class Extrablatt
      */
     private function extractImageFromPage(string $pageUrl): ?string
     {
-        $result = $this->fetchViaImpersonate(url: $pageUrl);
-        if ($result->body === null || $result->body === '') {
+        $isHackerNews = parse_url(url: $pageUrl, component: PHP_URL_HOST) === 'news.ycombinator.com';
+        // HN rejects the impersonated browser fingerprint with HTTP 419.
+        $result = $isHackerNews ? null : $this->fetchViaImpersonate(url: $pageUrl);
+        $body = $isHackerNews
+            ? $this->httpGet(url: $pageUrl, timeout: self::FETCH_MAX_TIME_SECONDS)
+            : $result?->body;
+        if ($body === null || $body === '') {
             return null;
         }
-        $body = substr(string: $result->body, offset: 0, length: 300_000);
-        if (parse_url(url: $pageUrl, component: PHP_URL_HOST) === 'news.ycombinator.com') {
+        $body = substr(string: $body, offset: 0, length: 300_000);
+        if ($isHackerNews) {
             if (
                 preg_match(pattern: '~<span class="titleline"><a href="([^"]+)"~i', subject: $body, matches: $match) !==
                 1
@@ -284,7 +289,7 @@ final class Extrablatt
             $pageUrl = $sourceUrl;
             $body = substr(string: $result->body, offset: 0, length: 300_000);
         }
-        $pageUrl = $result->finalUrl !== '' ? $result->finalUrl : $pageUrl;
+        $pageUrl = $result?->finalUrl ?: $pageUrl;
         $previousErrors = libxml_use_internal_errors(use_errors: true);
         $document = new \DOMDocument();
         $document->loadHTML(source: $body, options: LIBXML_NONET);
@@ -5433,12 +5438,12 @@ final class Extrablatt
      */
     private function bodyImgCacheExists(string $url): bool
     {
-        return $this->cacheHas(key: 'bodyimg:v2:' . md5(string: $url));
+        return $this->cacheHas(key: 'bodyimg:v3:' . md5(string: $url));
     }
 
     private function readBodyImgCache(string $url): ?string
     {
-        $v = $this->cacheGet(key: 'bodyimg:v2:' . md5(string: $url));
+        $v = $this->cacheGet(key: 'bodyimg:v3:' . md5(string: $url));
         if ($v === null) {
             return null;
         }
@@ -5456,7 +5461,7 @@ final class Extrablatt
             $imageUrl = html_entity_decode(string: $imageUrl, flags: ENT_QUOTES);
         }
         $this->cacheSet(
-            key: 'bodyimg:v2:' . md5(string: $url),
+            key: 'bodyimg:v3:' . md5(string: $url),
             value: (string) json_encode(value: ['url' => $imageUrl])
         );
     }
