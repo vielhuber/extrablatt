@@ -239,7 +239,7 @@ final class Extrablatt
     /**
      * Fetch a page and extract the best representative image URL using
      * a layered fallback: og:image → twitter:image → first <img src> in
-     * the body. Relative URLs are resolved against the page URL.
+     * the body. HN discussions resolve to the linked article, not HN's logo.
      */
     private function extractImageFromPage(string $pageUrl): ?string
     {
@@ -247,17 +247,74 @@ final class Extrablatt
         if ($result->body === null || $result->body === '') {
             return null;
         }
-        $body = substr(string: $result->body, offset: 0, length: 300000);
-
-        $patterns = [
-            '~(?:property|name)=["\']og:image(?::secure_url)?["\'][^>]{0,200}content=["\']([^"\']+)~i',
-            '~(?:property|name)=["\']twitter:image(?::src)?["\'][^>]{0,200}content=["\']([^"\']+)~i',
-            '~<img[^>]+src=["\']([^"\']+\.(?:jpe?g|png|webp|gif)(?:\?[^"\']*)?)["\']~i',
-        ];
-        foreach ($patterns as $pattern) {
-            if (preg_match(pattern: $pattern, subject: $body, matches: $m) === 1) {
-                $candidate = html_entity_decode(string: $m[1], flags: ENT_QUOTES);
-                if ($candidate === '') {
+        $body = substr(string: $result->body, offset: 0, length: 300_000);
+        if (parse_url(url: $pageUrl, component: PHP_URL_HOST) === 'news.ycombinator.com') {
+            if (
+                preg_match(pattern: '~<span class="titleline"><a href="([^"]+)"~i', subject: $body, matches: $match) !==
+                1
+            ) {
+                return null;
+            }
+            $sourceUrl = $this->resolveRelativeUrl(
+                base: $pageUrl,
+                ref: html_entity_decode(string: $match[1], flags: ENT_QUOTES | ENT_HTML5)
+            );
+            if (
+                !in_array(
+                    needle: parse_url(url: $sourceUrl, component: PHP_URL_SCHEME),
+                    haystack: ['http', 'https'],
+                    strict: true
+                ) ||
+                parse_url(url: $sourceUrl, component: PHP_URL_HOST) === 'news.ycombinator.com'
+            ) {
+                return null;
+            }
+            if (
+                preg_match(
+                    pattern: '~\.(?:jpe?g|png|webp|gif)$~i',
+                    subject: (string) parse_url(url: $sourceUrl, component: PHP_URL_PATH)
+                ) === 1
+            ) {
+                return $sourceUrl;
+            }
+            $result = $this->fetchViaImpersonate(url: $sourceUrl);
+            if ($result->body === null || $result->body === '') {
+                return null;
+            }
+            $pageUrl = $sourceUrl;
+            $body = substr(string: $result->body, offset: 0, length: 300_000);
+        }
+        $pageUrl = $result->finalUrl !== '' ? $result->finalUrl : $pageUrl;
+        $previousErrors = libxml_use_internal_errors(use_errors: true);
+        $document = new \DOMDocument();
+        $document->loadHTML(source: $body, options: LIBXML_NONET);
+        libxml_clear_errors();
+        libxml_use_internal_errors(use_errors: $previousErrors);
+        $xpath = new \DOMXPath(document: $document);
+        foreach (
+            [
+                '//meta[@property="og:image" or @name="og:image" or @property="og:image:secure_url" or @name="og:image:secure_url"]/@content',
+                '//meta[@name="twitter:image" or @property="twitter:image" or @name="twitter:image:src" or @property="twitter:image:src"]/@content',
+                '//body//img/@src'
+            ]
+            as $query
+        ) {
+            foreach ($xpath->query(expression: $query) as $node) {
+                $candidate = trim(string: $node->nodeValue);
+                if (
+                    $candidate === '' ||
+                    !in_array(
+                        needle: parse_url(url: $candidate, component: PHP_URL_SCHEME),
+                        haystack: [null, 'http', 'https'],
+                        strict: true
+                    )
+                ) {
+                    continue;
+                }
+                if (
+                    $node->parentNode?->nodeName === 'img' &&
+                    preg_match(pattern: '~\.(?:jpe?g|png|webp|gif)(?:\?|$)~i', subject: $candidate) !== 1
+                ) {
                     continue;
                 }
                 return $this->resolveRelativeUrl(base: $pageUrl, ref: $candidate);
@@ -4379,16 +4436,29 @@ final class Extrablatt
             }
         }
 
-        // HN backfill: deeper body-image probe (first inline <img>) for HN
-        // articles whose Phase-2 og:image grep came up empty. Capped at 60
-        // per scrape so the wall time stays bounded (the best?h=168 list
-        // brings ~30 new stories a day); the body-img cache remembers
-        // exhausted probes so they aren't retried forever.
-        $hnRows = (array) $db->query(query: "
+        // Revisit missing images and old favicon fallbacks against the linked article.
+        $hnRows = (array) $db
+            ->query(
+                query: "
             SELECT url, title FROM articles
-            WHERE paper='hackernews' AND thumbnail IS NULL
-            ORDER BY published_at DESC LIMIT 60
-        ")->fetchAll(mode: PDO::FETCH_ASSOC);
+            WHERE paper='hackernews'
+                AND (thumbnail IS NULL OR image_url LIKE 'https://www.google.com/s2/favicons%')
+            ORDER BY published_at DESC
+        "
+            )
+            ->fetchAll(mode: PDO::FETCH_ASSOC);
+        $hnRows = array_column(array: $hnRows, column_key: null, index_key: 'url');
+        $hnFreshRows = [];
+        foreach ($allItems as $entry) {
+            $item = $entry['item'];
+            if (
+                $entry['paper'] === 'hackernews' &&
+                !in_array(needle: $item->link, haystack: $knownThumbs, strict: true)
+            ) {
+                $hnFreshRows[$item->link] = ['url' => $item->link, 'title' => $item->title];
+            }
+        }
+        $hnRows = $hnFreshRows + $hnRows;
         $hnImages = [];
         $hnCandidates = [];
         $hnProbed = 0;
@@ -4397,6 +4467,9 @@ final class Extrablatt
             if ($this->bodyImgCacheExists(url: $url)) {
                 $img = $this->readBodyImgCache(url: $url);
             } else {
+                if ($hnProbed >= 60) {
+                    continue;
+                }
                 $img = $this->extractImageFromPage(pageUrl: $url);
                 $this->writeBodyImgCache(url: $url, imageUrl: $img ?? '');
                 $hnProbed++;
@@ -4407,24 +4480,29 @@ final class Extrablatt
             $hnImages[$url] = $img;
             $hnCandidates[] = [
                 'paper' => 'hackernews',
-                'item' => new FeedItem(
-                    title: (string) $row['title'],
-                    link: $url,
-                    publishedAt: null,
-                    imageUrl: null
-                )
+                'item' => new FeedItem(title: (string) $row['title'], link: $url, publishedAt: null, imageUrl: null)
             ];
+            if (count(value: $hnCandidates) >= 60) {
+                break;
+            }
         }
         if (!empty($hnCandidates) || $hnProbed > 0) {
             $emit(sprintf('  HN-Backfill: %d Kandidaten (%d frisch geprüft)', count(value: $hnCandidates), $hnProbed));
             if (!empty($hnCandidates)) {
                 $hnStart = microtime(as_float: true);
                 $hnThumbs = $this->downloadThumbnailsStreaming(items: $hnCandidates, imageUrls: $hnImages, emit: $emit);
-                $hnUpdate = $db->prepare(query: 'UPDATE articles SET thumbnail = :thumb WHERE url = :url');
+                $hnUpdate = $db->prepare(
+                    query: 'UPDATE articles SET thumbnail = :thumb, image_url = :image WHERE url = :url'
+                );
                 $hnWritten = 0;
                 foreach ($hnThumbs as $url => $thumb) {
                     if ($thumb !== null) {
-                        $hnUpdate->execute(params: [':thumb' => $thumb, ':url' => (string) $url]);
+                        $hnUpdate->execute(
+                            params: [':thumb' => $thumb, ':image' => $hnImages[$url], ':url' => (string) $url]
+                        );
+                        $thumbnails[$url] = $thumb;
+                        $effectiveImages[$url] = $hnImages[$url];
+                        $this->writeOgImageCache(url: (string) $url, imageUrl: $hnImages[$url]);
                         $hnWritten++;
                     }
                 }
@@ -5355,12 +5433,12 @@ final class Extrablatt
      */
     private function bodyImgCacheExists(string $url): bool
     {
-        return $this->cacheHas(key: 'bodyimg:' . md5(string: $url));
+        return $this->cacheHas(key: 'bodyimg:v2:' . md5(string: $url));
     }
 
     private function readBodyImgCache(string $url): ?string
     {
-        $v = $this->cacheGet(key: 'bodyimg:' . md5(string: $url));
+        $v = $this->cacheGet(key: 'bodyimg:v2:' . md5(string: $url));
         if ($v === null) {
             return null;
         }
@@ -5378,7 +5456,7 @@ final class Extrablatt
             $imageUrl = html_entity_decode(string: $imageUrl, flags: ENT_QUOTES);
         }
         $this->cacheSet(
-            key: 'bodyimg:' . md5(string: $url),
+            key: 'bodyimg:v2:' . md5(string: $url),
             value: (string) json_encode(value: ['url' => $imageUrl])
         );
     }
