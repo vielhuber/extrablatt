@@ -13,6 +13,11 @@ $threadUrl = 'https://news.ycombinator.com/item?id=1';
 $selfUrl = 'https://news.ycombinator.com/item?id=2';
 $freshUrl = 'https://news.ycombinator.com/item?id=3';
 $imageUrl = 'https://example.com/cover.jpg?width=600&height=400';
+$faviconUrl = 'https://www.google.com/s2/favicons?domain=example.com&sz=128';
+$hackerNewsFavicon = 'https://www.google.com/s2/favicons?domain=news.ycombinator.com&sz=128';
+$fallbackUrl = 'https://news.ycombinator.com/item?id=4';
+$brokenUrl = 'https://news.ycombinator.com/item?id=5';
+$blockedUrl = 'https://news.ycombinator.com/item?id=6';
 $image = imagecreatetruecolor(width: 320, height: 240);
 ob_start();
 imagejpeg(image: $image);
@@ -21,18 +26,38 @@ $fixtures = [
     $threadUrl => '<span class="titleline"><a href="https://example.com/story">Story</a></span><img src="y18.gif">',
     $freshUrl => '<span class="titleline"><a href="https://example.com/story">Fresh</a></span>',
     $selfUrl => '<span class="titleline"><a href="item?id=2">Ask HN</a></span><img src="y18.gif">',
+    $fallbackUrl => '<span class="titleline"><a href="https://example.com/no-image">No image</a></span>',
+    $brokenUrl => '<span class="titleline"><a href="https://example.com/unavailable.jpg">Broken image</a></span>',
+    $blockedUrl => '<span class="titleline"><a href="https://example.com/blocked">Blocked article</a></span>',
     'https://example.com/story' => '<meta content="/cover.jpg?width=600&amp;height=400" property="og:image">',
+    'https://example.com/no-image' => '<html><body>No preview image.</body></html>',
     'https://example.com/twitter' => '<meta content="//images.example.com/twitter.png" name="twitter:image">',
     'https://example.com/inline' => '<body><img src="images/photo.webp"></body>',
     'https://example.com/unsafe' => '<meta property="og:image" content="javascript:alert(1)">',
-    $imageUrl => base64_encode(string: $imageBytes),
-    'https://example.com/feed' =>
-        '<rss version="2.0"><channel><item><title>Fresh</title><link>' .
-        $freshUrl .
+    $imageUrl => 'data:image/jpeg;base64,' . base64_encode(string: $imageBytes),
+    $faviconUrl => 'data:image/jpeg;base64,' . base64_encode(string: $imageBytes),
+    $hackerNewsFavicon => 'data:image/jpeg;base64,' . base64_encode(string: $imageBytes)
+];
+$expectedImages = [$threadUrl => $imageUrl];
+$feed = '<rss version="2.0"><channel>';
+foreach (range(start: 2, end: 10) as $id) {
+    $url = 'https://news.ycombinator.com/item?id=' . $id;
+    $fixtures[$url] ??= '<span class="titleline"><a href="https://example.com/story">Story ' . $id . '</a></span>';
+    $expectedImages[$url] = match ($id) {
+        2 => $hackerNewsFavicon,
+        4, 5, 6 => $faviconUrl,
+        default => $imageUrl
+    };
+    $feed .=
+        '<item><title>Story ' .
+        $id .
+        '</title><link>' .
+        $url .
         '</link><pubDate>' .
         gmdate(format: DATE_RSS) .
-        '</pubDate></item></channel></rss>'
-];
+        '</pubDate></item>';
+}
+$fixtures['https://example.com/feed'] = $feed . '</channel></rss>';
 file_put_contents(filename: $rootDirectory . '/.data/fixtures.json', data: (string) json_encode(value: $fixtures));
 file_put_contents(
     filename: $rootDirectory . '/.bin/curl_chrome123',
@@ -55,8 +80,8 @@ file_put_contents(
     if (str_starts_with($url, 'https://news.ycombinator.com/') && in_array('-w', $argv, true)) {
         $body = '';
     }
-    if (str_contains($url, '/cover.jpg')) {
-        $body = base64_decode($body, true);
+    if (str_starts_with($body, 'data:image/jpeg;base64,')) {
+        $body = base64_decode(substr($body, 23), true);
     }
     if ($destination !== null) {
         file_put_contents($destination, $body);
@@ -111,7 +136,9 @@ try {
     putenv(assignment: 'EXTRABLATT_HN_FIXTURE_URL=http://' . $address);
     require __DIR__ . '/fixtures/hackernews_http.php';
     $assertSame($imageUrl, $invoke('extractImageFromPage', $threadUrl));
-    $assertSame(null, $invoke('extractImageFromPage', $selfUrl));
+    $assertSame($hackerNewsFavicon, $invoke('extractImageFromPage', $selfUrl));
+    $assertSame($faviconUrl, $invoke('extractImageFromPage', $fallbackUrl));
+    $assertSame($faviconUrl, $invoke('extractImageFromPage', $blockedUrl));
     $assertSame(
         'https://images.example.com/twitter.png',
         $invoke('extractImageFromPage', pageUrl: 'https://example.com/twitter')
@@ -123,6 +150,7 @@ try {
     $assertSame(null, $invoke('extractImageFromPage', pageUrl: 'https://example.com/unsafe'));
     $invoke('cacheSet', key: 'bodyimg:' . md5(string: $threadUrl), value: '{"url":""}');
     $invoke('cacheSet', key: 'bodyimg:v2:' . md5(string: $threadUrl), value: '{"url":""}');
+    $invoke('cacheSet', key: 'bodyimg:v3:' . md5(string: $threadUrl), value: '{"url":""}');
     $assertSame(false, $invoke('bodyImgCacheExists', $threadUrl));
     $invoke('writeBodyImgCache', $threadUrl, $imageUrl);
     $assertSame($imageUrl, $invoke('readBodyImgCache', $threadUrl));
@@ -172,13 +200,37 @@ try {
             result_code: $exitCode
         );
         $assertSame(0, $exitCode);
-        $rows = $database->query(query: 'SELECT image_url, thumbnail FROM articles')->fetchAll(mode: PDO::FETCH_ASSOC);
-        $assertSame(2, count(value: $rows));
+        $rows = $database
+            ->query(query: 'SELECT url, image_url, thumbnail FROM articles')
+            ->fetchAll(mode: PDO::FETCH_ASSOC);
+        $assertSame(10, count(value: $rows));
         foreach ($rows as $row) {
-            $assertSame($imageUrl, $row['image_url']);
+            $assertSame($expectedImages[$row['url']], $row['image_url']);
             $assertSame(true, str_starts_with(haystack: $row['thumbnail'], needle: 'data:image/jpeg;base64,'));
         }
     }
+    $priorityStatement = $database->prepare(
+        query: 'UPDATE articles SET published_at=?, rating=5000, image_url=?, thumbnail="old-favicon" WHERE url=?'
+    );
+    $priorityStatement->execute(params: [time() - 86_400, $hackerNewsFavicon, $threadUrl]);
+    $insert = $database->prepare(
+        query: 'INSERT INTO articles (url, paper, title, status, rating, published_at, image_url, thumbnail, created_at, updated_at)
+            VALUES (?, "hackernews", ?, "original", 1, ?, ?, "old-favicon", ?, ?)'
+    );
+    foreach (range(start: 100, end: 160) as $id) {
+        $url = 'https://news.ycombinator.com/item?id=' . $id;
+        $insert->execute(params: [$url, 'Low-ranked ' . $id, time(), $hackerNewsFavicon, time(), time()]);
+        $invoke('writeBodyImgCache', $url, $imageUrl);
+    }
+    exec(
+        command: escapeshellarg(arg: PHP_BINARY) . ' ' . escapeshellarg(arg: $rootDirectory . '/.data/scrape.php'),
+        output: $scrapeOutput,
+        result_code: $exitCode
+    );
+    $assertSame(0, $exitCode);
+    $check = $database->prepare(query: 'SELECT image_url FROM articles WHERE url=?');
+    $check->execute(params: [$threadUrl]);
+    $assertSame($imageUrl, $check->fetchColumn());
 } finally {
     putenv(assignment: 'EXTRABLATT_HN_FIXTURE_URL');
     if (is_resource(value: $server)) {

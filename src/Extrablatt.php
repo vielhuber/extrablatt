@@ -244,11 +244,10 @@ final class Extrablatt
     private function extractImageFromPage(string $pageUrl): ?string
     {
         $isHackerNews = parse_url(url: $pageUrl, component: PHP_URL_HOST) === 'news.ycombinator.com';
+        $faviconUrl = null;
         // HN rejects the impersonated browser fingerprint with HTTP 419.
         $result = $isHackerNews ? null : $this->fetchViaImpersonate(url: $pageUrl);
-        $body = $isHackerNews
-            ? $this->httpGet(url: $pageUrl, timeout: self::FETCH_MAX_TIME_SECONDS)
-            : $result?->body;
+        $body = $isHackerNews ? $this->httpGet(url: $pageUrl, timeout: self::FETCH_MAX_TIME_SECONDS) : $result?->body;
         if ($body === null || $body === '') {
             return null;
         }
@@ -269,10 +268,15 @@ final class Extrablatt
                     needle: parse_url(url: $sourceUrl, component: PHP_URL_SCHEME),
                     haystack: ['http', 'https'],
                     strict: true
-                ) ||
-                parse_url(url: $sourceUrl, component: PHP_URL_HOST) === 'news.ycombinator.com'
+                )
             ) {
                 return null;
+            }
+            $sourceHost = (string) parse_url(url: $sourceUrl, component: PHP_URL_HOST);
+            $faviconUrl = 'https://www.google.com/s2/favicons?domain=' . rawurlencode(string: $sourceHost) . '&sz=128';
+            $this->cacheSet(key: 'hnfavicon:' . md5(string: $pageUrl), value: $faviconUrl);
+            if ($sourceHost === 'news.ycombinator.com') {
+                return $faviconUrl;
             }
             if (
                 preg_match(
@@ -284,7 +288,7 @@ final class Extrablatt
             }
             $result = $this->fetchViaImpersonate(url: $sourceUrl);
             if ($result->body === null || $result->body === '') {
-                return null;
+                return $faviconUrl;
             }
             $pageUrl = $sourceUrl;
             $body = substr(string: $result->body, offset: 0, length: 300_000);
@@ -325,7 +329,7 @@ final class Extrablatt
                 return $this->resolveRelativeUrl(base: $pageUrl, ref: $candidate);
             }
         }
-        return null;
+        return $faviconUrl;
     }
 
     /**
@@ -4447,8 +4451,9 @@ final class Extrablatt
                 query: "
             SELECT url, title FROM articles
             WHERE paper='hackernews'
-                AND (thumbnail IS NULL OR image_url LIKE 'https://www.google.com/s2/favicons%')
-            ORDER BY published_at DESC
+                AND (thumbnail IS NULL OR image_url LIKE 'https://www.google.com/s2/favicons?domain=news.ycombinator.com%')
+            ORDER BY (published_at >= CAST(strftime('%s', 'now', '-7 days') AS INTEGER) AND read_at IS NULL) DESC,
+                rating IS NULL, rating DESC, published_at DESC
         "
             )
             ->fetchAll(mode: PDO::FETCH_ASSOC);
@@ -4496,6 +4501,32 @@ final class Extrablatt
             if (!empty($hnCandidates)) {
                 $hnStart = microtime(as_float: true);
                 $hnThumbs = $this->downloadThumbnailsStreaming(items: $hnCandidates, imageUrls: $hnImages, emit: $emit);
+                $hnCandidatesByUrl = array_combine(keys: array_keys(array: $hnImages), values: $hnCandidates);
+                $hnRetryCandidates = [];
+                $hnRetryImages = [];
+                foreach ($hnThumbs as $url => $thumb) {
+                    $faviconUrl = $this->cacheGet(key: 'hnfavicon:' . md5(string: (string) $url));
+                    if ($thumb !== null || $faviconUrl === null || $faviconUrl === $hnImages[$url]) {
+                        continue;
+                    }
+                    $hnRetryCandidates[] = $hnCandidatesByUrl[$url];
+                    $hnRetryImages[$url] = $faviconUrl;
+                }
+                if ($hnRetryCandidates !== []) {
+                    $hnRetryThumbs = $this->downloadThumbnailsStreaming(
+                        items: $hnRetryCandidates,
+                        imageUrls: $hnRetryImages,
+                        emit: $emit
+                    );
+                    foreach ($hnRetryThumbs as $url => $thumb) {
+                        if ($thumb === null) {
+                            continue;
+                        }
+                        $hnThumbs[$url] = $thumb;
+                        $hnImages[$url] = $hnRetryImages[$url];
+                        $this->writeBodyImgCache(url: (string) $url, imageUrl: $hnRetryImages[$url]);
+                    }
+                }
                 $hnUpdate = $db->prepare(
                     query: 'UPDATE articles SET thumbnail = :thumb, image_url = :image WHERE url = :url'
                 );
@@ -5438,12 +5469,12 @@ final class Extrablatt
      */
     private function bodyImgCacheExists(string $url): bool
     {
-        return $this->cacheHas(key: 'bodyimg:v3:' . md5(string: $url));
+        return $this->cacheHas(key: 'bodyimg:v4:' . md5(string: $url));
     }
 
     private function readBodyImgCache(string $url): ?string
     {
-        $v = $this->cacheGet(key: 'bodyimg:v3:' . md5(string: $url));
+        $v = $this->cacheGet(key: 'bodyimg:v4:' . md5(string: $url));
         if ($v === null) {
             return null;
         }
@@ -5461,7 +5492,7 @@ final class Extrablatt
             $imageUrl = html_entity_decode(string: $imageUrl, flags: ENT_QUOTES);
         }
         $this->cacheSet(
-            key: 'bodyimg:v3:' . md5(string: $url),
+            key: 'bodyimg:v4:' . md5(string: $url),
             value: (string) json_encode(value: ['url' => $imageUrl])
         );
     }
