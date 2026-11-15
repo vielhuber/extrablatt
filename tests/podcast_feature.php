@@ -56,6 +56,10 @@ try {
         message: 'Missing configuration must be explained.'
     );
     $assert(condition: !str_contains($dashboard, '<audio '), message: 'Missing audio must not render a broken player.');
+    $assert(
+        condition: preg_match('~src="/\?asset=js/podcast\.js&amp;v=[a-f0-9]+"~', $dashboard) === 1,
+        message: 'The archive must not reuse the cached script URL of the old test UI.'
+    );
 
     $_GET = ['view' => 'podcast'];
     ob_start();

@@ -258,6 +258,11 @@ final class Podcast
         if ($items === '') {
             $items = '<p>Noch keine Tagesfolgen vorhanden.</p>';
         }
+        $scriptVersion = substr(
+            string: hash_file(algo: 'sha256', filename: __DIR__ . '/../js/podcast.js'),
+            offset: 0,
+            length: 12
+        );
         return <<<HTML
         <section class="podcast" data-podcast-running="{$running}">
             <h2>Podcast</h2>
@@ -266,7 +271,7 @@ final class Podcast
             <p class="podcast__note">Einmal täglich nach dem Zeitungs-Scrape (Europe/Berlin). Ziel: etwa 15 Minuten; Google garantiert keine exakte Laufzeit. Die Google-Anbindung ist inoffiziell. KI-Inhalte können Fehler enthalten.</p>
             <div class="podcast__episodes">{$items}</div>
         </section>
-        <script src="/?asset=js/podcast.js" defer></script>
+        <script src="/?asset=js/podcast.js&amp;v={$scriptVersion}" defer></script>
         HTML;
     }
 }
