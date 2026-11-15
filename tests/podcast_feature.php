@@ -40,12 +40,12 @@ try {
         message: 'Podcast must be an active menu item.'
     );
     $assert(
-        condition: str_contains($dashboard, 'Seite 10 / 10'),
+        condition: str_contains($dashboard, 'Seite 1 / 10'),
         message: 'Podcast must participate in page navigation.'
     );
     $assert(
-        condition: str_contains($dashboard, 'href="/?view=crypto" aria-label="Vorheriger Tab"'),
-        message: 'Podcast must follow Crypto.'
+        condition: str_contains($dashboard, 'href="/?view=zeitung" aria-label="Nächster Tab"'),
+        message: 'Podcast must precede Zeitung.'
     );
     $assert(
         condition: !str_contains($dashboard, '<form class="filters"'),

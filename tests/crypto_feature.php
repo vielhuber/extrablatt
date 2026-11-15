@@ -77,9 +77,9 @@ if (substr_count(haystack: $dashboard, needle: 'class="crypto__kpi"') !== 4) {
 }
 $assertContains('63.000,00 €', $dashboard);
 $assertContains('data-chart-config', $dashboard);
-$assertContains('Seite 9 / 10', $dashboard);
+$assertContains('Seite 10 / 10', $dashboard);
 $assertContains('href="/?view=meldungen" aria-label="Vorheriger Tab"', $dashboard);
-$assertContains('href="/?view=podcast" aria-label="Nächster Tab"', $dashboard);
+$assertContains('aria-disabled="true">→</span>', $dashboard);
 
 $_GET = ['view' => 'crypto'];
 ob_start();
@@ -87,7 +87,7 @@ $application->run();
 $routedDashboard = (string) ob_get_clean();
 $_GET = [];
 $assertContains('BTC/EUR', $routedDashboard);
-$assertContains('Seite 9 / 10', $routedDashboard);
+$assertContains('Seite 10 / 10', $routedDashboard);
 
 $digest = [
     'generated_at' => time(),

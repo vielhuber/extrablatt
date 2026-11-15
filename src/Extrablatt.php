@@ -9237,7 +9237,7 @@ final class Extrablatt
         // like turning newspaper pages. Order must match the tab row in the
         // template below; search mode has no active tab and gets no pager.
         // c't stays out: it's a reference archive, not a page of the paper.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'pnp', 'reddit', 'x', 'medium', 'meldungen', 'crypto', 'podcast'];
+        $navOrder = ['podcast', 'zeitung', 'hackernews', 'bild', 'pnp', 'reddit', 'x', 'medium', 'meldungen', 'crypto'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -9417,7 +9417,7 @@ HTML : '';
                 nav.viewnav { display: flex; gap: 0; margin: 0 0 1rem; border-bottom: 1px solid #d4d4d8; }
                 .viewnav__tabs { display: contents; }
                 .viewnav__toggle { display: none; }
-                nav.viewnav .viewnav__tab { flex: 1 1 0; text-align: center; white-space: nowrap; font: 600 12px/1 Arial, sans-serif; color: #71717a; text-decoration: none; padding: 10px 4px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
+                nav.viewnav .viewnav__tab { flex: 1 1 0; text-align: center; white-space: nowrap; font: 600 11px/1 Arial, sans-serif; color: #71717a; text-decoration: none; padding: 10px 3px; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 Arial, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
@@ -9676,6 +9676,7 @@ HTML : '';
                         <span class="viewnav__chevron" aria-hidden="true"></span>
                     </button>
                     <div class="viewnav__tabs" id="viewnavTabs">
+                        <a class="viewnav__tab{$podcastActive}" href="/?view=podcast">Podcast</a>
                         <a class="viewnav__tab{$zeitungActive}" href="/?view=zeitung">Zeitung</a>
                         {$mediaTabHtml['hackernews']}
                         <a class="viewnav__tab{$bildActive}" href="/?view=bild">BILD</a>
@@ -9685,7 +9686,6 @@ HTML : '';
                         {$mediaTabHtml['medium']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                         <a class="viewnav__tab{$cryptoActive}" href="/?view=crypto">Crypto</a>
-                        <a class="viewnav__tab{$podcastActive}" href="/?view=podcast">Podcast</a>
                         {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                         {$mediaTabHtml['serien']}
