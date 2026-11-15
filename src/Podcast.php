@@ -8,7 +8,12 @@ final readonly class PodcastStatus
     /**
      * Keep the browser payload free of provider metadata.
      */
-    public function __construct(public string $status, public string $message, public bool $hasAudio) {}
+    public function __construct(
+        public string $date,
+        public string $status,
+        public string $message,
+        public bool $hasAudio
+    ) {}
 }
 
 final class Podcast
@@ -33,15 +38,15 @@ final class Podcast
     /**
      * Expose only fixed messages, never raw worker output or Google session data.
      */
-    public function status(): PodcastStatus
+    public function status(string $date): PodcastStatus
     {
-        $directory = $this->rootDirectory . '/.data/podcast';
+        $directory = $this->rootDirectory . '/.data/podcast/' . $date;
         $file = $directory . '/status.json';
         $state = is_file($file)
             ? json_decode(json: (string) file_get_contents($file), associative: true)
             : ['stage' => 'idle'];
         $stage = is_array($state) ? $state['stage'] ?? 'error' : 'error';
-        $hasAudio = $stage === 'completed' && is_file($directory . '/test.m4a');
+        $hasAudio = $stage === 'completed' && is_file($directory . '/audio.m4a');
         $status = match ($stage) {
             'idle' => 'idle',
             'starting', 'source', 'generating', 'downloading' => 'running',
@@ -49,54 +54,89 @@ final class Podcast
             default => 'error'
         };
         $message = match ($stage) {
-            'idle' => 'Bereit für einen deutschen Testpodcast über die Erstellung von KI-Podcasts.',
+            'idle' => 'Noch keine Tagesfolge verfügbar.',
             'starting' => 'Google-Anmeldung wird geprüft …',
-            'source' => 'Das Testbriefing wird vorbereitet …',
-            'generating' => 'Google erstellt den Testpodcast. Das kann mehrere Minuten dauern.',
+            'source' => 'Die vollständige Zeitung wird vorbereitet …',
+            'generating' => 'Google erstellt die Tagesfolge. Das kann mehrere Minuten dauern.',
             'downloading' => 'Die fertige Audiodatei wird heruntergeladen …',
-            'completed' => $hasAudio ? 'Der Testpodcast ist bereit.' : 'Die Audiodatei fehlt.',
+            'completed' => $hasAudio ? 'Die Tagesfolge ist bereit.' : 'Die Audiodatei fehlt.',
             'auth_error'
                 => 'Google-Anmeldung fehlgeschlagen. NOTEBOOKLM_AUTH_JSON in der Production-Konfiguration erneuern.',
             'quota_error'
-                => 'Das Google-Kontingent reicht derzeit nicht aus. Der Auftrag wird nicht automatisch wiederholt.',
+                => 'Das Google-Kontingent reicht derzeit nicht aus. Heute wird kein zweiter Auftrag gestartet.',
             default
-                => 'Der Test konnte nicht abgeschlossen werden. Den gespeicherten Auftrag prüfen, bevor erneut generiert wird.'
+                => 'Die Tagesfolge konnte nicht abgeschlossen werden. Den gespeicherten Auftrag prüfen; keine automatische Wiederholung.'
         };
-        return new PodcastStatus(status: $status, message: $message, hasAudio: $hasAudio);
+        return new PodcastStatus(date: $date, status: $status, message: $message, hasAudio: $hasAudio);
     }
 
     /**
-     * Run exactly one test while keeping credentials out of command arguments and logs.
+     * Freeze the complete newspaper once per Berlin calendar day and launch its worker.
      */
-    public function generate(): void
+    public function generateDaily(string $newspaperHtml, int $generatedAt): bool
     {
-        if (!$this->configured()) {
-            http_response_code(503);
-            return;
+        if (!$this->configured() || trim($newspaperHtml) === '') {
+            return false;
         }
+        $date = (new \DateTimeImmutable('@' . $generatedAt))
+            ->setTimezone(new \DateTimeZone('Europe/Berlin'))
+            ->format('Y-m-d');
         $directory = $this->rootDirectory . '/.data/podcast';
         if (!is_dir($directory)) {
             mkdir(directory: $directory, permissions: 0o700, recursive: true);
         }
         $lock = fopen(filename: $directory . '/generation.lock', mode: 'c+');
         if ($lock === false) {
-            http_response_code(503);
-            return;
+            return false;
         }
         if (!flock($lock, LOCK_EX | LOCK_NB)) {
             fclose($lock);
-            http_response_code(409);
-            return;
+            return false;
         }
         try {
-            if ($this->status()->status !== 'idle') {
-                return;
+            $directory .= '/' . $date;
+            if (is_file($directory . '/status.json')) {
+                return false;
             }
-            file_put_contents(filename: $directory . '/status.json', data: '{"stage":"starting"}');
-            ignore_user_abort(true);
-            set_time_limit(0);
+            $text = (string) preg_replace(
+                pattern: '~<(script|style|svg)\b[^>]*>.*?</\1>~is',
+                replacement: '',
+                subject: $newspaperHtml
+            );
+            $text = (string) preg_replace_callback(
+                pattern: '~<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>~is',
+                callback: static fn(array $match): string => strip_tags($match[2]) . ' (' . $match[1] . ')',
+                subject: $text
+            );
+            $text = (string) preg_replace(
+                pattern: '~</(?:p|h[1-6]|div|li|section)>|<br\s*/?>~i',
+                replacement: "\n",
+                subject: $text
+            );
+            $text = html_entity_decode(string: strip_tags($text), flags: ENT_QUOTES | ENT_HTML5, encoding: 'UTF-8');
+            $text = trim((string) preg_replace(pattern: '/[ \t]+/u', replacement: ' ', subject: $text));
+            if ($text === '') {
+                return false;
+            }
+            mkdir(directory: $directory, permissions: 0o700, recursive: true);
+            file_put_contents(
+                filename: $directory . '/source.txt',
+                data: 'Zeitung vom ' . $date . " (Europe/Berlin)\n\n" . $text
+            );
+            file_put_contents(
+                filename: $directory . '/status.json',
+                data: json_encode(['date' => $date, 'generated_at' => $generatedAt, 'stage' => 'starting'])
+            );
             $process = proc_open(
-                command: [$this->python, __DIR__ . '/../bin/extrablatt-podcast.py', $this->rootDirectory],
+                command: [
+                    '/bin/sh',
+                    '-c',
+                    '"$0" "$1" "$2" "$3" > /dev/null 2>&1 < /dev/null &',
+                    $this->python,
+                    __DIR__ . '/../bin/extrablatt-podcast.py',
+                    $this->rootDirectory,
+                    $date
+                ],
                 descriptor_spec: [
                     0 => ['file', '/dev/null', 'r'],
                     1 => ['file', '/dev/null', 'w'],
@@ -112,12 +152,11 @@ final class Podcast
                     'NOTEBOOKLM_AUTH_JSON' => $this->authentication
                 ]
             );
-            $exitCode = is_resource($process) ? proc_close($process) : 1;
-            if ($exitCode !== 0 && $this->status()->status === 'running') {
-                $state = json_decode(json: (string) file_get_contents($directory . '/status.json'), associative: true);
-                $state['stage'] = 'error';
-                file_put_contents($directory . '/status.json', json_encode($state));
+            if (!is_resource($process) || proc_close($process) !== 0) {
+                file_put_contents(filename: $directory . '/status.json', data: json_encode(['stage' => 'error']));
+                return false;
             }
+            return true;
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -125,15 +164,35 @@ final class Podcast
     }
 
     /**
-     * Stream the fixed private test artifact through the application's auth gate.
+     * Retain every dated episode, newest first, without exposing provider identifiers.
+     *
+     * @return PodcastStatus[]
      */
-    public function serveAudio(): void
+    public function episodes(): array
     {
-        if (!$this->status()->hasAudio) {
+        $files = glob($this->rootDirectory . '/.data/podcast/????-??-??/status.json') ?: [];
+        rsort($files);
+        $episodes = [];
+        foreach ($files as $file) {
+            $date = basename(dirname($file));
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/D', $date) !== 1) {
+                continue;
+            }
+            $episodes[] = $this->status($date);
+        }
+        return $episodes;
+    }
+
+    /**
+     * Stream only validated daily artifacts through the application's auth gate.
+     */
+    public function serveAudio(string $date): void
+    {
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/D', $date) !== 1 || !$this->status($date)->hasAudio) {
             http_response_code(404);
             return;
         }
-        $file = $this->rootDirectory . '/.data/podcast/test.m4a';
+        $file = $this->rootDirectory . '/.data/podcast/' . $date . '/audio.m4a';
         $size = filesize($file);
         $start = 0;
         $end = $size - 1;
@@ -162,34 +221,50 @@ final class Podcast
     }
 
     /**
-     * Keep the first integration limited to a manual test and its audio player.
+     * Present the daily archive without starting quota-consuming work from page views.
      */
-    public function render(#[\SensitiveParameter] string $token): string
+    public function render(): string
     {
-        $state = $this->status();
-        $message = htmlspecialchars($state->message, ENT_QUOTES);
-        $escapedToken = htmlspecialchars($token, ENT_QUOTES);
-        $disabled = !$this->configured() || $token === '' || $state->status !== 'idle' ? ' disabled' : '';
-        $configuration =
-            !$this->configured() || $token === ''
-                ? '<p>NOTEBOOKLM_PYTHON, NOTEBOOKLM_AUTH_JSON und AUTH_PASSWORD müssen in der privaten .env konfiguriert sein.</p>'
+        $episodes = $this->episodes();
+        $running = 'false';
+        $items = '';
+        foreach ($episodes as $episode) {
+            $dateLabel = (new \DateTimeImmutable($episode->date))->format('d.m.Y');
+            $message = htmlspecialchars($episode->message, ENT_QUOTES);
+            $audio = $episode->hasAudio
+                ? '<audio controls preload="none" aria-label="Zeitung vom ' .
+                    $dateLabel .
+                    '" src="/?podcast_audio=1&amp;date=' .
+                    $episode->date .
+                    '">Audio wird von diesem Browser nicht unterstützt.</audio>'
                 : '';
-        $audio = $state->hasAudio
-            ? '<audio controls preload="metadata" src="/?podcast_audio=1">Audio wird von diesem Browser nicht unterstützt.</audio>'
+            $items .=
+                '<article class="podcast__episode"><h3><time datetime="' .
+                $episode->date .
+                '">' .
+                $dateLabel .
+                '</time></h3><p>' .
+                $message .
+                '</p>' .
+                $audio .
+                '</article>';
+            if ($episode->status === 'running') {
+                $running = 'true';
+            }
+        }
+        $configuration = !$this->configured()
+            ? '<p>NOTEBOOKLM_PYTHON und NOTEBOOKLM_AUTH_JSON müssen in der privaten .env konfiguriert sein.</p>'
             : '';
+        if ($items === '') {
+            $items = '<p>Noch keine Tagesfolgen vorhanden.</p>';
+        }
         return <<<HTML
-        <section class="podcast" data-podcast-status="{$state->status}">
-            <h2>Podcast-Test</h2>
-            <p>Ein deutscher Testpodcast über die Erstellung von KI-Podcasts, erzeugt mit dem vorhandenen Google-Konto. Keine automatische Veröffentlichung.</p>
+        <section class="podcast" data-podcast-running="{$running}">
+            <h2>Podcast</h2>
+            <p>Tägliche Zeitung zum Anhören: alle Rubriken der ersten erfolgreichen Tagesausgabe, neueste Folge zuerst.</p>
             {$configuration}
-            <p class="podcast__status" role="status" aria-live="polite">{$message}</p>
-            <form id="podcastTest" method="post" action="/?view=podcast">
-                <input type="hidden" name="podcast_test" value="1">
-                <input type="hidden" name="podcast_token" value="{$escapedToken}">
-                <button type="submit"{$disabled}>Testpodcast erstellen</button>
-            </form>
-            {$audio}
-            <p class="podcast__note">Die Generierung nutzt das Google-Kontingent und dauert mehrere Minuten. Reloads starten keinen weiteren Auftrag. KI-Inhalte vor einer Veröffentlichung prüfen. Die Google-Anbindung ist inoffiziell.</p>
+            <p class="podcast__note">Einmal täglich nach dem Zeitungs-Scrape (Europe/Berlin). Ziel: etwa 15 Minuten; Google garantiert keine exakte Laufzeit. Die Google-Anbindung ist inoffiziell. KI-Inhalte können Fehler enthalten.</p>
+            <div class="podcast__episodes">{$items}</div>
         </section>
         <script src="/?asset=js/podcast.js" defer></script>
         HTML;

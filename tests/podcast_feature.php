@@ -63,94 +63,119 @@ try {
     $routed = (string) ob_get_clean();
     $_GET = [];
     $assert(
-        condition: str_contains($routed, 'Podcast-Test'),
+        condition: str_contains($routed, 'Tägliche Zeitung zum Anhören'),
         message: 'The public router must recognize the Podcast view.'
     );
 
     $podcast = new Podcast(rootDirectory: $directory, python: '', authentication: '');
     $assert(condition: !$podcast->configured(), message: 'Missing configuration must disable generation.');
-    $assert(condition: $podcast->status()->status === 'idle', message: 'A fresh installation must be idle.');
+    $assert(condition: $podcast->episodes() === [], message: 'A fresh installation must have an empty episode list.');
     ob_start();
-    $podcast->serveAudio();
+    $podcast->serveAudio('2026-11-15');
     $assert(condition: ob_get_clean() === '', message: 'Missing audio must not leak a filesystem error.');
     $assert(condition: http_response_code() === 404, message: 'Missing audio must return 404.');
-
     $podcast = new Podcast(
         rootDirectory: $directory,
         python: __DIR__ . '/fixtures/podcast_worker.py',
         authentication: 'private-test-session'
     );
-    $assert(condition: $podcast->configured(), message: 'A configured executable must enable generation.');
+    $stamp = (new DateTimeImmutable('2026-11-15 00:30:00', new DateTimeZone('Europe/Berlin')))->getTimestamp();
+    $html =
+        '<section><h2>Meldung des Tages</h2><p>Lead fixture</p><h2>Wochenübersicht</h2><p>Story fixture</p><h2>Lokales &amp; Regionales</h2><p>Local fixture</p><h2>Kryptowährungen</h2><p>Crypto fixture</p><h2>Wetter</h2><p>Weather fixture</p><h2>TV-Talkshows</h2><p>TV fixture</p><h2>Streaming-Serien</h2><p>Series fixture</p><h2>Streaming-Filme</h2><p>Film fixture</p><h2>Kino</h2><p>Cinema fixture</p><h2>Musik</h2><p>Music fixture</p><h2>Gaming</h2><p>Game fixture</p><a href="https://example.org/article?a=1&amp;b=2">Source</a></section>';
+    $podcast->generateDaily(newspaperHtml: $html, generatedAt: $stamp);
+    $day = $directory . '/.data/podcast/2026-11-15';
+    for ($attempt = 0; $attempt < 100 && $podcast->status('2026-11-15')->status === 'running'; $attempt++) {
+        usleep(50_000);
+    }
     $assert(
-        condition: !str_contains($podcast->render('csrf-token'), 'private-test-session'),
-        message: 'Authentication must never reach the page.'
+        condition: $podcast->status('2026-11-15')->hasAudio,
+        message: 'The background worker must finish the dated episode.'
+    );
+    $source = file_get_contents($day . '/source.txt');
+    foreach (
+        [
+            'Lead fixture',
+            'Story fixture',
+            'Local fixture',
+            'Crypto fixture',
+            'Weather fixture',
+            'TV fixture',
+            'Series fixture',
+            'Film fixture',
+            'Cinema fixture',
+            'Music fixture',
+            'Game fixture',
+            'https://example.org/article?a=1&b=2'
+        ]
+        as $content
+    ) {
+        $assert(
+            condition: str_contains($source, $content),
+            message: 'Every newspaper section and source URL must reach the briefing.'
+        );
+    }
+    $assert(condition: !str_contains($source, '<p>'), message: 'The source must be plain text.');
+    $podcast->generateDaily(newspaperHtml: '<p>Changed evening edition</p>', generatedAt: $stamp + 12 * 3600);
+    $assert(
+        condition: file_get_contents($day . '/source.txt') === $source,
+        message: 'A second scrape must preserve the first edition of the same Berlin day.'
     );
     $assert(
-        condition: str_contains($podcast->render('csrf-token'), 'name="podcast_token" value="csrf-token"'),
-        message: 'The form must carry a CSRF token.'
+        condition: file_get_contents($day . '/invocations') === '1',
+        message: 'A second scrape must not start another generation.'
+    );
+    $podcast->generateDaily(newspaperHtml: $html, generatedAt: $stamp + 86_400);
+    for ($attempt = 0; $attempt < 100 && $podcast->status('2026-11-16')->status === 'running'; $attempt++) {
+        usleep(50_000);
+    }
+    $episodes = $podcast->episodes();
+    $assert(
+        condition: count($episodes) === 2 && $episodes[0]->date === '2026-11-16',
+        message: 'Episodes must be retained and sorted newest first.'
     );
     $assert(
-        condition: str_contains($podcast->render(''), 'disabled'),
-        message: 'Generation must require application authentication.'
+        condition: substr_count(haystack: $podcast->render(), needle: '<audio ') === 2,
+        message: 'Each completed daily episode must be playable in the list.'
     );
-
-    mkdir(directory: $directory . '/.data/podcast', permissions: 0o700);
+    $assert(
+        condition: !str_contains($podcast->render(), 'private-test-session'),
+        message: 'The list must not expose authentication.'
+    );
+    file_put_contents(filename: $day . '/status.json', data: '{"stage":"auth_error","message":"private-test-session"}');
+    $assert(
+        condition: $podcast->status('2026-11-15')->status === 'error',
+        message: 'Authentication failures must be visible.'
+    );
+    $assert(
+        condition: !str_contains($podcast->render(), 'private-test-session'),
+        message: 'Raw provider errors must not reach the page.'
+    );
+    $podcast->generateDaily(newspaperHtml: $html, generatedAt: $stamp);
+    $assert(
+        condition: file_get_contents($day . '/invocations') === '1',
+        message: 'Uncertain or failed generations must not be retried blindly.'
+    );
+    file_put_contents(filename: $day . '/status.json', data: '{');
+    $assert(
+        condition: $podcast->status('2026-11-15')->status === 'error',
+        message: 'Corrupt state must not enable another generation.'
+    );
     $lock = fopen(filename: $directory . '/.data/podcast/generation.lock', mode: 'c+');
     flock($lock, LOCK_EX);
-    $podcast->generate();
-    $assert(condition: http_response_code() === 409, message: 'A concurrent generation must be refused.');
     $assert(
-        condition: !is_file($directory . '/.data/podcast/invocations'),
-        message: 'A refused generation must not invoke Python.'
+        condition: !$podcast->generateDaily(newspaperHtml: $html, generatedAt: $stamp + 4 * 86_400),
+        message: 'A concurrent launcher must not create another job.'
+    );
+    $assert(
+        condition: !is_dir($directory . '/.data/podcast/2026-11-19'),
+        message: 'A refused launch must leave no dated job.'
     );
     flock($lock, LOCK_UN);
     fclose($lock);
-
-    http_response_code(200);
-    $podcast->generate();
+    $podcast->generateDaily(newspaperHtml: '', generatedAt: $stamp + 2 * 86_400);
     $assert(
-        condition: $podcast->status()->status === 'completed',
-        message: 'A successful worker must expose the finished audio.'
-    );
-    $assert(condition: $podcast->status()->hasAudio, message: 'Completed generation must have audio.');
-    $assert(
-        condition: str_contains($podcast->render('csrf-token'), '<audio controls preload="metadata"'),
-        message: 'Completed audio must be playable.'
-    );
-    $assert(
-        condition: str_contains($podcast->render('csrf-token'), '/?podcast_audio=1'),
-        message: 'Audio must use an authenticated route.'
-    );
-    $podcast->generate();
-    $assert(
-        condition: file_get_contents($directory . '/.data/podcast/invocations') === '1',
-        message: 'Reloads and repeated submissions must not create another podcast.'
-    );
-    $assert(
-        condition: !str_contains(json_encode($podcast->status()), 'private-test-session'),
-        message: 'Public status must not expose authentication.'
-    );
-
-    unlink($directory . '/.data/podcast/test.m4a');
-    file_put_contents(
-        filename: $directory . '/.data/podcast/status.json',
-        data: '{"stage":"auth_error","message":"private-test-session"}'
-    );
-    $assert(condition: $podcast->status()->status === 'error', message: 'Authentication failures must be visible.');
-    $assert(
-        condition: !str_contains($podcast->render('csrf-token'), 'private-test-session'),
-        message: 'Raw worker errors must not be rendered.'
-    );
-    $podcast->generate();
-    $assert(
-        condition: file_get_contents($directory . '/.data/podcast/invocations') === '1',
-        message: 'Failed or uncertain jobs must not be repeated blindly.'
-    );
-
-    file_put_contents(filename: $directory . '/.data/podcast/status.json', data: '{');
-    $assert(
-        condition: $podcast->status()->status === 'error',
-        message: 'Corrupt state must not allow a second generation.'
+        condition: !is_dir($directory . '/.data/podcast/2026-11-17'),
+        message: 'An empty newspaper must not consume quota.'
     );
 
     $httpDirectory = $directory . '/http';
@@ -207,49 +232,55 @@ try {
         };
         $expiry = (string) (time() + 3600);
         $cookie = $expiry . '.' . hash_hmac('sha256', $expiry, $invoke(method: 'authCookieKey', password: $password));
-        [, $anonymous] = $request('/?podcast_audio=1');
+        [, $anonymous] = $request('/?podcast_audio=1&date=2026-11-15');
         $assert(
             condition: str_contains($anonymous, 'name="auth_password"'),
             message: 'Audio must be behind the login gate.'
         );
-        [, $page] = $request('/?view=podcast', $cookie);
-        preg_match('~name="podcast_token" value="([^"]+)"~', $page, $match);
-        $assert(condition: isset($match[1]), message: 'An authenticated page must expose its form token.');
-        [$code] = $request('/?view=podcast', $cookie, ['podcast_test' => '1']);
-        $assert(condition: $code === 403, message: 'A POST without a CSRF token must be rejected.');
-        $assert(
-            condition: !is_dir($httpDirectory . '/.data/podcast'),
-            message: 'A rejected POST must not start the worker.'
+        $httpPodcast = new Podcast(
+            rootDirectory: $httpDirectory,
+            python: __DIR__ . '/fixtures/podcast_worker.py',
+            authentication: 'private-test-session'
         );
-        [$code, $result] = $request('/?view=podcast', $cookie, ['podcast_test' => '1', 'podcast_token' => $match[1]]);
+        $httpPodcast->generateDaily(newspaperHtml: $html, generatedAt: $stamp);
+        for ($attempt = 0; $attempt < 100 && $httpPodcast->status('2026-11-15')->status === 'running'; $attempt++) {
+            usleep(50_000);
+        }
+        [, $page] = $request('/?view=podcast', $cookie);
         $assert(
-            condition: $code === 200 && json_decode(json: $result, associative: true)['hasAudio'],
-            message: 'An authenticated POST must complete the test.'
+            condition: str_contains($page, '15.11.2026'),
+            message: 'The authenticated list must show the episode date.'
+        );
+        $assert(
+            condition: !str_contains($page, 'podcast_test'),
+            message: 'The daily list must not offer a quota-consuming test POST.'
         );
         [, $status] = $request('/?podcast_status=1', $cookie);
         $assert(
-            condition: json_decode(json: $status, associative: true)['status'] === 'completed',
-            message: 'Reloads must recover the persisted status.'
+            condition: json_decode(json: $status, associative: true)[0]['status'] === 'completed',
+            message: 'The status API must expose daily episodes.'
         );
-        [$code, $audio] = $request('/?podcast_audio=1', $cookie);
+        [$code, $audio] = $request('/?podcast_audio=1&date=2026-11-15', $cookie);
         $assert(
             condition: $code === 200 && $audio === 'fixture audio',
             message: 'The authenticated audio route must return the stored bytes.'
         );
-        [$code, $part] = $request('/?podcast_audio=1', $cookie, range: 'bytes=0-6');
+        [$code] = $request('/?podcast_audio=1&date=../2026-11-15', $cookie);
+        $assert(condition: $code === 404, message: 'Audio dates must not permit directory traversal.');
+        [$code, $part] = $request('/?podcast_audio=1&date=2026-11-15', $cookie, range: 'bytes=0-6');
         $assert(
             condition: $code === 206 && $part === 'fixture',
             message: 'Audio seeking must return only the requested byte range.'
         );
-        [$code, $part] = $request('/?podcast_audio=1', $cookie, range: 'bytes=-5');
+        [$code, $part] = $request('/?podcast_audio=1&date=2026-11-15', $cookie, range: 'bytes=-5');
         $assert(condition: $code === 206 && $part === 'audio', message: 'Audio suffix ranges must be supported.');
-        [$code, $part] = $request('/?podcast_audio=1', $cookie, range: 'bytes=1000-');
+        [$code, $part] = $request('/?podcast_audio=1&date=2026-11-15', $cookie, range: 'bytes=1000-');
         $assert(
             condition: $code === 416 && $part === '',
             message: 'Unsatisfiable audio ranges must not return the entire file.'
         );
         $assert(
-            condition: !str_contains($page . $status . $result, 'private-test-session'),
+            condition: !str_contains($page . $status, 'private-test-session'),
             message: 'HTTP responses must not leak Google authentication.'
         );
     } finally {

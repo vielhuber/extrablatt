@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require dirname(__DIR__) . '/src/Extrablatt.php';
+require dirname(__DIR__) . '/src/Podcast.php';
 
 use vielhuber\extrablatt\Extrablatt;
 
@@ -61,6 +62,10 @@ file_put_contents(
     filename: $rootDirectory . '/.data/config.json',
     data: '{"papers":{"pnp":{"url":"https://www.pnp.de","label":"Passauer Neue Presse","rss":"https://www.pnp.de/sitemap-1.xml"}}}'
 );
+file_put_contents(
+    filename: $rootDirectory . '/.data/.env',
+    data: 'NOTEBOOKLM_PYTHON=' . __DIR__ . "/fixtures/podcast_worker.py\nNOTEBOOKLM_AUTH_JSON=private-test-session\n"
+);
 $application = new Extrablatt(rootDir: $rootDirectory);
 $invoke = static function (string $method, mixed ...$arguments) use ($application): mixed {
     return (new ReflectionMethod(objectOrMethod: $application, method: $method))->invoke($application, ...$arguments);
@@ -116,6 +121,25 @@ try {
         static function (string $message): void {}
     );
     $digest = json_decode(json: $invoke('cacheGet', 'daily_digest'), associative: true);
+    $date = (new DateTimeImmutable('@' . $digest['generated_at']))
+        ->setTimezone(new DateTimeZone('Europe/Berlin'))
+        ->format('Y-m-d');
+    $podcast = new \vielhuber\extrablatt\Podcast(
+        rootDirectory: $rootDirectory,
+        python: __DIR__ . '/fixtures/podcast_worker.py',
+        authentication: 'private-test-session'
+    );
+    for ($attempt = 0; $attempt < 100 && $podcast->status($date)->status === 'running'; $attempt++) {
+        usleep(50_000);
+    }
+    if (!$podcast->status($date)->hasAudio) {
+        throw new RuntimeException('A successful newspaper generation must automatically create its daily episode.');
+    }
+    $snapshot = file_get_contents($rootDirectory . '/.data/podcast/' . $date . '/source.txt');
+    $assertContains('Allgemeine Wochenmeldungen.', $snapshot);
+    $assertContains('steht der lokale Sport im Mittelpunkt.', $snapshot);
+    $assertContains('https://www.pnp.de/lokales/passau/sport', $snapshot);
+
     if (($digest['local']['count'] ?? null) !== 3) {
         throw new RuntimeException(message: 'Expected three eligible local headlines in the saved digest.');
     }
@@ -156,15 +180,29 @@ try {
         static function (string $message): void {}
     );
     $empty = json_decode(json: $invoke('cacheGet', 'daily_digest'), associative: true);
+    if (
+        file_get_contents($rootDirectory . '/.data/podcast/' . $date . '/source.txt') !== $snapshot ||
+        file_get_contents($rootDirectory . '/.data/podcast/' . $date . '/invocations') !== '1'
+    ) {
+        throw new RuntimeException(
+            'A second successful scrape on the same day must not replace or regenerate the first daily episode.'
+        );
+    }
+
     if (($empty['local'] ?? null) !== null) {
         throw new RuntimeException(message: 'Expected no local block without eligible news.');
     }
 } finally {
-    foreach (glob(pattern: $rootDirectory . '/.data/*') as $file) {
-        unlink(filename: $file);
+    foreach (
+        new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($rootDirectory, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        )
+        as $file
+    ) {
+        $file->isDir() ? rmdir($file->getPathname()) : unlink($file->getPathname());
     }
-    rmdir(directory: $rootDirectory . '/.data');
-    rmdir(directory: $rootDirectory);
+    rmdir($rootDirectory);
 }
 
 echo "Local digest tests passed\n";

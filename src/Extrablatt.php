@@ -567,24 +567,15 @@ final class Extrablatt
             $this->handleLogout();
             return;
         }
-        if (isset($_POST['podcast_test']) || isset($_GET['podcast_status']) || isset($_GET['podcast_audio'])) {
+        if (isset($_GET['podcast_status']) || isset($_GET['podcast_audio'])) {
             $podcast = $this->podcast();
             header('Cache-Control: private, no-store');
             if (isset($_GET['podcast_audio'])) {
-                $podcast->serveAudio();
+                $podcast->serveAudio(date: is_string($_GET['date'] ?? null) ? $_GET['date'] : '');
                 return;
             }
             header('Content-Type: application/json; charset=utf-8');
-            if (isset($_POST['podcast_test'])) {
-                $token = $this->podcastToken();
-                if ($token === '' || !hash_equals($token, (string) ($_POST['podcast_token'] ?? ''))) {
-                    http_response_code(403);
-                    echo json_encode(new PodcastStatus(status: 'error', message: 'Ungültiger Podcast-Testaufruf.', hasAudio: false));
-                    return;
-                }
-                $podcast->generate();
-            }
-            echo json_encode($podcast->status());
+            echo json_encode($podcast->episodes());
             return;
         }
         $customUrl = (string) ($_GET['url'] ?? '');
@@ -3939,15 +3930,6 @@ final class Extrablatt
     }
 
     /**
-     * Require both the existing application login and a purpose-bound POST token.
-     */
-    private function podcastToken(): string
-    {
-        $password = $this->loadEnv()['AUTH_PASSWORD'] ?? '';
-        return $password === '' ? '' : hash_hmac(algo: 'sha256', data: 'podcast-test', key: $this->authCookieKey($password));
-    }
-
-    /**
      * Bail-out gate for any entry point that depends on the AI provider.
      * Verifies provider/model/base URL are configured and that the host
      * answers any HTTP response within a short timeout. Emits a clear
@@ -7076,6 +7058,9 @@ final class Extrablatt
             key: 'daily_digest',
             value: (string) json_encode(value: $payload, flags: JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
+        if ($this->podcast()->generateDaily(newspaperHtml: $this->renderDigestHtml(), generatedAt: $payload['generated_at'])) {
+            $emit('  → Tagespodcast mit vollständiger Zeitung gestartet (Ziel: 15 Minuten)');
+        }
         $emit(sprintf(
             '  → %d Wochen-Stories aus %d Artikeln (%d heute, Meldung des Tages: %s, Krypto: %s, Wetter: %s, TV: %s, Medien: %d/%d Blöcke)',
             count(value: $items),
@@ -9286,7 +9271,7 @@ final class Extrablatt
                 . $nextHtml . '</nav>';
         }
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
-        $podcastBlock = $isPodcast ? $this->podcast()->render($this->podcastToken()) : '';
+        $podcastBlock = $isPodcast ? $this->podcast()->render() : '';
         // Keep the active media preset when the user submits another filter —
         // the tv preset persists via its own dropdown, media has no dropdown.
         $mediaHidden = $mediaFilter !== ''
@@ -9423,10 +9408,9 @@ HTML : '';
                 .viewnav__empty { font: 500 13px/1.5 Arial, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
                 .podcast { padding: 20px; border: 1px solid #d4d4d8; border-radius: 10px; line-height: 1.6; }
                 .podcast h2 { margin: 0 0 12px; font-size: 20px; }
-                .podcast button { padding: 12px 16px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font: 600 14px Arial, sans-serif; cursor: pointer; }
-                .podcast button:disabled { opacity: 0.5; cursor: default; }
+                .podcast__episode { padding: 18px 0; border-top: 1px solid #d4d4d8; }
+                .podcast__episode h3 { margin: 0; font-size: 16px; }
                 .podcast audio { display: block; width: 100%; margin-top: 20px; }
-                .podcast__status { font-weight: 600; }
                 .podcast__note { color: #71717a; font-size: 12px; }
                 .crypto__period + .crypto__period { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #d4d4d8; }
                 .crypto__period-title { margin: 0 0 1rem; font: 700 15px/1.2 Arial, sans-serif; color: #18181b; }
