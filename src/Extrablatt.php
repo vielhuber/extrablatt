@@ -567,6 +567,26 @@ final class Extrablatt
             $this->handleLogout();
             return;
         }
+        if (isset($_POST['podcast_test']) || isset($_GET['podcast_status']) || isset($_GET['podcast_audio'])) {
+            $podcast = $this->podcast();
+            header('Cache-Control: private, no-store');
+            if (isset($_GET['podcast_audio'])) {
+                $podcast->serveAudio();
+                return;
+            }
+            header('Content-Type: application/json; charset=utf-8');
+            if (isset($_POST['podcast_test'])) {
+                $token = $this->podcastToken();
+                if ($token === '' || !hash_equals($token, (string) ($_POST['podcast_token'] ?? ''))) {
+                    http_response_code(403);
+                    echo json_encode(new PodcastStatus(status: 'error', message: 'Ungültiger Podcast-Testaufruf.', hasAudio: false));
+                    return;
+                }
+                $podcast->generate();
+            }
+            echo json_encode($podcast->status());
+            return;
+        }
         $customUrl = (string) ($_GET['url'] ?? '');
         $paperFilter = (string) ($_GET['paper'] ?? '');
         $tvFilter = (string) ($_GET['tv'] ?? '');
@@ -643,7 +663,7 @@ final class Extrablatt
                 $thumbFilter = '';
             }
             $mediaViews = array_keys(array: $this->mediaTabs());
-            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'pnp', 'crypto'], $mediaViews), strict: true)) {
+            if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'pnp', 'crypto', 'podcast'], $mediaViews), strict: true)) {
                 $viewFilter = 'zeitung';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
@@ -3903,6 +3923,28 @@ final class Extrablatt
             $env[trim(string: $parts[0])] = trim(string: $parts[1], characters: " \t\n\r\0\x0B\"'");
         }
         return $env;
+    }
+
+    /**
+     * Bind the optional worker to this deployment's private configuration.
+     */
+    private function podcast(): Podcast
+    {
+        $environment = $this->loadEnv();
+        return new Podcast(
+            rootDirectory: $this->rootDir,
+            python: $environment['NOTEBOOKLM_PYTHON'] ?? '',
+            authentication: $environment['NOTEBOOKLM_AUTH_JSON'] ?? ''
+        );
+    }
+
+    /**
+     * Require both the existing application login and a purpose-bound POST token.
+     */
+    private function podcastToken(): string
+    {
+        $password = $this->loadEnv()['AUTH_PASSWORD'] ?? '';
+        return $password === '' ? '' : hash_hmac(algo: 'sha256', data: 'podcast-test', key: $this->authCookieKey($password));
     }
 
     /**
@@ -9141,12 +9183,13 @@ final class Extrablatt
         $isFactcheck = !$isSearch && $viewFilter === 'factcheck';
         $isBild = !$isSearch && $viewFilter === 'bild';
         $isCrypto = !$isSearch && $viewFilter === 'crypto';
+        $isPodcast = !$isSearch && $viewFilter === 'podcast';
         // "Talk-Shows" tab is active when the meldungen view is showing the
         // tv=all preset, the media tabs when media=<tab> is set; "Meldungen"
         // covers every other meldungen state.
-        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && $tvFilter === 'all';
-        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isTalkshowView && $mediaFilter !== '';
-        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isTalkshowView && !$isMediaView;
+        $isTalkshowView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isPodcast && $tvFilter === 'all';
+        $isMediaView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isPodcast && !$isTalkshowView && $mediaFilter !== '';
+        $isMeldungenView = !$isSearch && !$isZeitung && !$isFactcheck && !$isBild && !$isPnp && !$isCrypto && !$isPodcast && !$isTalkshowView && !$isMediaView;
         $zeitungActive = $isZeitung ? ' viewnav__tab--active' : '';
         $meldungenActive = $isMeldungenView ? ' viewnav__tab--active' : '';
         $talkshowActive = $isTalkshowView ? ' viewnav__tab--active' : '';
@@ -9154,6 +9197,7 @@ final class Extrablatt
         $bildActive = $isBild ? ' viewnav__tab--active' : '';
         $pnpActive = $isPnp ? ' viewnav__tab--active' : '';
         $cryptoActive = $isCrypto ? ' viewnav__tab--active' : '';
+        $podcastActive = $isPodcast ? ' viewnav__tab--active' : '';
         $mediaTabHtml = [];
         foreach ($this->mediaTabs() as $tabKey => $tab) {
             $mediaActive = $isMediaView && $mediaFilter === $tabKey ? ' viewnav__tab--active' : '';
@@ -9186,11 +9230,14 @@ final class Extrablatt
         if ($isCrypto) {
             $activeTabLabel = 'Crypto';
         }
+        if ($isPodcast) {
+            $activeTabLabel = 'Podcast';
+        }
         // Bottom pager: leaf through the editorial and personal-data tabs
         // like turning newspaper pages. Order must match the tab row in the
         // template below; search mode has no active tab and gets no pager.
         // c't stays out: it's a reference archive, not a page of the paper.
-        $navOrder = ['zeitung', 'hackernews', 'bild', 'pnp', 'reddit', 'x', 'medium', 'meldungen', 'crypto'];
+        $navOrder = ['zeitung', 'hackernews', 'bild', 'pnp', 'reddit', 'x', 'medium', 'meldungen', 'crypto', 'podcast'];
         $activeView = '';
         if ($isZeitung) {
             $activeView = 'zeitung';
@@ -9216,6 +9263,9 @@ final class Extrablatt
         if ($isCrypto) {
             $activeView = 'crypto';
         }
+        if ($isPodcast) {
+            $activeView = 'podcast';
+        }
         $pagerHtml = '';
         $navPosition = array_search(needle: $activeView, haystack: $navOrder, strict: true);
         if ($navPosition !== false) {
@@ -9236,6 +9286,7 @@ final class Extrablatt
                 . $nextHtml . '</nav>';
         }
         $zeitungBlock = $isZeitung ? ($digestHtml !== '' ? $digestHtml : '<p class="viewnav__empty">Noch keine Zeitung verfügbar – beim nächsten Scrape wird sie erzeugt.</p>') : '';
+        $podcastBlock = $isPodcast ? $this->podcast()->render($this->podcastToken()) : '';
         // Keep the active media preset when the user submits another filter —
         // the tv preset persists via its own dropdown, media has no dropdown.
         $mediaHidden = $mediaFilter !== ''
@@ -9370,6 +9421,13 @@ HTML : '';
                 nav.viewnav .viewnav__tab:hover { color: #18181b; }
                 nav.viewnav .viewnav__tab--active { color: #18181b; border-bottom-color: #18181b; }
                 .viewnav__empty { font: 500 13px/1.5 Arial, sans-serif; color: #71717a; padding: 1.2rem 0; margin: 0; }
+                .podcast { padding: 20px; border: 1px solid #d4d4d8; border-radius: 10px; line-height: 1.6; }
+                .podcast h2 { margin: 0 0 12px; font-size: 20px; }
+                .podcast button { padding: 12px 16px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font: 600 14px Arial, sans-serif; cursor: pointer; }
+                .podcast button:disabled { opacity: 0.5; cursor: default; }
+                .podcast audio { display: block; width: 100%; margin-top: 20px; }
+                .podcast__status { font-weight: 600; }
+                .podcast__note { color: #71717a; font-size: 12px; }
                 .crypto__period + .crypto__period { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #d4d4d8; }
                 .crypto__period-title { margin: 0 0 1rem; font: 700 15px/1.2 Arial, sans-serif; color: #18181b; }
                 .crypto__kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
@@ -9627,6 +9685,7 @@ HTML : '';
                         {$mediaTabHtml['medium']}
                         <a class="viewnav__tab{$meldungenActive}" href="/?view=meldungen">Meldungen</a>
                         <a class="viewnav__tab{$cryptoActive}" href="/?view=crypto">Crypto</a>
+                        <a class="viewnav__tab{$podcastActive}" href="/?view=podcast">Podcast</a>
                         {$mediaTabHtml['ct']}
                         <a class="viewnav__tab{$talkshowActive}" href="/?view=talkshows">Talk-Shows</a>
                         {$mediaTabHtml['serien']}
@@ -9641,6 +9700,7 @@ HTML : '';
                 {$factcheckBlock}
                 {$bildBlock}
                 {$cryptoBlock}
+                {$podcastBlock}
                 {$searchBlock}
                 {$pagerHtml}
             </main>

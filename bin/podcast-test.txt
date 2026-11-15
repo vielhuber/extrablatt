@@ -1,0 +1,13 @@
+Thema: Wie ein kurzer KI-Podcast aus verlässlichen Quellen entsteht.
+
+Ein KI-Podcast ist mehr als ein vorgelesener Text. Ein Generator verdichtet Informationen und entwickelt daraus eine hörbare Erzählung oder einen Dialog. Dabei können Details verändert werden. Deshalb muss das Ergebnis mit den verwendeten Quellen abgeglichen werden.
+
+Am Anfang steht eine konkrete Frage. Für eine kurze Folge ist beispielsweise die Frage geeignet, wie man aus drei Artikeln ein verständliches Briefing erstellt. Bei aktuellen Ereignissen sollte der betrachtete Zeitraum genannt werden. Widersprechen sich Quellen, muss dieser Widerspruch erhalten bleiben, statt scheinbare Gewissheit zu erzeugen.
+
+Ein kurzes Skript braucht einen Einstieg, wenige Kernaussagen und ein Fazit. Eine Person kann erklären, während eine andere Rückfragen stellt. Zahlen, Namen und Zitate sollten vor der Vertonung geprüft werden. Unbekanntes darf nicht erfunden werden. Für einen technischen Test eignet sich eigenes Material ohne private Daten und ohne fremde Textpassagen.
+
+Nach der Erzeugung wird die ganze Folge angehört. Zu prüfen sind Inhalt, Aussprache, Aussetzer und unerwünschte Wiederholungen. Die gewünschte Laufzeit ist bei generativen Systemen nur ein Richtwert.
+
+Ein kleiner Shared Host muss das Sprachmodell nicht selbst ausführen. Er übermittelt Material an einen externen Dienst und lädt dessen fertige Audiodatei herunter. Ein heruntergeladenes Hörstück kann privat angehört werden. Für eine öffentlich abonnierbare Serie wären zusätzlich Hosting und ein RSS-Feed nötig.
+
+Dieser Test veröffentlicht nichts automatisch. Gute Quellen, ein enger Fokus und eine abschließende menschliche Kontrolle sind wichtiger als viele Stimmen oder Effekte.

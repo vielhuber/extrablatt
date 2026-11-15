@@ -60,6 +60,20 @@ Personal measurements, watch synchronisation and the former `Gesundheit` tab now
 php -S 127.0.0.1:8080 -t .
 ```
 
+## podcast test
+
+The `Podcast` tab after `Crypto` contains one manually started German test generation and an authenticated audio player. It does not run during scrapes or publish anything. Reloading the page or submitting the form again never starts a second generation. An incomplete or failed job is kept for inspection, not silently retried.
+
+The optional worker requires Python 3.10+ with `notebooklm-py==0.8.6` in an isolated virtual environment (no browser is required on the web host). Configure these values only in the consuming installation's private `.data/.env`:
+
+- `NOTEBOOKLM_PYTHON`: the absolute path to that environment's Python executable.
+- `NOTEBOOKLM_AUTH_JSON`: the Google session as a single-line Playwright storage-state JSON object, obtained through a separate authenticated login. Do not commit it, copy it into JavaScript, or pass it through request URLs. This is not a Google Cloud API key.
+- `AUTH_PASSWORD`: required to enable test generation, even if the rest of the installation permits anonymous reading.
+
+The worker receives the Google session through its process environment and does not persist a separate credential file. Inline authentication cannot persist refreshed cookies, so the session may need to be replaced in `.data/.env` later. Keep this file private (0600). Runtime job metadata and the audio live under the protected `.data/podcast/` directory; only the existing application login can access status and audio routes. Do not expose that directory through the web server.
+
+This integration uses [notebooklm-py](https://github.com/teng-lin/notebooklm-py), not an officially supported Google API. Available generations depend on the account's shared five-hour and weekly compute budgets, not a guaranteed fixed number of podcasts. The requested short German format does not guarantee a precise duration.
+
 ## cron
 
 ```cron
