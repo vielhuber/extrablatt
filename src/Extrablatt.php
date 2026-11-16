@@ -655,7 +655,7 @@ final class Extrablatt
             }
             $mediaViews = array_keys(array: $this->mediaTabs());
             if (!in_array(needle: $viewFilter, haystack: array_merge(['zeitung', 'meldungen', 'talkshows', 'factcheck', 'bild', 'pnp', 'crypto', 'podcast'], $mediaViews), strict: true)) {
-                $viewFilter = 'zeitung';
+                $viewFilter = 'podcast';
             }
             // "talkshows" view is a Meldungen shortcut: forces tv=all and
             // magic=all, so a fresh click lands directly on the unfiltered

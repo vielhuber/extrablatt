@@ -71,6 +71,15 @@ try {
         message: 'The public router must recognize the Podcast view.'
     );
 
+    ob_start();
+    $application->run();
+    $home = (string) ob_get_clean();
+    $assert(
+        condition: str_contains($home, 'viewnav__tab--active" href="/?view=podcast">Podcast</a>') &&
+            str_contains($home, '<section class="podcast"'),
+        message: 'The homepage must open Podcast.'
+    );
+
     $podcast = new Podcast(rootDirectory: $directory, python: '', authentication: '');
     $assert(condition: !$podcast->configured(), message: 'Missing configuration must disable generation.');
     $assert(condition: $podcast->episodes() === [], message: 'A fresh installation must have an empty episode list.');
@@ -254,6 +263,18 @@ try {
         $assert(
             condition: str_contains($page, '15.11.2026'),
             message: 'The authenticated list must show the episode date.'
+        );
+        [, $home] = $request('/', $cookie);
+        $assert(
+            condition: str_contains($home, 'viewnav__tab--active" href="/?view=podcast">Podcast</a>') &&
+                str_contains($home, '15.11.2026'),
+            message: 'The authenticated homepage must show the Podcast archive.'
+        );
+        [, $newspaper] = $request('/?view=zeitung', $cookie);
+        $assert(
+            condition: str_contains($newspaper, 'viewnav__tab--active" href="/?view=zeitung">Zeitung</a>') &&
+                !str_contains($newspaper, '<section class="podcast"'),
+            message: 'The explicit Zeitung route must remain available.'
         );
         $assert(
             condition: !str_contains($page, 'podcast_test'),
