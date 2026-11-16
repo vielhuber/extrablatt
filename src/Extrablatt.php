@@ -9411,7 +9411,6 @@ HTML : '';
                 .podcast__episode { padding: 18px 0; border-top: 1px solid #d4d4d8; }
                 .podcast__episode h3 { margin: 0; font-size: 16px; }
                 .podcast audio { display: block; width: 100%; margin-top: 20px; }
-                .podcast__note { color: #71717a; font-size: 12px; }
                 .crypto__period + .crypto__period { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #d4d4d8; }
                 .crypto__period-title { margin: 0 0 1rem; font: 700 15px/1.2 Arial, sans-serif; color: #18181b; }
                 .crypto__kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 1.25rem; }

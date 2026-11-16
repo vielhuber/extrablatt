@@ -52,6 +52,11 @@ try {
         message: 'Podcast must not display news filters.'
     );
     $assert(
+        condition: !str_contains($dashboard, 'Tägliche Zeitung zum Anhören') &&
+            !str_contains($dashboard, 'Einmal täglich nach dem Zeitungs-Scrape'),
+        message: 'Podcast must not display introductory prose.'
+    );
+    $assert(
         condition: str_contains($dashboard, 'NOTEBOOKLM_AUTH_JSON'),
         message: 'Missing configuration must be explained.'
     );
@@ -67,7 +72,7 @@ try {
     $routed = (string) ob_get_clean();
     $_GET = [];
     $assert(
-        condition: str_contains($routed, 'Tägliche Zeitung zum Anhören'),
+        condition: str_contains($routed, '<section class="podcast"'),
         message: 'The public router must recognize the Podcast view.'
     );
 
@@ -151,6 +156,10 @@ try {
         message: 'Each completed daily episode must be playable in the list.'
     );
     $assert(
+        condition: !str_contains($podcast->render(), 'Die Tagesfolge ist bereit.'),
+        message: 'Completed episodes must show their player without a ready message.'
+    );
+    $assert(
         condition: !str_contains($podcast->render(), 'private-test-session'),
         message: 'The list must not expose authentication.'
     );
@@ -158,6 +167,10 @@ try {
     $assert(
         condition: $podcast->status('2026-11-15')->status === 'error',
         message: 'Authentication failures must be visible.'
+    );
+    $assert(
+        condition: str_contains($podcast->render(), 'Google-Anmeldung fehlgeschlagen.'),
+        message: 'Removing successful status prose must preserve actionable errors.'
     );
     $assert(
         condition: !str_contains($podcast->render(), 'private-test-session'),

@@ -230,7 +230,7 @@ final class Podcast
         $items = '';
         foreach ($episodes as $episode) {
             $dateLabel = (new \DateTimeImmutable($episode->date))->format('d.m.Y');
-            $message = htmlspecialchars($episode->message, ENT_QUOTES);
+            $message = $episode->hasAudio ? '' : '<p>' . htmlspecialchars($episode->message, ENT_QUOTES) . '</p>';
             $audio = $episode->hasAudio
                 ? '<audio controls preload="none" aria-label="Zeitung vom ' .
                     $dateLabel .
@@ -243,9 +243,8 @@ final class Podcast
                 $episode->date .
                 '">' .
                 $dateLabel .
-                '</time></h3><p>' .
+                '</time></h3>' .
                 $message .
-                '</p>' .
                 $audio .
                 '</article>';
             if ($episode->status === 'running') {
@@ -266,9 +265,7 @@ final class Podcast
         return <<<HTML
         <section class="podcast" data-podcast-running="{$running}">
             <h2>Podcast</h2>
-            <p>Tägliche Zeitung zum Anhören: alle Rubriken der ersten erfolgreichen Tagesausgabe, neueste Folge zuerst.</p>
             {$configuration}
-            <p class="podcast__note">Einmal täglich nach dem Zeitungs-Scrape (Europe/Berlin). Ziel: etwa 15 Minuten; Google garantiert keine exakte Laufzeit. Die Google-Anbindung ist inoffiziell. KI-Inhalte können Fehler enthalten.</p>
             <div class="podcast__episodes">{$items}</div>
         </section>
         <script src="/?asset=js/podcast.js&amp;v={$scriptVersion}" defer></script>
